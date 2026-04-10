@@ -1,0 +1,18 @@
+"""
+Coypu-Feeder — entry point (run from project root).
+"""
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
+from gui.app import App
+
+
+def main():
+    app = App()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -112,7 +112,7 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _parse_and_display_tracks(self, overpass_data: dict):
-        from ..osm.parser import parse_tracks
+        from osm.parser import parse_tracks
         self._tracks = parse_tracks(overpass_data)
         self.track_panel.populate(self._tracks)
         n = len(self._tracks)
@@ -136,13 +136,13 @@ class App(ctk.CTk):
 
     def _process_and_export(self, selected_tracks, settings: dict, filepath: str):
         import numpy as np
-        from ..geometry.projection import wgs84_to_projected, auto_utm_epsg
-        from ..geometry.alignment import fit_alignment
-        from ..geometry.elevation import (
+        from geometry.projection import wgs84_to_projected, auto_utm_epsg
+        from geometry.alignment import fit_alignment
+        from geometry.elevation import (
             interpolate_along_alignment, sample_elevations, fit_vertical_geometry,
         )
-        from ..geometry.curvature import compute_chainages
-        from ..landxml.builder import build_landxml, write_landxml
+        from geometry.curvature import compute_chainages
+        from landxml.builder import build_landxml, write_landxml
 
         epsg = settings["epsg"]
         smooth_window = settings["smooth_window"]

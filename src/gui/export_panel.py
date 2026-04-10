@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Callable
 import customtkinter as ctk
-from ..geometry.projection import CRS_PRESETS
+from geometry.projection import CRS_PRESETS
 
 
 class ExportPanel(ctk.CTkFrame):

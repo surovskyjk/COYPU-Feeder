@@ -99,7 +99,7 @@ class SearchPanel(ctk.CTkFrame):
 
         def worker():
             try:
-                from ..osm.query import search_railways_by_name
+                from osm.query import search_railways_by_name
                 results = search_railways_by_name(name)
                 self.after(0, lambda: self._populate_results(results))
             except Exception as exc:
@@ -124,7 +124,7 @@ class SearchPanel(ctk.CTkFrame):
 
         def worker():
             try:
-                from ..osm.query import fetch_bbox_ways
+                from osm.query import fetch_bbox_ways
                 data = fetch_bbox_ways(south, west, north, east)
                 info = {"id": None, "name": "Bbox selection", "network": "", "operator": ""}
                 self.after(0, lambda: self._on_result(data, info))
@@ -140,7 +140,7 @@ class SearchPanel(ctk.CTkFrame):
 
         def worker():
             try:
-                from ..osm.query import fetch_relation_ways, fetch_relation_metadata
+                from osm.query import fetch_relation_ways, fetch_relation_metadata
                 data = fetch_relation_ways(relation_id)
                 info = fetch_relation_metadata(relation_id) or {"id": relation_id, "name": str(relation_id)}
                 self.after(0, lambda: self._on_result(data, info))
