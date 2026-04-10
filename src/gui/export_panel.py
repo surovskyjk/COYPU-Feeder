@@ -112,6 +112,26 @@ class ExportPanel(ctk.CTkFrame):
         self._vc_entry.grid(row=row, column=0, sticky="ew", padx=10, pady=(0, 10))
         row += 1
 
+        # --- Force positive coordinates ---
+        ctk.CTkLabel(self, text="─" * 30, text_color="gray").grid(row=row, column=0, pady=2)
+        row += 1
+
+        self._force_positive_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self,
+            text="Force all coordinates positive",
+            variable=self._force_positive_var,
+            font=("Helvetica", 11),
+        ).grid(row=row, column=0, sticky="w", padx=10, pady=(6, 2))
+        row += 1
+        ctk.CTkLabel(
+            self,
+            text="Adds a translation offset so no X or Y value\nis negative. Offset is noted in the file.",
+            text_color="gray", font=("Helvetica", 9),
+            justify="left", anchor="w",
+        ).grid(row=row, column=0, sticky="w", padx=18, pady=(0, 8))
+        row += 1
+
         # --- Export button ---
         ctk.CTkLabel(self, text="─" * 30, text_color="gray").grid(row=row, column=0, pady=2)
         row += 1
@@ -183,4 +203,5 @@ class ExportPanel(ctk.CTkFrame):
             "sample_interval": _float(self._sample_entry, 20.0),
             "min_element_length": _float(self._min_len_entry, 10.0),
             "vc_length": _float(self._vc_entry, 100.0),
+            "force_positive": self._force_positive_var.get(),
         }

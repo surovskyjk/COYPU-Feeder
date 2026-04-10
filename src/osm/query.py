@@ -77,6 +77,63 @@ out body;
     return _run_query(query)
 
 
+def search_relations_in_bbox(
+    south: float, west: float, north: float, east: float
+) -> list[dict]:
+    """
+    Search for railway route relations whose geometry intersects a bounding box.
+    Returns relation metadata (id, name, ref, from, to, network).
+    """
+    query = f"""
+[out:json][timeout:30];
+relation["type"="route"]["route"="railway"]({south},{west},{north},{east});
+out tags;
+"""
+    data = _run_query(query)
+    results = []
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        results.append({
+            "id": el["id"],
+            "name": tags.get("name", f"Relation {el['id']}"),
+            "ref": tags.get("ref", ""),
+            "network": tags.get("network", ""),
+            "operator": tags.get("operator", ""),
+            "from": tags.get("from", ""),
+            "to": tags.get("to", ""),
+        })
+    return results
+
+
+def search_by_ref(ref: str) -> list[dict]:
+    """
+    Search for railway route relations by timetable/line reference number.
+    Matches the OSM 'ref' tag exactly (case-insensitive).
+    Returns a list of relation metadata dicts.
+    """
+    # Escape special regex characters in ref
+    safe_ref = ref.strip().replace(".", r"\.").replace("+", r"\+")
+    query = f"""
+[out:json][timeout:30];
+relation["type"="route"]["route"="railway"]["ref"~"^{safe_ref}$",i];
+out tags;
+"""
+    data = _run_query(query)
+    results = []
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        results.append({
+            "id": el["id"],
+            "name": tags.get("name", f"Relation {el['id']}"),
+            "ref": tags.get("ref", ""),
+            "network": tags.get("network", ""),
+            "operator": tags.get("operator", ""),
+            "from": tags.get("from", ""),
+            "to": tags.get("to", ""),
+        })
+    return results
+
+
 def fetch_bbox_ways(south: float, west: float, north: float, east: float) -> dict:
     """
     Fetch all railway ways within a bounding box.

@@ -46,9 +46,28 @@ class SearchPanel(ctk.CTkFrame):
         tab.grid_columnconfigure(0, weight=1)
         row = 0
 
+        # --- Line number search ---
+        ctk.CTkLabel(tab, text="By timetable line number:", font=("Helvetica", 12, "bold")).grid(
+            row=row, column=0, sticky="w", padx=6, pady=(8, 2)
+        )
+        row += 1
+        ref_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ref_frame.grid(row=row, column=0, sticky="ew", padx=6, pady=(0, 4))
+        ref_frame.grid_columnconfigure(0, weight=1)
+        self._ref_entry = ctk.CTkEntry(ref_frame, placeholder_text="e.g. 220  or  010")
+        self._ref_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._ref_entry.bind("<Return>", lambda e: self._search_by_ref())
+        self._ref_btn = ctk.CTkButton(ref_frame, text="Search", width=70,
+                                      command=self._search_by_ref)
+        self._ref_btn.grid(row=0, column=1)
+        row += 1
+
+        ctk.CTkLabel(tab, text="─" * 28, text_color="gray").grid(row=row, column=0, pady=2)
+        row += 1
+
         # --- Name search ---
         ctk.CTkLabel(tab, text="By name:", font=("Helvetica", 12, "bold")).grid(
-            row=row, column=0, sticky="w", padx=6, pady=(8, 2)
+            row=row, column=0, sticky="w", padx=6, pady=(4, 2)
         )
         row += 1
         self._name_entry = ctk.CTkEntry(tab, placeholder_text="e.g. Praha–Brno")
@@ -190,6 +209,25 @@ class SearchPanel(ctk.CTkFrame):
     # Search actions
     # ------------------------------------------------------------------
 
+    def _search_by_ref(self):
+        ref = self._ref_entry.get().strip()
+        if not ref:
+            return
+        self._ref_btn.configure(state="disabled", text="…")
+        self._clear_results()
+
+        def worker():
+            try:
+                from osm.query import search_by_ref
+                results = search_by_ref(ref)
+                self.after(0, lambda: self._populate_results(results))
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("Search error", str(exc)))
+            finally:
+                self.after(0, lambda: self._ref_btn.configure(state="normal", text="Search"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _search_by_name(self):
         name = self._name_entry.get().strip()
         if not name:
@@ -208,6 +246,11 @@ class SearchPanel(ctk.CTkFrame):
                 self.after(0, lambda: self._search_btn.configure(state="normal", text="Search"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def populate_bbox_results(self, results: list[dict]):
+        """Called by app after 'Find railways in bbox' completes."""
+        self._tabs.set("Search")
+        self._populate_results(results)
 
     def _fetch_by_relation(self):
         rel_text = self._rel_entry.get().strip()
