@@ -95,16 +95,37 @@ def _fit_element(
 
 
 def _fit_line(pts: np.ndarray, sta_start: float, length: float) -> dict:
-    start_pt = pts[0].tolist()
-    end_pt = pts[-1].tolist()
-    direction = np.arctan2(pts[-1][1] - pts[0][1], pts[-1][0] - pts[0][0])
+    """
+    Least-squares line fit via SVD/PCA so the element is a clean straight
+    line through the point cloud, not just first-to-last raw OSM nodes.
+    """
+    centroid = pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(pts - centroid, full_matrices=False)
+    direction_vec = vt[0]  # unit vector along principal axis
+
+    # Project all points onto the principal axis
+    projections = (pts - centroid) @ direction_vec
+
+    # Preserve traversal direction (match the sign of the original polyline)
+    polyline_dir = pts[-1] - pts[0]
+    if np.dot(polyline_dir, direction_vec) < 0:
+        direction_vec = -direction_vec
+        projections = -projections
+
+    t_start = projections[0]
+    t_end = projections[-1]
+    start_pt = (centroid + t_start * direction_vec).tolist()
+    end_pt = (centroid + t_end * direction_vec).tolist()
+    actual_length = abs(t_end - t_start)
+    direction = float(np.arctan2(direction_vec[1], direction_vec[0]))
+
     return {
         "type": "Line",
         "sta_start": sta_start,
-        "length": length,
+        "length": actual_length if actual_length > 0.1 else length,
         "start": start_pt,
         "end": end_pt,
-        "direction_rad": float(direction),
+        "direction_rad": direction,
     }
 
 

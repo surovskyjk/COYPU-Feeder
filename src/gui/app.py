@@ -53,7 +53,7 @@ class App(ctk.CTk):
         self.search_panel = SearchPanel(left_frame, on_result=self._on_railway_selected)
         self.search_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=(5, 2))
 
-        self.track_panel = TrackPanel(left_frame)
+        self.track_panel = TrackPanel(left_frame, on_highlight=self._on_track_highlight)
         self.track_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2, 5))
 
         # Centre column: map
@@ -80,7 +80,10 @@ class App(ctk.CTk):
         """Called when the user selects a railway and data is fetched."""
         self._overpass_data = overpass_data
         self._parse_and_display_tracks(overpass_data)
-        self.map_panel.show_relation(overpass_data)
+
+    def _on_track_highlight(self, idx):
+        """Forward track highlight request to the map panel."""
+        self.map_panel.highlight_track(idx)
 
     def _on_bbox_selected(self, bbox: tuple[float, float, float, float]):
         """Called when the user finishes drawing a bounding box on the map."""
@@ -115,6 +118,7 @@ class App(ctk.CTk):
         from osm.parser import parse_tracks
         self._tracks = parse_tracks(overpass_data)
         self.track_panel.populate(self._tracks)
+        self.map_panel.show_tracks(self._tracks)
         n = len(self._tracks)
         self._set_status(f"Found {n} track{'s' if n != 1 else ''}. Select tracks and configure export.")
 
