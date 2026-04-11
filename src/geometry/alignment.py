@@ -25,7 +25,10 @@ def fit_alignment(
     smooth_window: int = 21,
     line_tol: float = 0.001,
     arc_tol: float = 0.0002,
-    min_element_length: float = 10.0,
+    min_element_length: float = 10.0,   # legacy fallback (used when per-type not given)
+    min_line_length: float | None = None,
+    min_arc_length: float | None = None,
+    min_spiral_length: float | None = None,
 ) -> list[dict]:
     """
     Fit geometric elements to a 2D polyline.
@@ -36,7 +39,10 @@ def fit_alignment(
     smooth_window : Savitzky-Golay window size for curvature smoothing.
     line_tol : curvature threshold (1/m) below which a segment is a Line.
     arc_tol : max κ variation (1/m) for a segment to be an Arc.
-    min_element_length : minimum element length in metres.
+    min_element_length : fallback minimum element length in metres (all types).
+    min_line_length : minimum Line element length (overrides min_element_length).
+    min_arc_length : minimum Arc element length (overrides min_element_length).
+    min_spiral_length : minimum Spiral element length (overrides min_element_length).
 
     Returns
     -------
@@ -44,6 +50,10 @@ def fit_alignment(
       type, start_station, end_station, length,
       and type-specific fields (radius, rot, spiral params, etc.)
     """
+    eff_line = min_line_length if min_line_length is not None else min_element_length
+    eff_arc = min_arc_length if min_arc_length is not None else min_element_length
+    eff_spiral = min_spiral_length if min_spiral_length is not None else min_element_length
+
     kappa = compute_curvature(xy)
     kappa_smooth = smooth_curvature(kappa, window=smooth_window)
     chainages = compute_chainages(xy)
@@ -51,7 +61,9 @@ def fit_alignment(
         kappa_smooth, chainages,
         line_tol=line_tol,
         arc_tol=arc_tol,
-        min_length=min_element_length,
+        min_line_length=eff_line,
+        min_arc_length=eff_arc,
+        min_spiral_length=eff_spiral,
     )
 
     elements = []
@@ -60,6 +72,7 @@ def fit_alignment(
         if el is not None:
             elements.append(el)
 
+    elements = enforce_continuity(elements)
     return elements
 
 
@@ -197,6 +210,61 @@ def _fit_spiral(
         "clothoid_A": A,
         "rot": rot,
     }
+
+
+# ---------------------------------------------------------------------------
+# Radius continuity enforcement
+# ---------------------------------------------------------------------------
+
+def enforce_continuity(elements: list[dict]) -> list[dict]:
+    """
+    Enforce radius continuity at element boundaries.
+
+    Railway horizontal geometry must follow the pattern:
+      LINE – SPIRAL – ARC – SPIRAL – LINE
+
+    At each boundary the spiral's radius must match the adjacent element:
+      LINE  → SPIRAL  : spiral radius_start = INF
+      SPIRAL → ARC    : spiral radius_end   = arc radius
+      ARC   → SPIRAL  : spiral radius_start = arc radius
+      SPIRAL → LINE   : spiral radius_end   = INF
+
+    After adjusting radii, clothoid_A is recomputed as √(R_finite × L).
+    """
+    if len(elements) < 2:
+        return elements
+
+    for i, el in enumerate(elements):
+        if el["type"] != "Spiral":
+            continue
+
+        prev = elements[i - 1] if i > 0 else None
+        nxt = elements[i + 1] if i < len(elements) - 1 else None
+
+        # --- radius_start: determined by predecessor ---
+        if prev is not None:
+            if prev["type"] == "Line":
+                el["radius_start"] = float("inf")
+            elif prev["type"] == "Arc":
+                el["radius_start"] = prev["radius"]
+            # Spiral → Spiral: leave as-is
+
+        # --- radius_end: determined by successor ---
+        if nxt is not None:
+            if nxt["type"] == "Line":
+                el["radius_end"] = float("inf")
+            elif nxt["type"] == "Arc":
+                el["radius_end"] = nxt["radius"]
+
+        # Recompute clothoid parameter A = √(R_finite × L)
+        r_start = el.get("radius_start", float("inf"))
+        r_end = el.get("radius_end", float("inf"))
+        finite_radii = [r for r in (r_start, r_end) if not (r == float("inf") or r > 1e8)]
+        if finite_radii:
+            r_finite = min(finite_radii)
+            el["clothoid_A"] = float(np.sqrt(r_finite * el["length"]))
+
+    return elements
 
 
 # ---------------------------------------------------------------------------

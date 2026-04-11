@@ -70,7 +70,10 @@ def segment_curvature(
     chainages: np.ndarray,
     line_tol: float = 0.001,    # 1/m — below this is a straight line
     arc_tol: float = 0.0002,    # 1/m — max κ variation for constant arc
-    min_length: float = 5.0,    # m  — merge segments shorter than this
+    min_length: float = 5.0,    # m  — merge segments shorter than this (legacy)
+    min_line_length: float = 5.0,
+    min_arc_length: float = 5.0,
+    min_spiral_length: float = 5.0,
 ) -> list[dict]:
     """
     Segment the curvature profile into element types.
@@ -130,7 +133,12 @@ def segment_curvature(
         })
         i = j
 
-    return _merge_short_segments(segments, chainages, min_length)
+    min_length_map = {
+        ElementType.LINE: min_line_length,
+        ElementType.ARC: min_arc_length,
+        ElementType.SPIRAL: min_spiral_length,
+    }
+    return _merge_short_segments(segments, chainages, min_length_map)
 
 
 def _classify_point(k: float, line_tol: float) -> ElementType:
@@ -138,9 +146,11 @@ def _classify_point(k: float, line_tol: float) -> ElementType:
 
 
 def _merge_short_segments(
-    segments: list[dict], chainages: np.ndarray, min_length: float
+    segments: list[dict],
+    chainages: np.ndarray,
+    min_length_map: dict,
 ) -> list[dict]:
-    """Merge segments shorter than min_length into their neighbour."""
+    """Merge segments shorter than their per-type minimum into their neighbour."""
     if not segments:
         return segments
 
@@ -151,7 +161,8 @@ def _merge_short_segments(
         i = 0
         while i < len(segments):
             seg = segments[i]
-            if seg["length"] < min_length and len(segments) > 1:
+            min_len = min_length_map.get(seg["type"], 5.0)
+            if seg["length"] < min_len and len(segments) > 1:
                 # Absorb into previous if exists, else next
                 if merged:
                     prev = merged[-1]

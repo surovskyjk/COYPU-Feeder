@@ -134,6 +134,34 @@ out tags;
     return results
 
 
+def search_by_number_in_name(number: str) -> list[dict]:
+    """
+    Search for railway route relations whose name contains the given number,
+    not adjacent to other digits.  Finds lines like "212 - Čerčany – Světlá…"
+    even when the OSM 'ref' tag is missing.
+    """
+    safe = number.strip().replace(".", r"\.").replace("+", r"\+")
+    query = f"""
+[out:json][timeout:30];
+relation["type"="route"]["route"="railway"]["name"~"(^|[^0-9]){safe}([^0-9]|$)"];
+out tags;
+"""
+    data = _run_query(query)
+    results = []
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        results.append({
+            "id": el["id"],
+            "name": tags.get("name", f"Relation {el['id']}"),
+            "ref": tags.get("ref", ""),
+            "network": tags.get("network", ""),
+            "operator": tags.get("operator", ""),
+            "from": tags.get("from", ""),
+            "to": tags.get("to", ""),
+        })
+    return results
+
+
 def fetch_bbox_ways(south: float, west: float, north: float, east: float) -> dict:
     """
     Fetch all railway ways within a bounding box.
