@@ -88,6 +88,11 @@ class App(QMainWindow):
         # Sidebar back-navigation
         self.sidebar.step_clicked.connect(self._goto_step)
 
+        # Map JS errors → status bar
+        self.map_widget.js_error.connect(
+            lambda msg: self.statusBar().showMessage(f"⚠ {msg}")
+        )
+
         # Map bounds → "Lines in View" search
         self.step1.search_in_view_requested.connect(self._on_search_in_view)
         self.map_widget.bounds_ready.connect(self._on_map_bounds_ready)
@@ -96,16 +101,16 @@ class App(QMainWindow):
         self.step1.railway_fetched.connect(self._on_railway_fetched)
 
         # Step 2 → highlight / fit / confirm
-        self.step2.highlight_changed.connect(self.map_widget.highlight_track)
-        self.step2.fit_to_tracks_requested.connect(self.map_widget.fly_to_tracks)
+        self.step2.highlight_changed.connect(self._on_highlight_changed)
+        self.step2.fit_to_tracks_requested.connect(self._on_fit_to_tracks)
         self.step2.section_confirmed.connect(self._on_section_confirmed)
 
         # Step 3 → config confirmed
         self.step3.config_confirmed.connect(self._on_config_confirmed)
 
         # Step 4 → alignment display / fit / export / restart
-        self.step4.alignment_ready.connect(self.map_widget.show_alignment)
-        self.step4.fit_to_alignment_requested.connect(self.map_widget.fly_to_alignment)
+        self.step4.alignment_ready.connect(self._on_alignment_ready)
+        self.step4.fit_to_alignment_requested.connect(self._on_fit_to_alignment)
         self.step4.export_finished.connect(self._on_export_finished)
         self.step4.start_over_requested.connect(self._start_over)
 
@@ -134,6 +139,50 @@ class App(QMainWindow):
     def _goto_step(self, idx: int):
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
+
+    # ------------------------------------------------------------------
+    # Step 2 map interactions
+    # ------------------------------------------------------------------
+
+    def _on_highlight_changed(self, idx: int):
+        self.map_widget.highlight_track(idx)
+        if idx < 0:
+            self.statusBar().showMessage("Track highlight reset — all tracks shown.")
+        elif idx < len(self._tracks):
+            self.statusBar().showMessage(
+                f"Highlighted track {idx + 1}: {self._tracks[idx].name}"
+            )
+
+    def _on_fit_to_tracks(self):
+        if self._tracks:
+            self.map_widget.fly_to_tracks()
+            self.statusBar().showMessage(
+                f"Zooming map to {len(self._tracks)} track(s)."
+            )
+        else:
+            self.statusBar().showMessage("No tracks loaded yet.")
+
+    # ------------------------------------------------------------------
+    # Step 4 map interactions
+    # ------------------------------------------------------------------
+
+    def _on_alignment_ready(self, alignments: list):
+        if not alignments or not any(len(a) > 0 for a in alignments):
+            self.statusBar().showMessage(
+                "⚠ Export finished but alignment contains no points — "
+                "nothing drawn on map."
+            )
+            return
+        self.map_widget.show_alignment(alignments)
+        total_pts = sum(len(a) for a in alignments)
+        self.statusBar().showMessage(
+            f"Exported alignment drawn on map (bright red) — "
+            f"{len(alignments)} track(s), {total_pts} points."
+        )
+
+    def _on_fit_to_alignment(self):
+        self.map_widget.fly_to_alignment()
+        self.statusBar().showMessage("Zooming map to exported alignment.")
 
     # ------------------------------------------------------------------
     # "Lines in View" search
@@ -197,7 +246,14 @@ class App(QMainWindow):
 
     def _on_railway_fetched(self, overpass_data, relation_info: dict):
         from osm.parser import parse_tracks
-        self._tracks = parse_tracks(overpass_data)
+        try:
+            self._tracks = parse_tracks(overpass_data)
+        except Exception as exc:
+            QMessageBox.critical(self, "Parse error",
+                                 f"Failed to parse track data:\n{exc}")
+            self.statusBar().showMessage(f"⚠ Parse error: {exc}")
+            return
+
         if not self._tracks:
             QMessageBox.warning(
                 self, "No tracks found",
@@ -205,7 +261,7 @@ class App(QMainWindow):
                 "extracted.\nThe relation may have no ways, or its ways are "
                 "not connected."
             )
-            self.statusBar().showMessage("No tracks found in relation.")
+            self.statusBar().showMessage("⚠ No tracks found in relation.")
             return
 
         self.map_widget.clear_alignment()
@@ -214,7 +270,7 @@ class App(QMainWindow):
         n = len(self._tracks)
         name = relation_info.get("name", "")
         self.statusBar().showMessage(
-            f"Loaded '{name}' — {n} track{'s' if n != 1 else ''}. "
+            f"✓ Loaded '{name}' — {n} track{'s' if n != 1 else ''} drawn on map. "
             "Select tracks and click Next."
         )
         self._goto_step(1)
@@ -247,9 +303,9 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_export_finished(self, filepath: str, work_epsg: int):
-        # alignment_ready signal from step4 already triggered map display
+        # alignment_ready signal from step4 already triggered map display via _on_alignment_ready
         self.statusBar().showMessage(
-            f"Export complete — alignment shown on map (red line). {filepath}"
+            f"✓ Export complete (EPSG:{work_epsg}) — alignment shown on map. {filepath}"
         )
 
     # ------------------------------------------------------------------

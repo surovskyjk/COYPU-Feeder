@@ -118,8 +118,26 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
             QScrollBar:vertical { width:8px; background:#1e1e1e; }
             QScrollBar::handle:vertical { background:#555; border-radius:4px; min-height:20px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QPushButton { padding:5px 12px; border-radius:4px; }
-            QPushButton:hover { background-color:#4a4a4f; }
+
+            QPushButton {
+                background-color: #1565c0;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #1e88e5;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+            }
+            QPushButton:disabled {
+                background-color: #3a3a3d;
+                color: #666;
+            }
+
             QProgressBar { border:1px solid #555; border-radius:4px;
                            text-align:center; color:#fff; }
             QProgressBar::chunk { background-color:#2a82da; border-radius:3px; }
@@ -129,7 +147,26 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
             QGroupBox { border:1px solid #ccc; border-radius:4px;
                         margin-top:8px; padding-top:4px; }
             QGroupBox::title { subcontrol-origin:margin; left:8px; }
-            QPushButton { padding:5px 12px; border-radius:4px; }
+
+            QPushButton {
+                background-color: #1976d2;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #2196f3;
+            }
+            QPushButton:pressed {
+                background-color: #1565c0;
+            }
+            QPushButton:disabled {
+                background-color: #d0d0d0;
+                color: #888;
+            }
+
             QProgressBar { border:1px solid #bbb; border-radius:4px; text-align:center; }
-            QProgressBar::chunk { background-color:#2a82da; border-radius:3px; }
+            QProgressBar::chunk { background-color:#1976d2; border-radius:3px; }
         """)

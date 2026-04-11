@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  html, body, #map { width:100%; height:100%; margin:0; padding:0; background:#1a1a1a; }
+</style>
+<link rel="stylesheet" href="leaflet.css"/>
+<script src="leaflet.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+<div id="map"></div>
+<script>
+"use strict";
+var map = L.map('map', {zoomControl: true}).setView([50.05, 14.42], 7);
+
+/* Custom panes for z-ordering */
+map.createPane('tracksPane').style.zIndex      = '410';
+map.createPane('alignmentGlowPane').style.zIndex = '640';
+map.createPane('alignmentPane').style.zIndex   = '650';
+
+var baseLayer       = null;
+var railOverlay     = null;
+var trackLayers     = [];
+var alignmentLayers = [];
+var backend         = null;
+var _showRailOverlay = true;
+
+/* ── Tile provider ─────────────────────────────────────────────── */
+function setTileProvider(url, subs, attr, maxZoom) {
+  if (baseLayer) { map.removeLayer(baseLayer); baseLayer = null; }
+  var opts = { attribution: attr, maxZoom: maxZoom || 19 };
+  if (subs) opts.subdomains = subs;
+  baseLayer = L.tileLayer(url, opts).addTo(map);
+  /* Keep rail overlay on top if active */
+  if (railOverlay) railOverlay.bringToFront();
+}
+
+/* ── OpenRailwayMap overlay ────────────────────────────────────── */
+function setRailOverlay(show) {
+  _showRailOverlay = show;
+  if (show) {
+    if (!railOverlay) {
+      railOverlay = L.tileLayer(
+        'https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
+        { subdomains:'abc', maxZoom:19, opacity:0.8,
+          attribution:'© <a href="https://www.openrailwaymap.org/">OpenRailwayMap</a>' }
+      ).addTo(map);
+    }
+  } else {
+    if (railOverlay) { map.removeLayer(railOverlay); railOverlay = null; }
+  }
+}
+
+/* Load default tiles immediately */
+setTileProvider(
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  '', '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', 19
+);
+setRailOverlay(true);
+
+/* ── QWebChannel bootstrap ──────────────────────────────────────  */
+new QWebChannel(qt.webChannelTransport, function(channel) {
+  backend = channel.objects.backend;
+  backend.on_ready();
+});
+
+/* ── Map bounds ─────────────────────────────────────────────────  */
+function getMapBounds() {
+  var b = map.getBounds();
+  backend.on_bounds_ready(b.getSouth(), b.getWest(), b.getNorth(), b.getEast());
+}
+
+/* ── Track display ──────────────────────────────────────────────  */
+function showTracks(tracks) {
+  trackLayers.forEach(function(l) { map.removeLayer(l); });
+  trackLayers = [];
+  var all = [];
+  tracks.forEach(function(t) {
+    var color   = t.color || '#4fc3f7';
+    var latlngs = t.nodes.map(function(n) { return [n[0], n[1]]; });
+    if (!latlngs.length) return;
+    all = all.concat(latlngs);
+    var pl = L.polyline(latlngs, {color:color, weight:4, opacity:0.9, pane:'tracksPane'});
+    pl._baseColor = color;
+    pl.addTo(map);
+    trackLayers.push(pl);
+  });
+  if (all.length)
+    try { map.fitBounds(L.latLngBounds(all), {padding:[20,20], maxZoom:14}); } catch(e){}
+}
+
+function highlightTrack(idx) {
+  trackLayers.forEach(function(l, i) {
+    var base = l._baseColor || '#4fc3f7';
+    if (idx < 0)       l.setStyle({color:base,    weight:4, opacity:0.9});
+    else if (i===idx) { l.setStyle({color:'#ffeb3b', weight:7, opacity:1.0}); l.bringToFront(); }
+    else               l.setStyle({color:base,    weight:2, opacity:0.25});
+  });
+}
+
+function flyToTracks() {
+  var all = [];
+  trackLayers.forEach(function(l){ all = all.concat(l.getLatLngs()); });
+  if (all.length)
+    try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8, maxZoom:14}); } catch(e){}
+}
+
+/* ── Alignment overlay ──────────────────────────────────────────  */
+function showAlignment(alns) {
+  clearAlignment();
+  var all = [];
+  alns.forEach(function(aln) {
+    var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
+    if (latlngs.length < 2) return;
+    all = all.concat(latlngs);
+    L.polyline(latlngs, {color:'#ffffff', weight:14, opacity:0.2, pane:'alignmentGlowPane'}).addTo(map);
+    var bright = L.polyline(latlngs, {color:'#ff1744', weight:5, opacity:1.0, pane:'alignmentPane'}).addTo(map);
+    alignmentLayers.push(bright);
+  });
+  if (all.length)
+    try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
+}
+
+function flyToAlignment() {
+  var all = [];
+  alignmentLayers.forEach(function(l){ try{ all=all.concat(l.getLatLngs()); }catch(e){} });
+  if (all.length)
+    try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
+}
+
+function clearAlignment() {
+  alignmentLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
+  alignmentLayers = [];
+}
+
+function clearAll() {
+  showTracks([]);
+  clearAlignment();
+}
+</script>
+</body>
+</html>

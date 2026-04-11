@@ -193,6 +193,50 @@ out body;
     return _run_query(query)
 
 
+def fetch_relation_members(parent_relation_id: int) -> list[dict]:
+    """
+    Fetch the tags of all sub-relation members of a parent relation.
+    Used to list all railway lines that belong to a national/regional collection
+    (e.g. 'Railways in Czech Republic', OSM relation 2332889).
+
+    Returns a list of dicts with the same shape as search_by_ref().
+    Members that are ways or nodes (not relations) are silently skipped.
+    Results are sorted by ref tag (numeric where possible), then by name.
+    """
+    query = f"""
+[out:json][timeout:{TIMEOUT}];
+relation({parent_relation_id});
+rel(r);
+out tags;
+"""
+    data = _run_query(query)
+    results = []
+    for el in data.get("elements", []):
+        if el.get("type") != "relation":
+            continue
+        tags = el.get("tags", {})
+        results.append({
+            "id":       el["id"],
+            "name":     tags.get("name", f"Relation {el['id']}"),
+            "ref":      tags.get("ref", ""),
+            "network":  tags.get("network", ""),
+            "operator": tags.get("operator", ""),
+            "from":     tags.get("from", ""),
+            "to":       tags.get("to", ""),
+        })
+
+    # Sort: numeric ref first, then alpha name
+    def _sort_key(r):
+        ref = r.get("ref", "")
+        try:
+            return (0, int(ref), r["name"])
+        except (ValueError, TypeError):
+            return (1, 0, r["name"])
+
+    results.sort(key=_sort_key)
+    return results
+
+
 def fetch_relation_metadata(relation_id: int) -> Optional[dict]:
     """Fetch tags for a single relation."""
     query = f"""

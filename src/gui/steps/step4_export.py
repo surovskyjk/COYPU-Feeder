@@ -97,10 +97,6 @@ class Step4Export(QWidget):
 
         self._restart_btn = QPushButton("🔄  Export Another Railway")
         self._restart_btn.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
-        self._restart_btn.setStyleSheet(
-            "QPushButton { background:#2a82da; color:#fff; border-radius:5px; }"
-            "QPushButton:hover { background:#3a92ea; }"
-        )
         self._restart_btn.clicked.connect(self.start_over_requested.emit)
 
         post_btn_row.addWidget(self._fit_aln_btn)

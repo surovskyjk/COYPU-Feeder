@@ -145,10 +145,7 @@ class Step3Configure(QWidget):
         self._next_btn = QPushButton("Next →  Export")
         self._next_btn.setMinimumHeight(38)
         self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
-        self._next_btn.setStyleSheet(
-            "QPushButton { background:#2a82da; color:#fff; border-radius:5px; margin:8px; }"
-            "QPushButton:hover { background:#3a92ea; }"
-        )
+        self._next_btn.setContentsMargins(8, 8, 8, 8)
         self._next_btn.clicked.connect(self._on_next)
         outer.addWidget(self._next_btn)
 

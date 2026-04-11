@@ -1,10 +1,12 @@
 """
 Step 1 — Find Railway.
 
-Two tabs:
-  • Search       — ref / name / number-in-name / direct relation ID
-  • Lines in View — search for all railway lines visible in the current map view
-                   (available only when the view is ≤ ~20 km wide/tall)
+Three tabs:
+  • Search           — ref / name / number-in-name / direct relation ID
+  • Lines in View    — search for all railway lines visible in the current map view
+                       (available only when the view is ≤ ~20 km wide/tall)
+  • Czech Railways   — browse / filter all members of OSM relation 2332889
+                       ("Railways in Czech Republic"), loaded once on demand
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ from PySide6.QtGui import QFont
 
 from gui.worker import SearchWorker, FetchWorker
 
+# OSM relation ID for the Czech Railways collection
+CZ_RAILWAYS_RELATION = 2332889
+
 
 class Step1Find(QWidget):
     railway_fetched          = Signal(object, dict)   # (overpass_data, relation_info)
@@ -27,6 +32,9 @@ class Step1Find(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._workers: list = []
+        # Cache for the Czech Railways member list (fetched once)
+        self._cz_all_results: list[dict] = []
+        self._cz_loaded = False
         self._build()
 
     # ------------------------------------------------------------------
@@ -39,8 +47,9 @@ class Step1Find(QWidget):
         layout.setSpacing(4)
 
         self._tabs = QTabWidget()
-        self._tab_search = self._tabs.addTab(self._build_search_tab(), "Search")
-        self._tab_view   = self._tabs.addTab(self._build_view_tab(),   "Lines in View")
+        self._tabs.addTab(self._build_search_tab(),  "Search")
+        self._tabs.addTab(self._build_view_tab(),    "In View")
+        self._tabs.addTab(self._build_cz_tab(),      "Czech Railways")
         layout.addWidget(self._tabs)
 
     # ── Search tab ────────────────────────────────────────────────────
@@ -175,6 +184,66 @@ class Step1Find(QWidget):
 
         return w
 
+    # ── Czech Railways tab ────────────────────────────────────────────
+
+    def _build_cz_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        hdr = QLabel("Railways in Czech Republic")
+        hdr.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        v.addWidget(hdr)
+
+        hint = QLabel(
+            "Lists all member relations of OSM relation 2332889\n"
+            "(Railways in Czech Republic). Loaded once on demand.\n"
+            "Use the filter box to narrow the list instantly."
+        )
+        hint.setStyleSheet("color:#888; font-size:10px;")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        # Load button (shown only before first load)
+        self._cz_load_btn = QPushButton("📥  Load Czech Railway Lines")
+        self._cz_load_btn.setMinimumHeight(34)
+        self._cz_load_btn.clicked.connect(self._load_cz_railways)
+        v.addWidget(self._cz_load_btn)
+
+        self._cz_status = QLabel("")
+        self._cz_status.setStyleSheet("color:#aaa; font-size:10px;")
+        self._cz_status.setWordWrap(True)
+        v.addWidget(self._cz_status)
+
+        # Filter box (always visible, useful after load)
+        filter_row = QHBoxLayout()
+        filter_lbl = QLabel("Filter:")
+        self._cz_filter = QLineEdit()
+        self._cz_filter.setPlaceholderText("Type to filter by name, ref, from/to…")
+        self._cz_filter.textChanged.connect(self._apply_cz_filter)
+        filter_row.addWidget(filter_lbl)
+        filter_row.addWidget(self._cz_filter)
+        v.addLayout(filter_row)
+
+        self._cz_count_lbl = QLabel("")
+        self._cz_count_lbl.setStyleSheet("color:#888; font-size:10px;")
+        v.addWidget(self._cz_count_lbl)
+
+        self._cz_list = QListWidget()
+        self._cz_list.setAlternatingRowColors(True)
+        self._cz_list.itemDoubleClicked.connect(self._on_cz_result_double_clicked)
+        v.addWidget(self._cz_list, stretch=1)
+
+        cz_fetch_row = QHBoxLayout()
+        self._cz_fetch_btn = QPushButton("Fetch selected")
+        self._cz_fetch_btn.clicked.connect(self._fetch_cz_selected)
+        cz_fetch_row.addStretch()
+        cz_fetch_row.addWidget(self._cz_fetch_btn)
+        v.addLayout(cz_fetch_row)
+
+        return w
+
     # ------------------------------------------------------------------
     # Search actions
     # ------------------------------------------------------------------
@@ -234,6 +303,86 @@ class Step1Find(QWidget):
             if r:
                 self._do_fetch(r["id"])
 
+    # ── Czech Railways actions ────────────────────────────────────────
+
+    def _load_cz_railways(self):
+        if self._cz_loaded:
+            return
+        self._cz_load_btn.setEnabled(False)
+        self._cz_load_btn.setText("Loading…")
+        self._cz_status.setText("Fetching list from Overpass API…")
+
+        worker = SearchWorker("relation_members", str(CZ_RAILWAYS_RELATION), self)
+        worker.results_ready.connect(self._on_cz_loaded)
+        worker.failed.connect(self._on_cz_load_failed)
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_cz_loaded(self, results: list):
+        self._cz_all_results = results
+        self._cz_loaded = True
+        self._cz_load_btn.setVisible(False)
+        self._cz_status.setText(
+            f"Loaded {len(results)} railway lines. Type to filter."
+        )
+        self._apply_cz_filter(self._cz_filter.text())
+
+    def _on_cz_load_failed(self, error: str):
+        self._cz_load_btn.setEnabled(True)
+        self._cz_load_btn.setText("📥  Load Czech Railway Lines")
+        self._cz_status.setText(f"Load failed: {error}")
+
+    def _apply_cz_filter(self, text: str):
+        """Filter the already-loaded list client-side (no network call)."""
+        term = text.strip().lower()
+        if term:
+            filtered = [
+                r for r in self._cz_all_results
+                if term in (r.get("name") or "").lower()
+                or term in (r.get("ref") or "").lower()
+                or term in (r.get("from") or "").lower()
+                or term in (r.get("to") or "").lower()
+            ]
+        else:
+            filtered = self._cz_all_results
+
+        self._cz_list.clear()
+        for r in filtered:
+            ref  = r.get("ref", "")
+            name = r.get("name") or f"Relation {r['id']}"
+            fr   = r.get("from", "")
+            to   = r.get("to", "")
+            if ref:
+                label = f"[{ref}]  {name}"
+            else:
+                label = name
+            if fr and to:
+                label += f"  ({fr} → {to})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, r)
+            self._cz_list.addItem(item)
+
+        total = len(self._cz_all_results)
+        shown = len(filtered)
+        if total:
+            self._cz_count_lbl.setText(
+                f"Showing {shown} of {total} lines"
+                if term else f"{total} lines total"
+            )
+
+    def _on_cz_result_double_clicked(self, item: QListWidgetItem):
+        r = item.data(Qt.ItemDataRole.UserRole)
+        if r:
+            self._do_fetch(r["id"])
+
+    def _fetch_cz_selected(self):
+        item = self._cz_list.currentItem()
+        if item:
+            r = item.data(Qt.ItemDataRole.UserRole)
+            if r:
+                self._do_fetch(r["id"])
+
     # ── Shared fetch ──────────────────────────────────────────────────
 
     def _do_fetch(self, relation_id: int):
@@ -280,7 +429,7 @@ class Step1Find(QWidget):
     # ------------------------------------------------------------------
 
     def show_view_results(self, results: list, status: str = ""):
-        """Populate the 'Lines in View' tab and switch to it."""
+        """Populate the 'In View' tab and switch to it."""
         self._populate_list(self._view_results_list, results)
         if status:
             self._view_status.setText(status)
@@ -292,8 +441,6 @@ class Step1Find(QWidget):
             "Searching…" if busy
             else "🔍  Search Railway Lines in Current View"
         )
-        if not busy:
-            pass  # status cleared by caller
 
     def populate_results(self, results: list):
         """Compatibility: populate Search tab results list."""

@@ -35,6 +35,7 @@ class SearchWorker(QThread):
                 search_railways_by_name,
                 search_by_number_in_name,
                 search_relations_in_bbox,
+                fetch_relation_members,
             )
             q = self._query
             if self._mode == "ref":
@@ -46,6 +47,8 @@ class SearchWorker(QThread):
             elif self._mode == "bbox":
                 s, w, n, e = q
                 results = search_relations_in_bbox(s, w, n, e)
+            elif self._mode == "relation_members":
+                results = fetch_relation_members(int(q))
             else:
                 results = []
             self.results_ready.emit(results)

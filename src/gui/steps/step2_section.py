@@ -50,43 +50,44 @@ class Step2Section(QWidget):
         self._list.currentRowChanged.connect(self._on_row_changed)
         layout.addWidget(self._list, stretch=1)
 
-        # ── Map / selection buttons ────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-
+        # ── Map / selection buttons — two rows to fit the 340px panel ──
         self._select_all_btn = QPushButton("Select all")
         self._select_all_btn.clicked.connect(self._list.selectAll)
 
-        self._clear_sel_btn = QPushButton("Clear")
+        self._clear_sel_btn = QPushButton("Clear selection")
         self._clear_sel_btn.clicked.connect(self._list.clearSelection)
 
-        self._highlight_btn = QPushButton("👁  Highlight")
+        self._highlight_btn = QPushButton("👁  Highlight selected")
         self._highlight_btn.setToolTip("Highlight the currently focused track on the map")
         self._highlight_btn.clicked.connect(self._on_highlight_btn)
 
-        self._reset_hl_btn = QPushButton("Reset highlight")
-        self._reset_hl_btn.setToolTip("Reset all track colours")
+        self._reset_hl_btn = QPushButton("🔄  Reset colours")
+        self._reset_hl_btn.setToolTip("Reset all track colours to defaults")
         self._reset_hl_btn.clicked.connect(lambda: self.highlight_changed.emit(-1))
 
-        self._fit_btn = QPushButton("📍  Fit map")
+        self._fit_btn = QPushButton("📍  Fit map to tracks")
         self._fit_btn.setToolTip("Zoom and pan the map to show all loaded tracks")
         self._fit_btn.clicked.connect(self.fit_to_tracks_requested.emit)
 
-        for btn in (self._select_all_btn, self._clear_sel_btn,
-                    self._highlight_btn, self._reset_hl_btn, self._fit_btn):
-            btn_row.addWidget(btn)
+        # Row 1: Select all | Clear selection
+        btn_row1 = QHBoxLayout()
+        btn_row1.setSpacing(6)
+        btn_row1.addWidget(self._select_all_btn)
+        btn_row1.addWidget(self._clear_sel_btn)
+        layout.addLayout(btn_row1)
 
-        layout.addLayout(btn_row)
+        # Row 2: Highlight | Reset | Fit
+        btn_row2 = QHBoxLayout()
+        btn_row2.setSpacing(6)
+        btn_row2.addWidget(self._highlight_btn)
+        btn_row2.addWidget(self._reset_hl_btn)
+        btn_row2.addWidget(self._fit_btn)
+        layout.addLayout(btn_row2)
 
         # ── Next button ──────────────────────────────────────────────
         self._next_btn = QPushButton("Next →  Configure")
         self._next_btn.setMinimumHeight(38)
         self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
-        self._next_btn.setStyleSheet(
-            "QPushButton { background:#2a82da; color:#fff; border-radius:5px; }"
-            "QPushButton:hover { background:#3a92ea; }"
-            "QPushButton:disabled { background:#444; color:#777; }"
-        )
         self._next_btn.clicked.connect(self._on_next)
         layout.addWidget(self._next_btn)
 
