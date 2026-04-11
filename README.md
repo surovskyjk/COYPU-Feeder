@@ -274,4 +274,4 @@ Coypu-Feeder/
 
 ## License
 
-[MIT License](LICENSE) — © 2025 Jakub Surovský
+[MIT License](LICENSE) — © 2025 Jakub Surovsky
