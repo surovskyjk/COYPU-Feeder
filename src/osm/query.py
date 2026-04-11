@@ -139,16 +139,29 @@ def search_by_number_in_name(number: str) -> list[dict]:
     Search for railway route relations whose name contains the given number,
     not adjacent to other digits.  Finds lines like "212 - Čerčany – Světlá…"
     even when the OSM 'ref' tag is missing.
+
+    Uses a union of two Overpass queries because POSIX ERE (used by Overpass)
+    does not treat '^' as a start-of-string anchor inside alternation groups.
+    Query 1 catches the number at the very start of the name.
+    Query 2 catches the number preceded by a non-digit character.
     """
     safe = number.strip().replace(".", r"\.").replace("+", r"\+")
+    # Two patterns: at start-of-string  OR  preceded by non-digit
     query = f"""
 [out:json][timeout:30];
-relation["type"="route"]["route"="railway"]["name"~"(^|[^0-9]){safe}([^0-9]|$)"];
+(
+  relation["type"="route"]["route"="railway"]["name"~"^{safe}([^0-9]|$)"];
+  relation["type"="route"]["route"="railway"]["name"~"[^0-9]{safe}([^0-9]|$)"];
+);
 out tags;
 """
     data = _run_query(query)
+    seen: set[int] = set()
     results = []
     for el in data.get("elements", []):
+        if el["id"] in seen:
+            continue
+        seen.add(el["id"])
         tags = el.get("tags", {})
         results.append({
             "id": el["id"],

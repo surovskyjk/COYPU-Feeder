@@ -327,6 +327,10 @@ class Step1Find(QWidget):
     # Public
     # ------------------------------------------------------------------
 
+    def populate_results(self, results: list):
+        """Show pre-fetched results (e.g. from direct map bbox search)."""
+        self._on_results(results)
+
     def set_bbox(self, bbox: tuple):
         self._bbox = bbox
         s, w, n, e = bbox

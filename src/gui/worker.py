@@ -93,7 +93,7 @@ class ExportWorker(QThread):
     """
     stage_changed    = Signal(str)
     station_progress = Signal(float, float)
-    finished         = Signal(str)
+    finished         = Signal(str, int)   # filepath, work_epsg
     failed           = Signal(str)
 
     def __init__(self, tracks, settings: dict, filepath: str, parent=None):
@@ -104,8 +104,8 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            self._export()
-            self.finished.emit(self._filepath)
+            work_epsg = self._export()
+            self.finished.emit(self._filepath, work_epsg)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -187,3 +187,4 @@ class ExportWorker(QThread):
 
         self.stage_changed.emit("Writing file…")
         write_landxml(root, self._filepath)
+        return work_epsg

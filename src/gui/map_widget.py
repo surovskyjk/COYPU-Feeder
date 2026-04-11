@@ -12,7 +12,6 @@ from PySide6.QtCore import QObject, Signal, Slot, QUrl
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QPushButton, QSizePolicy
-from PySide6.QtGui import QAction
 
 # ---------------------------------------------------------------------------
 # Track colours (cycle)
@@ -21,7 +20,6 @@ TRACK_COLORS = [
     "#4fc3f7", "#81c784", "#ffb74d", "#e57373",
     "#ce93d8", "#80cbc4", "#fff176", "#ff8a65",
 ]
-HIGHLIGHT_COLOR = "#ffeb3b"
 
 
 # ---------------------------------------------------------------------------
@@ -35,24 +33,32 @@ MAP_HTML = r"""<!DOCTYPE html>
 <style>
   html, body, #map { width:100%; height:100%; margin:0; padding:0; background:#1a1a1a; }
 </style>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 <body>
 <div id="map"></div>
 <script>
 var map = L.map('map', {zoomControl: true}).setView([50.05, 14.42], 7);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap contributors',
-  maxZoom: 19
-}).addTo(map);
 
-var trackLayers = [];
-var bboxLayer   = null;
-var bboxMode    = false;
-var bboxStart   = null;
-var backend     = null;
+/* CARTO Dark tiles — free for embedded apps, no 403 issues */
+L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 20
+  }
+).addTo(map);
+
+var trackLayers     = [];
+var alignmentLayers = [];
+var bboxLayer       = null;
+var bboxMode        = false;
+var bboxStart       = null;
+var backend         = null;
 
 /* ---- QWebChannel bootstrap ---- */
 new QWebChannel(qt.webChannelTransport, function(channel) {
@@ -89,9 +95,9 @@ map.on('mousemove', function(e) {
 map.on('mouseup', function(e) {
   if (!bboxMode || !bboxStart) return;
   var end = e.latlng;
-  var s = Math.min(bboxStart.lat, end.lat);
-  var n = Math.max(bboxStart.lat, end.lat);
-  var w = Math.min(bboxStart.lng, end.lng);
+  var s  = Math.min(bboxStart.lat, end.lat);
+  var n  = Math.max(bboxStart.lat, end.lat);
+  var w  = Math.min(bboxStart.lng, end.lng);
   var ea = Math.max(bboxStart.lng, end.lng);
   bboxStart = null;
   setBboxMode(false);
@@ -104,11 +110,12 @@ function showTracks(jsonStr) {
   trackLayers = [];
   var tracks = JSON.parse(jsonStr);
   var allLatLng = [];
-  tracks.forEach(function(t, i) {
-    var color = t.color || '#4fc3f7';
+  tracks.forEach(function(t) {
+    var color   = t.color || '#4fc3f7';
     var latlngs = t.nodes.map(function(n) { return [n[0], n[1]]; });
-    allLatLng = allLatLng.concat(latlngs);
+    allLatLng   = allLatLng.concat(latlngs);
     var pl = L.polyline(latlngs, {color: color, weight: 3, opacity: 0.85});
+    pl.options._baseColor = color;
     pl.addTo(map);
     trackLayers.push(pl);
   });
@@ -120,7 +127,6 @@ function showTracks(jsonStr) {
 function highlightTrack(idx) {
   trackLayers.forEach(function(l, i) {
     var base = l.options._baseColor || l.options.color;
-    l.options._baseColor = base;
     if (idx < 0) {
       l.setStyle({color: base, weight: 3, opacity: 0.85});
     } else if (i === idx) {
@@ -132,8 +138,40 @@ function highlightTrack(idx) {
   });
 }
 
+/* ---- Exported alignment overlay ---- */
+function showAlignment(jsonStr) {
+  alignmentLayers.forEach(function(l) { map.removeLayer(l); });
+  alignmentLayers = [];
+  var alns = JSON.parse(jsonStr);
+  var allLatLng = [];
+  alns.forEach(function(aln) {
+    var latlngs = aln.nodes.map(function(n) { return [n[0], n[1]]; });
+    if (latlngs.length < 2) return;
+    allLatLng = allLatLng.concat(latlngs);
+    var pl = L.polyline(latlngs, {
+      color: '#ff4081', weight: 4, opacity: 1.0, dashArray: '10,5'
+    });
+    pl.addTo(map);
+    alignmentLayers.push(pl);
+  });
+  if (allLatLng.length > 0) {
+    map.fitBounds(allLatLng, {padding: [30, 30]});
+  }
+}
+
+function clearAlignment() {
+  alignmentLayers.forEach(function(l) { map.removeLayer(l); });
+  alignmentLayers = [];
+}
+
 function clearBbox() {
   if (bboxLayer) { map.removeLayer(bboxLayer); bboxLayer = null; }
+}
+
+function clearAll() {
+  showTracks('[]');
+  clearAlignment();
+  clearBbox();
 }
 </script>
 </body>
@@ -168,12 +206,14 @@ class MapBridge(QObject):
 # ---------------------------------------------------------------------------
 
 class MapWidget(QWidget):
-    bbox_drawn = Signal(float, float, float, float)
+    bbox_drawn           = Signal(float, float, float, float)
+    bbox_search_requested = Signal(float, float, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._map_ready = False
         self._js_queue: deque[str] = deque()
+        self._last_bbox: tuple | None = None
         self._build()
 
     def _build(self):
@@ -184,11 +224,24 @@ class MapWidget(QWidget):
         # Toolbar
         toolbar = QToolBar()
         toolbar.setMovable(False)
+
         self._bbox_btn = QPushButton("✏  Draw bbox")
         self._bbox_btn.setCheckable(True)
-        self._bbox_btn.setToolTip("Click and drag on the map to draw a search bounding box")
+        self._bbox_btn.setToolTip("Click and drag to draw a search bounding box")
         self._bbox_btn.clicked.connect(self._toggle_bbox_mode)
         toolbar.addWidget(self._bbox_btn)
+
+        # "Find railways" button — appears after bbox is drawn
+        self._find_btn = QPushButton("🔍  Search Railways in Bbox")
+        self._find_btn.setVisible(False)
+        self._find_btn.setStyleSheet(
+            "QPushButton { background:#d35400; color:#fff; border-radius:3px; padding:4px 10px; }"
+            "QPushButton:hover { background:#e67e22; }"
+        )
+        self._find_btn.setToolTip("Run an Overpass query for all railway lines inside the drawn box")
+        self._find_btn.clicked.connect(self._on_find_btn_clicked)
+        toolbar.addWidget(self._find_btn)
+
         layout.addWidget(toolbar)
 
         # WebEngine
@@ -229,10 +282,16 @@ class MapWidget(QWidget):
 
     def _on_bbox_drawn_internal(self, s: float, w: float, n: float, e: float):
         self._bbox_btn.setChecked(False)
+        self._last_bbox = (s, w, n, e)
+        self._find_btn.setVisible(True)
         self.bbox_drawn.emit(s, w, n, e)
 
+    def _on_find_btn_clicked(self):
+        if self._last_bbox:
+            self.bbox_search_requested.emit(*self._last_bbox)
+
     # ------------------------------------------------------------------
-    # Public API (called from App)
+    # Public API
     # ------------------------------------------------------------------
 
     def show_tracks(self, tracks):
@@ -241,13 +300,21 @@ class MapWidget(QWidget):
             payload.append({
                 "nodes": [[n[0], n[1]] for n in t.nodes],
                 "color": TRACK_COLORS[i % len(TRACK_COLORS)],
-                "name": t.name,
+                "name":  t.name,
             })
-        js = f"showTracks({json.dumps(payload)})"
-        self._run_js(js)
+        self._run_js(f"showTracks({json.dumps(payload)})")
 
     def highlight_track(self, idx: int):
         self._run_js(f"highlightTrack({idx})")
+
+    def show_alignment(self, alignments_latlon: list[list[tuple]]):
+        """Draw exported LandXML alignment as a dashed pink overlay."""
+        payload = [{"nodes": [[lat, lon] for lat, lon in aln]}
+                   for aln in alignments_latlon]
+        self._run_js(f"showAlignment({json.dumps(payload)})")
+
+    def clear_alignment(self):
+        self._run_js("clearAlignment()")
 
     def set_bbox_mode(self, enabled: bool):
         self._bbox_btn.setChecked(enabled)
@@ -255,4 +322,11 @@ class MapWidget(QWidget):
 
     def clear_bbox(self):
         self._run_js("clearBbox()")
+        self._bbox_btn.setChecked(False)
+
+    def clear_all(self):
+        """Remove all tracks, alignment overlay and bbox rectangle."""
+        self._run_js("clearAll()")
+        self._find_btn.setVisible(False)
+        self._last_bbox = None
         self._bbox_btn.setChecked(False)

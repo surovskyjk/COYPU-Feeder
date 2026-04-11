@@ -98,3 +98,8 @@ class StepSidebar(QWidget):
         self._current = idx
         self._max_reached = max(self._max_reached, idx)
         self._update_styles()
+
+    def reset(self):
+        self._current = 0
+        self._max_reached = 0
+        self._update_styles()
