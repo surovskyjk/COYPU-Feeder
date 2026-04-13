@@ -109,8 +109,9 @@ class CandidateCard(QGroupBox):
 # ---------------------------------------------------------------------------
 
 class Step4Candidates(QWidget):
-    candidate_selected  = Signal(object)   # CandidateAlignment
-    candidate_map_update = Signal(list)    # list[CandidateAlignment] for map overlay
+    candidate_selected   = Signal(object)   # CandidateAlignment
+    candidate_map_update = Signal(list)     # list[CandidateAlignment] for map overlay
+    back_requested       = Signal()         # user clicked ← Back to Configure
 
     ALGO_DEFS = [
         ("curvature", "Curvature Heuristic", "#ff9800"),
@@ -154,6 +155,11 @@ class Step4Candidates(QWidget):
             self._cards.append(card)
 
         layout.addStretch()
+
+        # Back button
+        self._back_btn = QPushButton("← Back to Configure")
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self._back_btn)
 
     # ------------------------------------------------------------------
     # Public API
@@ -209,6 +215,7 @@ class Step4Candidates(QWidget):
 
         self._worker = CandidateWorker(xy_list, chainages_list, settings_copy, self)
         self._worker.candidate_ready.connect(self._on_candidate_ready)
+        self._worker.candidate_error.connect(self._on_candidate_error)
         self._worker.all_done.connect(self._on_all_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -234,6 +241,15 @@ class Step4Candidates(QWidget):
         self._status_lbl.setText(
             f"{n}/{len(self.ALGO_DEFS)} algorithms succeeded. Select one to continue."
         )
+
+    def _on_candidate_error(self, algo_id: str, error: str):
+        """One algorithm failed — mark its card, keep others running."""
+        for card in self._cards:
+            if card._algo_id == algo_id:
+                card.set_error()
+        # Show truncated error in status
+        short = error.split("\n")[0][:120]
+        self._status_lbl.setText(f"⚠ {algo_id}: {short}")
 
     def _on_failed(self, error: str):
         self._progress.setVisible(False)

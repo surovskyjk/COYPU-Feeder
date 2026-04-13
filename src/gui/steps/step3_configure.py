@@ -17,6 +17,7 @@ from geometry.projection import CRS_PRESETS
 
 class Step3Configure(QWidget):
     config_confirmed = Signal(dict)
+    back_requested   = Signal()   # user wants to go back to Select Section
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -191,13 +192,19 @@ class Step3Configure(QWidget):
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
-        # Next button (outside scroll)
-        self._next_btn = QPushButton("Next →  Export")
+        # Navigation row (outside scroll)
+        nav_row = QHBoxLayout()
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setFixedWidth(80)
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        nav_row.addWidget(self._back_btn)
+
+        self._next_btn = QPushButton("Next →  Candidates")
         self._next_btn.setMinimumHeight(38)
         self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
-        self._next_btn.setContentsMargins(8, 8, 8, 8)
         self._next_btn.clicked.connect(self._on_next)
-        outer.addWidget(self._next_btn)
+        nav_row.addWidget(self._next_btn)
+        outer.addLayout(nav_row)
 
     # ------------------------------------------------------------------
     # Internal

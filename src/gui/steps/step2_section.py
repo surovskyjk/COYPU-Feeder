@@ -18,9 +18,10 @@ from PySide6.QtGui import QFont
 
 
 class Step2Section(QWidget):
-    section_confirmed     = Signal(list)   # selected Track objects
-    highlight_changed     = Signal(int)    # track index  (-1 = reset all)
+    section_confirmed       = Signal(list)   # selected Track objects
+    highlight_changed       = Signal(int)    # track index  (-1 = reset all)
     fit_to_tracks_requested = Signal()
+    back_requested          = Signal()       # user wants to go back to Find Railway
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,12 +85,19 @@ class Step2Section(QWidget):
         btn_row2.addWidget(self._fit_btn)
         layout.addLayout(btn_row2)
 
-        # ── Next button ──────────────────────────────────────────────
+        # ── Navigation row ───────────────────────────────────────────
+        nav_row = QHBoxLayout()
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setFixedWidth(80)
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        nav_row.addWidget(self._back_btn)
+
         self._next_btn = QPushButton("Next →  Configure")
         self._next_btn.setMinimumHeight(38)
         self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
         self._next_btn.clicked.connect(self._on_next)
-        layout.addWidget(self._next_btn)
+        nav_row.addWidget(self._next_btn)
+        layout.addLayout(nav_row)
 
     # ------------------------------------------------------------------
     # Public

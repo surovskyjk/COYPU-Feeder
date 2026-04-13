@@ -111,21 +111,27 @@ class App(QMainWindow):
         # Step 1 → fetch railway
         self.step1.railway_fetched.connect(self._on_railway_fetched)
 
-        # Step 2 → highlight / fit / confirm
+        # Step 2 → highlight / fit / confirm / back
         self.step2.highlight_changed.connect(self._on_highlight_changed)
         self.step2.fit_to_tracks_requested.connect(self._on_fit_to_tracks)
         self.step2.section_confirmed.connect(self._on_section_confirmed)
+        self.step2.back_requested.connect(lambda: self._goto_step(0))
 
-        # Step 3 → config confirmed
+        # Step 3 → config confirmed / back
         self.step3.config_confirmed.connect(self._on_config_confirmed)
+        self.step3.back_requested.connect(lambda: self._goto_step(1))
 
-        # Step 4 (candidates) → map update + selection
+        # Step 4 (candidates) → map update + selection + back
         self.step4_candidates.candidate_map_update.connect(self._on_candidate_map_update)
         self.step4_candidates.candidate_selected.connect(self._on_candidate_selected)
+        self.step4_candidates.back_requested.connect(self._on_candidates_back)
 
         # Step 5 (refine) → done / back
         self.step5_refine.refinement_done.connect(self._on_refinement_done)
-        self.step5_refine.back_requested.connect(lambda: self._goto_step(3))
+        self.step5_refine.back_requested.connect(self._on_refine_back)
+
+        # Step 6 (export) → back
+        self.step6_export.back_requested.connect(lambda: self._goto_step(4))
 
         # Step 6 (export) → alignment display / fit / export / restart
         self.step6_export.osm_track_ready.connect(self._on_osm_track_ready)
@@ -375,16 +381,40 @@ class App(QMainWindow):
 
     def _on_candidate_selected(self, candidate):
         self._selected_candidate = candidate
-        # Clear candidate overlays; Step 5 will show the chosen one
+        # Clear candidate overlays; Step 5 will show the chosen one as red alignment
         self.map_widget.clear_candidates()
         xy        = self._xy_list[0]        if self._xy_list        else None
         chainages = self._chainages_list[0] if self._chainages_list else None
         self.step5_refine.prepare(candidate, xy, chainages, self._settings)
+        # Show the selected candidate on the map as the active alignment
+        if hasattr(candidate, 'geo_wgs84') and candidate.geo_wgs84:
+            self.map_widget.show_alignment([[list(pt) for pt in candidate.geo_wgs84]])
         self.statusBar().showMessage(
             f"Candidate '{getattr(candidate, 'label', '')}' selected. "
             "Optionally refine spiral transitions, then Accept."
         )
         self._goto_step(4)
+
+    def _on_candidates_back(self):
+        """Go back from Candidates to Configure — clear overlays."""
+        self.map_widget.clear_candidates()
+        self.map_widget.clear_alignment()
+        self._goto_step(2)
+
+    def _on_refine_back(self):
+        """Go back from Refine to Candidates — restore all candidate overlays."""
+        self.map_widget.clear_alignment()
+        # Re-emit candidate overlays if available
+        candidates = [c for c in self.step4_candidates._candidates.values()
+                      if c.geo_wgs84]
+        if candidates:
+            payload = [
+                {"nodes": [[lat, lon] for lat, lon in c.geo_wgs84],
+                 "color": c.color_hex, "label": c.label}
+                for c in candidates
+            ]
+            self.map_widget.show_candidates(payload)
+        self._goto_step(3)
 
     # ------------------------------------------------------------------
     # Refinement done → go to Step 6
@@ -392,7 +422,12 @@ class App(QMainWindow):
 
     def _on_refinement_done(self, elements: list):
         self._final_elements = elements
-        self.step6_export.prepare(elements, self._selected_tracks, self._settings)
+        # Wrap elements as a per-track list (one track for now)
+        elements_list = [elements]
+        self.step6_export.prepare(
+            elements_list, self._selected_tracks, self._settings,
+            self._work_epsg, self._xy_list,
+        )
         self.statusBar().showMessage(
             "Refinement complete. Choose a file and click 'Start Export'."
         )

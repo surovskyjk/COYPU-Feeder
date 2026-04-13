@@ -92,10 +92,12 @@ class CandidateWorker(QThread):
     Signals
     -------
     candidate_ready(str, object)   algorithm_id, CandidateAlignment
+    candidate_error(str, str)      algorithm_id, error message (per-algo failure)
     all_done()                     all algorithms finished
-    failed(str)                    fatal error message
+    failed(str)                    fatal setup error (e.g. no data)
     """
     candidate_ready = Signal(str, object)
+    candidate_error = Signal(str, str)     # algo_id, error message
     all_done        = Signal()
     failed          = Signal(str)
 
@@ -127,22 +129,153 @@ class CandidateWorker(QThread):
                     c.color_hex = color
                     # Compute dense WGS84 points for map display
                     if c.elements:
-                        geo_xy    = reconstruct_alignment_projected(c.elements, sample_interval=5.0)
+                        geo_xy      = reconstruct_alignment_projected(
+                            c.elements, sample_interval=5.0)
                         c.geo_wgs84 = projected_to_wgs84(geo_xy, work_epsg)
                     else:
                         c.geo_wgs84 = []
-                except Exception:
-                    c = CandidateAlignment(
-                        algorithm_id=algo_id,
-                        label=gen.LABELS.get(algo_id, algo_id),
-                        elements=[],
-                        color_hex=color,
-                    )
-                self.candidate_ready.emit(algo_id, c)
+                    self.candidate_ready.emit(algo_id, c)
+                except Exception as exc:
+                    import traceback
+                    err_msg = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+                    self.candidate_error.emit(algo_id, err_msg)
 
             self.all_done.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Final export worker (uses pre-fitted elements — no re-fitting)
+# ---------------------------------------------------------------------------
+
+class FinalExportWorker(QThread):
+    """
+    Export a pre-fitted alignment to LandXML.
+
+    Skips projection + geometry fitting (elements already chosen in Step 4/5).
+    Does: OSM reference emit → elevation → LandXML build → write.
+
+    Parameters
+    ----------
+    elements_list   : list[list[dict]] — one fitted element list per track.
+                      If shorter than tracks, remaining tracks are skipped.
+    tracks          : list of Track objects (for OSM nodes + elevation sampling)
+    settings        : dict from Step3Configure
+    filepath        : output .xml path
+    work_epsg       : EPSG of the projected CRS used during candidate generation
+    xy_list         : list[np.ndarray] projected coords, one per track (for display)
+    """
+    stage_changed    = Signal(str)
+    station_progress = Signal(float, float)
+    osm_track_ready  = Signal(list)
+    alignment_ready  = Signal(list)
+    finished         = Signal(str, int)
+    failed           = Signal(str)
+
+    def __init__(self, elements_list, tracks, settings: dict,
+                 filepath: str, work_epsg: int, xy_list, parent=None):
+        super().__init__(parent)
+        self._elements_list = elements_list   # list[list[dict]]
+        self._tracks        = tracks
+        self._settings      = settings
+        self._filepath      = filepath
+        self._work_epsg     = work_epsg
+        self._xy_list       = xy_list
+
+    def run(self):
+        try:
+            self._export()
+            self.finished.emit(self._filepath, self._work_epsg)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _export(self):
+        from geometry.alignment import reconstruct_alignment_projected
+        from geometry.elevation import (
+            interpolate_along_alignment, sample_elevations, fit_vertical_geometry,
+        )
+        from geometry.curvature import compute_chainages
+        from geometry.projection import projected_to_wgs84
+        from landxml.builder import build_landxml, write_landxml
+
+        s               = self._settings
+        sample_interval = s.get("sample_interval", 20.0)
+        vc_length       = s.get("vc_length", 100.0)
+        project_name    = s.get("project_name", "Railway Alignment")
+        force_positive  = s.get("force_positive", False)
+        work_epsg       = self._work_epsg
+
+        # ── Emit raw OSM reference overlay ──────────────────────────────────
+        self.osm_track_ready.emit(
+            [[[lat, lon] for lat, lon in t.nodes] for t in self._tracks]
+        )
+
+        alignments: list[dict]         = []
+        geo_wgs84_tracks: list[list]   = []
+
+        for idx, track in enumerate(self._tracks):
+            # Use pre-fitted elements for this track (fall back to empty list)
+            h_elements = (self._elements_list[idx]
+                          if idx < len(self._elements_list) else [])
+
+            self.stage_changed.emit(
+                f"Reconstructing geometry ({idx + 1}/{len(self._tracks)}): {track.name}…"
+            )
+
+            if h_elements:
+                geo_xy = reconstruct_alignment_projected(h_elements, sample_interval=5.0)
+            else:
+                geo_xy = []
+
+            # Undo force_positive sign flip for display
+            if force_positive and geo_xy and idx < len(self._xy_list):
+                xy_orig = self._xy_list[idx]
+                if len(xy_orig):
+                    sx = float(np.sign(xy_orig[0, 0])) or 1.0
+                    sy = float(np.sign(xy_orig[0, 1])) or 1.0
+                    geo_xy = [(x * sx, y * sy) for x, y in geo_xy]
+
+            geo_latlon = projected_to_wgs84(geo_xy, work_epsg) if geo_xy else []
+            geo_wgs84_tracks.append([[lat, lon] for lat, lon in geo_latlon])
+
+            # ── Elevation ────────────────────────────────────────────────────
+            self.stage_changed.emit(
+                f"Querying DEM elevation ({idx + 1}/{len(self._tracks)}): {track.name}…"
+            )
+            xy_arr   = (self._xy_list[idx] if idx < len(self._xy_list)
+                        else np.array([[0.0, 0.0]]))
+            chainages = compute_chainages(xy_arr)
+            total_len = float(chainages[-1]) if len(chainages) else 0.0
+
+            sample_ch, sample_latlon = interpolate_along_alignment(
+                track.nodes, chainages, sample_interval=sample_interval
+            )
+            self.station_progress.emit(0.0, total_len)
+            elevs      = sample_elevations(sample_latlon)
+            self.station_progress.emit(total_len, total_len)
+            v_elements = fit_vertical_geometry(sample_ch, elevs, vc_length=vc_length)
+
+            alignments.append({
+                "name":      track.name,
+                "elements":  h_elements,
+                "vertical":  v_elements,
+                "sta_start": 0.0,
+            })
+
+        # ── Emit reconstructed alignment for map display ─────────────────────
+        self.alignment_ready.emit(geo_wgs84_tracks)
+
+        self.stage_changed.emit("Building LandXML…")
+        root = build_landxml(
+            alignments,
+            output_epsg=work_epsg,
+            project_name=project_name,
+            force_positive=force_positive,
+        )
+
+        self.stage_changed.emit("Writing file…")
+        write_landxml(root, self._filepath)
 
 
 # ---------------------------------------------------------------------------

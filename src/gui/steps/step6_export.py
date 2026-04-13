@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
-from gui.worker import ExportWorker
+from gui.worker import FinalExportWorker
 
 STAGE_PCT = {
     "Projecting":  10,
@@ -34,13 +34,16 @@ class Step6Export(QWidget):
     alignment_ready            = Signal(list)      # reconstructed geometric points
     fit_to_alignment_requested = Signal()
     start_over_requested       = Signal()
+    back_requested             = Signal()          # user wants to go back to Refine
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._tracks   = []
+        self._tracks    = []
         self._settings: dict = {}
-        self._elements: list[dict] = []   # pre-fitted elements from Step 5
-        self._worker: ExportWorker | None = None
+        self._elements_list: list[list[dict]] = []   # pre-fitted elements from Step 5
+        self._work_epsg: int = 32633
+        self._xy_list: list  = []
+        self._worker: FinalExportWorker | None = None
         self._build()
 
     def _build(self):
@@ -114,6 +117,11 @@ class Step6Export(QWidget):
 
         layout.addWidget(self._post_frame)
 
+        # ── Back button ───────────────────────────────────────────────
+        self._back_btn = QPushButton("← Back to Refine")
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self._back_btn)
+
         # ── Start button ──────────────────────────────────────────────
         self._start_btn = QPushButton("▶  Start Export")
         self._start_btn.setMinimumHeight(44)
@@ -130,23 +138,29 @@ class Step6Export(QWidget):
     # Public
     # ------------------------------------------------------------------
 
-    def prepare(self, elements: list[dict], tracks, settings: dict):
+    def prepare(self, elements_list: list, tracks, settings: dict,
+                work_epsg: int, xy_list: list):
         """
         Called by App after Step 5 refinement_done.
 
         Parameters
         ----------
-        elements : pre-fitted element list from Step 5 (stored for Phase E)
-        tracks   : list of Track objects (for OSM reference overlay + elevation)
-        settings : dict from Step3Configure
+        elements_list : list of element lists — one per track (first = candidate result)
+        tracks        : list of Track objects (for OSM reference + elevation)
+        settings      : dict from Step3Configure
+        work_epsg     : EPSG of the projected CRS
+        xy_list       : projected coordinates per track (for display reconstruction)
         """
-        self._elements = elements
-        self._tracks   = tracks
-        self._settings = settings
+        self._elements_list = elements_list
+        self._tracks        = tracks
+        self._settings      = settings
+        self._work_epsg     = work_epsg
+        self._xy_list       = xy_list
         self._progress.setValue(0)
         self._stage_lbl.setText("Ready.")
         self._station_lbl.setText("")
         self._start_btn.setEnabled(True)
+        self._back_btn.setEnabled(True)
         self._post_frame.setVisible(False)
 
     # ------------------------------------------------------------------
@@ -172,19 +186,20 @@ class Step6Export(QWidget):
             return
 
         self._start_btn.setEnabled(False)
+        self._back_btn.setEnabled(False)
         self._post_frame.setVisible(False)
         self._progress.setValue(0)
         self._stage_lbl.setText("Starting…")
         self._station_lbl.setText("")
 
-        # Phase E: pass self._elements to a smarter ExportWorker.
-        # For now: call existing ExportWorker (re-fits from tracks+settings)
-        # to keep the pipeline functional.
-        self._worker = ExportWorker(self._tracks, self._settings, filepath, self)
+        self._worker = FinalExportWorker(
+            self._elements_list, self._tracks, self._settings,
+            filepath, self._work_epsg, self._xy_list, self,
+        )
         self._worker.stage_changed.connect(self._on_stage)
         self._worker.station_progress.connect(self._on_station_progress)
-        self._worker.osm_track_ready.connect(self.osm_track_ready.emit)   # forward
-        self._worker.alignment_ready.connect(self.alignment_ready.emit)   # forward
+        self._worker.osm_track_ready.connect(self.osm_track_ready.emit)
+        self._worker.alignment_ready.connect(self.alignment_ready.emit)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -208,10 +223,12 @@ class Step6Export(QWidget):
         self._progress.setValue(100)
         self._stage_lbl.setText("Export complete!")
         self._start_btn.setEnabled(True)
+        self._back_btn.setEnabled(True)
         self._post_frame.setVisible(True)
         self.export_finished.emit(filepath, work_epsg)
 
     def _on_failed(self, error: str):
         self._stage_lbl.setText("Export failed.")
         self._start_btn.setEnabled(True)
+        self._back_btn.setEnabled(True)
         QMessageBox.critical(self, "Export failed", error)
