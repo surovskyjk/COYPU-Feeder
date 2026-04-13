@@ -1,18 +1,16 @@
 """
-Step 3 — Configure geometry & export settings.
+Step 3 — Configure geometry settings.
+CRS / output projection is chosen later in Step 6 (Export).
 """
 
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QComboBox, QSlider, QDoubleSpinBox, QCheckBox, QScrollArea, QFrame,
-    QFormLayout, QGroupBox,
+    QSlider, QDoubleSpinBox, QScrollArea, QFormLayout, QGroupBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
-
-from geometry.projection import CRS_PRESETS
 
 
 class Step3Configure(QWidget):
@@ -44,20 +42,6 @@ class Step3Configure(QWidget):
         self._project_edit.setPlaceholderText("Railway Alignment")
         pf.addRow("Project name:", self._project_edit)
         v.addWidget(proj_group)
-
-        # ── CRS ──────────────────────────────────────────────────────
-        crs_group = QGroupBox("Output CRS")
-        cf = QFormLayout(crs_group)
-
-        self._crs_combo = QComboBox()
-        for label, _ in CRS_PRESETS:
-            self._crs_combo.addItem(label)
-        cf.addRow("Preset:", self._crs_combo)
-
-        self._epsg_edit = QLineEdit()
-        self._epsg_edit.setPlaceholderText("e.g. 5514  (overrides preset)")
-        cf.addRow("Custom EPSG:", self._epsg_edit)
-        v.addWidget(crs_group)
 
         # ── Geometry ─────────────────────────────────────────────────
         geo_group = QGroupBox("Geometry Settings")
@@ -171,23 +155,6 @@ class Step3Configure(QWidget):
 
         v.addWidget(acc_group)
 
-        # ── Options ──────────────────────────────────────────────────
-        opt_group = QGroupBox("Options")
-        of = QVBoxLayout(opt_group)
-        self._force_pos_chk = QCheckBox("Force all coordinates positive")
-        self._force_pos_chk.setToolTip(
-            "Applies abs() — strips the minus sign without changing the numeric value.\n"
-            "Use for S-JTSK positive convention."
-        )
-        of.addWidget(self._force_pos_chk)
-        note = QLabel(
-            "Strips the minus sign — numeric values are unchanged\n"
-            "(e.g. S-JTSK positive convention)."
-        )
-        note.setStyleSheet("color:#888; font-size:9px; padding-left:20px;")
-        of.addWidget(note)
-        v.addWidget(opt_group)
-
         v.addStretch()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
@@ -218,29 +185,15 @@ class Step3Configure(QWidget):
         self._smooth_lbl.setText(str(val))
 
     def _on_next(self):
-        from PySide6.QtWidgets import QMessageBox
-        # Resolve EPSG
-        custom = self._epsg_edit.text().strip()
-        if custom:
-            if not custom.isdigit():
-                QMessageBox.warning(self, "Invalid EPSG", "Custom EPSG must be a number.")
-                return
-            epsg = int(custom)
-        else:
-            idx = self._crs_combo.currentIndex()
-            epsg = CRS_PRESETS[idx][1]
-
         self.config_confirmed.emit({
-            "epsg":             epsg,
-            "project_name":     self._project_edit.text().strip() or "Railway Alignment",
-            "smooth_window":    self._smooth_slider.value(),
-            "sample_interval":  self._sample_spin.value(),
-            "vc_length":        self._vc_spin.value(),
-            "min_line_length":  self._min_line_spin.value(),
-            "min_arc_length":   self._min_arc_spin.value(),
+            "project_name":      self._project_edit.text().strip() or "Railway Alignment",
+            "smooth_window":     self._smooth_slider.value(),
+            "sample_interval":   self._sample_spin.value(),
+            "vc_length":         self._vc_spin.value(),
+            "min_line_length":   self._min_line_spin.value(),
+            "min_arc_length":    self._min_arc_spin.value(),
             "min_spiral_length": self._min_spiral_spin.value(),
-            "force_positive":   self._force_pos_chk.isChecked(),
-            "max_deviation":    self._max_dev_spin.value(),
-            "check_interval":   self._check_interval_spin.value(),
-            "min_radius":       self._min_radius_spin.value(),
+            "max_deviation":     self._max_dev_spin.value(),
+            "check_interval":    self._check_interval_spin.value(),
+            "min_radius":        self._min_radius_spin.value(),
         })

@@ -333,18 +333,17 @@ class App(QMainWindow):
         import numpy as np
 
         self._settings = settings
-        epsg       = settings["epsg"]
-        work_epsg  = epsg if epsg != -1 else auto_utm_epsg(self._selected_tracks[0].nodes)
+
+        # Internal working CRS is always auto-UTM (metric, undistorted).
+        # The user chooses the output CRS in Step 6 just before exporting.
+        work_epsg = auto_utm_epsg(self._selected_tracks[0].nodes)
         self._work_epsg = work_epsg
 
-        force_positive = settings.get("force_positive", False)
         xy_list        = []
         chainages_list = []
 
         for track in self._selected_tracks:
             xy = np.array(wgs84_to_projected(track.nodes, work_epsg))
-            if force_positive:
-                xy = np.abs(xy)
             xy_list.append(xy)
             chainages_list.append(compute_chainages(xy))
 

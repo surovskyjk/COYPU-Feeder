@@ -154,41 +154,51 @@ class FinalExportWorker(QThread):
     Export a pre-fitted alignment to LandXML.
 
     Skips projection + geometry fitting (elements already chosen in Step 4/5).
-    Does: OSM reference emit → elevation → LandXML build → write.
+    Does: element reprojection → OSM reference emit → elevation → LandXML build → write.
+
+    The internal elements are in *work_epsg* (auto-UTM).  Before writing,
+    all element coordinates are transformed to *output_epsg* via
+    ``geometry.projection.transform_elements``.
 
     Parameters
     ----------
     elements_list   : list[list[dict]] — one fitted element list per track.
-                      If shorter than tracks, remaining tracks are skipped.
+                      Coordinates are in work_epsg (auto-UTM).
     tracks          : list of Track objects (for OSM nodes + elevation sampling)
-    settings        : dict from Step3Configure
+    settings        : dict from Step3Configure (geometry settings only)
     filepath        : output .xml path
-    work_epsg       : EPSG of the projected CRS used during candidate generation
-    xy_list         : list[np.ndarray] projected coords, one per track (for display)
+    work_epsg       : internal auto-UTM EPSG (coordinate system of elements)
+    output_epsg     : user-chosen output EPSG for LandXML
+    force_positive  : if True, abs() applied to output coordinates
+    xy_list         : list[np.ndarray] projected coords in work_epsg (for elevation)
     """
     stage_changed    = Signal(str)
     station_progress = Signal(float, float)
     osm_track_ready  = Signal(list)
     alignment_ready  = Signal(list)
-    finished         = Signal(str, int)
+    finished         = Signal(str, int)   # filepath, output_epsg
     failed           = Signal(str)
 
     def __init__(self, elements_list, tracks, settings: dict,
-                 filepath: str, work_epsg: int, xy_list, parent=None):
+                 filepath: str, work_epsg: int, output_epsg: int,
+                 force_positive: bool = False, xy_list=None, parent=None):
         super().__init__(parent)
-        self._elements_list = elements_list   # list[list[dict]]
-        self._tracks        = tracks
-        self._settings      = settings
-        self._filepath      = filepath
-        self._work_epsg     = work_epsg
-        self._xy_list       = xy_list
+        self._elements_list  = elements_list
+        self._tracks         = tracks
+        self._settings       = settings
+        self._filepath       = filepath
+        self._work_epsg      = work_epsg
+        self._output_epsg    = output_epsg
+        self._force_positive = force_positive
+        self._xy_list        = xy_list or []
 
     def run(self):
         try:
             self._export()
-            self.finished.emit(self._filepath, self._work_epsg)
+            self.finished.emit(self._filepath, self._output_epsg)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            import traceback
+            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
 
     def _export(self):
         from geometry.alignment import reconstruct_alignment_projected
@@ -196,50 +206,47 @@ class FinalExportWorker(QThread):
             interpolate_along_alignment, sample_elevations, fit_vertical_geometry,
         )
         from geometry.curvature import compute_chainages
-        from geometry.projection import projected_to_wgs84
+        from geometry.projection import projected_to_wgs84, transform_elements
         from landxml.builder import build_landxml, write_landxml
 
         s               = self._settings
         sample_interval = s.get("sample_interval", 20.0)
         vc_length       = s.get("vc_length", 100.0)
         project_name    = s.get("project_name", "Railway Alignment")
-        force_positive  = s.get("force_positive", False)
         work_epsg       = self._work_epsg
+        output_epsg     = self._output_epsg
+        force_positive  = self._force_positive
 
-        # ── Emit raw OSM reference overlay ──────────────────────────────────
+        # ── Emit raw OSM reference overlay (always WGS84) ───────────────────
         self.osm_track_ready.emit(
             [[[lat, lon] for lat, lon in t.nodes] for t in self._tracks]
         )
 
-        alignments: list[dict]         = []
-        geo_wgs84_tracks: list[list]   = []
+        alignments: list[dict]       = []
+        geo_wgs84_tracks: list[list] = []
 
         for idx, track in enumerate(self._tracks):
-            # Use pre-fitted elements for this track (fall back to empty list)
-            h_elements = (self._elements_list[idx]
-                          if idx < len(self._elements_list) else [])
+            # Pre-fitted elements in work_epsg (auto-UTM)
+            h_elements_utm = (self._elements_list[idx]
+                              if idx < len(self._elements_list) else [])
 
             self.stage_changed.emit(
                 f"Reconstructing geometry ({idx + 1}/{len(self._tracks)}): {track.name}…"
             )
 
-            if h_elements:
-                geo_xy = reconstruct_alignment_projected(h_elements, sample_interval=5.0)
+            # Reconstruct dense display geometry in work_epsg (undistorted UTM)
+            if h_elements_utm:
+                geo_xy_utm = reconstruct_alignment_projected(
+                    h_elements_utm, sample_interval=5.0
+                )
             else:
-                geo_xy = []
+                geo_xy_utm = []
 
-            # Undo force_positive sign flip for display
-            if force_positive and geo_xy and idx < len(self._xy_list):
-                xy_orig = self._xy_list[idx]
-                if len(xy_orig):
-                    sx = float(np.sign(xy_orig[0, 0])) or 1.0
-                    sy = float(np.sign(xy_orig[0, 1])) or 1.0
-                    geo_xy = [(x * sx, y * sy) for x, y in geo_xy]
-
-            geo_latlon = projected_to_wgs84(geo_xy, work_epsg) if geo_xy else []
+            # Convert to WGS84 for map display (always from UTM, no sign flip)
+            geo_latlon = projected_to_wgs84(geo_xy_utm, work_epsg) if geo_xy_utm else []
             geo_wgs84_tracks.append([[lat, lon] for lat, lon in geo_latlon])
 
-            # ── Elevation ────────────────────────────────────────────────────
+            # ── Elevation (uses work_epsg xy for chainage) ───────────────────
             self.stage_changed.emit(
                 f"Querying DEM elevation ({idx + 1}/{len(self._tracks)}): {track.name}…"
             )
@@ -256,9 +263,20 @@ class FinalExportWorker(QThread):
             self.station_progress.emit(total_len, total_len)
             v_elements = fit_vertical_geometry(sample_ch, elevs, vc_length=vc_length)
 
+            # ── Reproject element coordinates to output CRS ──────────────────
+            self.stage_changed.emit(
+                f"Reprojecting to EPSG:{output_epsg}…"
+            )
+            h_elements_out = transform_elements(
+                h_elements_utm,
+                from_epsg=work_epsg,
+                to_epsg=output_epsg,
+                force_positive=force_positive,
+            )
+
             alignments.append({
                 "name":      track.name,
-                "elements":  h_elements,
+                "elements":  h_elements_out,
                 "vertical":  v_elements,
                 "sta_start": 0.0,
             })
@@ -269,7 +287,7 @@ class FinalExportWorker(QThread):
         self.stage_changed.emit("Building LandXML…")
         root = build_landxml(
             alignments,
-            output_epsg=work_epsg,
+            output_epsg=output_epsg,
             project_name=project_name,
             force_positive=force_positive,
         )

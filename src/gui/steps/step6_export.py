@@ -1,35 +1,37 @@
 """
 Step 6 — Export.
-File chooser, progress bar with named stages, start button.
+CRS selection, file chooser, progress bar with named stages, start button.
 After success: shows alignment on map and offers 'Export Another Railway'.
 
-Adapted from step4_export.py — receives pre-fitted elements from Step 5.
-In Phase E the ExportWorker call will be adapted to skip re-fitting.
+The internal geometry is always fitted in auto-UTM.  Here the user picks
+the output CRS; FinalExportWorker reprojects element coordinates before
+writing LandXML.
 """
 
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QProgressBar, QFileDialog, QMessageBox, QFrame,
+    QProgressBar, QFileDialog, QMessageBox, QFrame, QComboBox, QCheckBox,
+    QFormLayout, QGroupBox,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
+from geometry.projection import CRS_PRESETS
 from gui.worker import FinalExportWorker
 
 STAGE_PCT = {
-    "Projecting":  10,
-    "Fitting":     30,
-    "Querying":    55,
-    "Building":    82,
+    "Reconstruct": 10,
+    "Querying":    40,
+    "Building":    80,
     "Writing":     92,
 }
 
 
 class Step6Export(QWidget):
     # Emitted after successful export
-    export_finished            = Signal(str, int)  # filepath, work_epsg
+    export_finished            = Signal(str, int)  # filepath, output_epsg
     osm_track_ready            = Signal(list)      # raw OSM [[lat,lon],...] per track
     alignment_ready            = Signal(list)      # reconstructed geometric points
     fit_to_alignment_requested = Signal()
@@ -40,8 +42,8 @@ class Step6Export(QWidget):
         super().__init__(parent)
         self._tracks    = []
         self._settings: dict = {}
-        self._elements_list: list[list[dict]] = []   # pre-fitted elements from Step 5
-        self._work_epsg: int = 32633
+        self._elements_list: list[list[dict]] = []
+        self._work_epsg: int = 32633   # internal auto-UTM
         self._xy_list: list  = []
         self._worker: FinalExportWorker | None = None
         self._build()
@@ -54,6 +56,35 @@ class Step6Export(QWidget):
         lbl = QLabel("Export LandXML")
         lbl.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
         layout.addWidget(lbl)
+
+        # ── Output CRS ────────────────────────────────────────────────
+        crs_group = QGroupBox("Output Coordinate System")
+        cf = QFormLayout(crs_group)
+
+        self._crs_combo = QComboBox()
+        for label, _ in CRS_PRESETS:
+            self._crs_combo.addItem(label)
+        # Default to UTM 33N — a reasonable European starting point
+        # (the internal work CRS is auto-UTM so this is a sensible match)
+        default_idx = next(
+            (i for i, (_, epsg) in enumerate(CRS_PRESETS) if epsg == 32633), 0
+        )
+        self._crs_combo.setCurrentIndex(default_idx)
+        cf.addRow("Preset:", self._crs_combo)
+
+        self._epsg_edit = QLineEdit()
+        self._epsg_edit.setPlaceholderText("e.g. 5514  (overrides preset)")
+        cf.addRow("Custom EPSG:", self._epsg_edit)
+
+        self._force_pos_chk = QCheckBox("Force all coordinates positive")
+        self._force_pos_chk.setToolTip(
+            "Applies abs() to output coordinates — strips the minus sign\n"
+            "without changing the numeric value.\n"
+            "Use for S-JTSK positive convention (EPSG:5514)."
+        )
+        cf.addRow("", self._force_pos_chk)
+
+        layout.addWidget(crs_group)
 
         # ── File path ──────────────────────────────────────────────────
         file_row = QHBoxLayout()
@@ -145,11 +176,11 @@ class Step6Export(QWidget):
 
         Parameters
         ----------
-        elements_list : list of element lists — one per track (first = candidate result)
+        elements_list : list of element lists — one per track
         tracks        : list of Track objects (for OSM reference + elevation)
-        settings      : dict from Step3Configure
-        work_epsg     : EPSG of the projected CRS
-        xy_list       : projected coordinates per track (for display reconstruction)
+        settings      : dict from Step3Configure (no epsg/force_positive here)
+        work_epsg     : internal auto-UTM EPSG used during candidate fitting
+        xy_list       : projected coordinates per track in work_epsg (for display)
         """
         self._elements_list = elements_list
         self._tracks        = tracks
@@ -166,6 +197,22 @@ class Step6Export(QWidget):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _resolve_output_epsg(self) -> int | None:
+        """Return the chosen output EPSG, or None if invalid."""
+        custom = self._epsg_edit.text().strip()
+        if custom:
+            if not custom.isdigit():
+                QMessageBox.warning(self, "Invalid EPSG",
+                                    "Custom EPSG must be a number.")
+                return None
+            return int(custom)
+        idx = self._crs_combo.currentIndex()
+        epsg = CRS_PRESETS[idx][1]
+        if epsg == -1:
+            # "Auto UTM" preset — use the same as the internal work CRS
+            return self._work_epsg
+        return epsg
 
     def _browse(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -185,6 +232,12 @@ class Step6Export(QWidget):
             QMessageBox.warning(self, "No data", "No tracks to export.")
             return
 
+        output_epsg = self._resolve_output_epsg()
+        if output_epsg is None:
+            return
+
+        force_positive = self._force_pos_chk.isChecked()
+
         self._start_btn.setEnabled(False)
         self._back_btn.setEnabled(False)
         self._post_frame.setVisible(False)
@@ -194,7 +247,12 @@ class Step6Export(QWidget):
 
         self._worker = FinalExportWorker(
             self._elements_list, self._tracks, self._settings,
-            filepath, self._work_epsg, self._xy_list, self,
+            filepath,
+            work_epsg=self._work_epsg,
+            output_epsg=output_epsg,
+            force_positive=force_positive,
+            xy_list=self._xy_list,
+            parent=self,
         )
         self._worker.stage_changed.connect(self._on_stage)
         self._worker.station_progress.connect(self._on_station_progress)
@@ -219,13 +277,13 @@ class Step6Export(QWidget):
                 f"Chainage: {current:.0f} / {total:.0f} m"
             )
 
-    def _on_finished(self, filepath: str, work_epsg: int):
+    def _on_finished(self, filepath: str, output_epsg: int):
         self._progress.setValue(100)
         self._stage_lbl.setText("Export complete!")
         self._start_btn.setEnabled(True)
         self._back_btn.setEnabled(True)
         self._post_frame.setVisible(True)
-        self.export_finished.emit(filepath, work_epsg)
+        self.export_finished.emit(filepath, output_epsg)
 
     def _on_failed(self, error: str):
         self._stage_lbl.setText("Export failed.")
