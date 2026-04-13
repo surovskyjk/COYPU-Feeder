@@ -349,6 +349,14 @@ class App(QMainWindow):
         self._chainages_list = chainages_list
 
         self.map_widget.clear_candidates()
+        self.map_widget.clear_alignment()
+
+        # Show dashed cyan OSM reference immediately so it's visible during
+        # candidate generation (Step 4) and not just after export.
+        osm_ref = [[[lat, lon] for lat, lon in t.nodes]
+                   for t in self._selected_tracks]
+        if any(len(r) > 0 for r in osm_ref):
+            self.map_widget.show_osm_reference(osm_ref)
 
         self.step4_candidates.prepare(
             self._selected_tracks, settings, xy_list, chainages_list, work_epsg
@@ -399,6 +407,7 @@ class App(QMainWindow):
         """Go back from Candidates to Configure — clear overlays."""
         self.map_widget.clear_candidates()
         self.map_widget.clear_alignment()
+        self.map_widget.clear_osm_reference()
         self._goto_step(2)
 
     def _on_refine_back(self):
