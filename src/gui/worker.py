@@ -297,6 +297,57 @@ class FinalExportWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Cross-section worker
+# ---------------------------------------------------------------------------
+
+class CrossSectionWorker(QThread):
+    """
+    Background worker for cross-section elevation analysis.
+
+    Samples terrain elevation at the central alignment and at left/right
+    perpendicular offsets every *interval_m* metres, using OpenTopoData.
+
+    Signals
+    -------
+    progress(current: int, total: int)  — stations processed so far
+    finished(results: list)             — list of result dicts
+    failed(error: str)
+    """
+
+    progress = Signal(int, int)
+    finished = Signal(list)
+    failed   = Signal(str)
+
+    def __init__(
+        self,
+        elements:   list,
+        work_epsg:  int,
+        offset_m:   float,
+        interval_m: float = 5.0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._elements   = elements
+        self._work_epsg  = work_epsg
+        self._offset_m   = offset_m
+        self._interval_m = interval_m
+
+    def run(self):
+        try:
+            from geometry.cross_section import compute_cross_section
+            results = compute_cross_section(
+                self._elements,
+                self._work_epsg,
+                self._offset_m,
+                self._interval_m,
+                progress_cb=lambda cur, tot: self.progress.emit(cur, tot),
+            )
+            self.finished.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Export worker
 # ---------------------------------------------------------------------------
 

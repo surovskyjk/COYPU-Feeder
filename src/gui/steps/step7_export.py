@@ -1,5 +1,5 @@
 """
-Step 6 — Export.
+Step 7 — Export.
 CRS selection, file chooser, progress bar with named stages, start button.
 After success: shows alignment on map and offers 'Export Another Railway'.
 
@@ -29,7 +29,7 @@ STAGE_PCT = {
 }
 
 
-class Step6Export(QWidget):
+class Step7Export(QWidget):
     # Emitted after successful export
     export_finished            = Signal(str, int)  # filepath, output_epsg
     osm_track_ready            = Signal(list)      # raw OSM [[lat,lon],...] per track

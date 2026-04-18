@@ -113,6 +113,7 @@ map.createPane('osmRefPane').style.zIndex      = '630';
 map.createPane('candidatesPane').style.zIndex  = '620';
 map.createPane('alignmentGlowPane').style.zIndex = '640';
 map.createPane('alignmentPane').style.zIndex   = '650';
+map.createPane('crossSectionPane').style.zIndex = '625';
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -120,6 +121,8 @@ var trackLayers     = [];
 var osmRefLayers    = [];
 var alignmentLayers = [];
 var candidateLayers = [];
+var csLeftLayer     = null;
+var csRightLayer    = null;
 var backend         = null;
 var _showRailOverlay = true;
 
@@ -278,11 +281,34 @@ function clearCandidates() {
   candidateLayers = [];
 }
 
+/* ── Cross-section overlays (left / right, colour-coded) ──────── */
+function showCrossSection(leftPts, rightPts) {
+  clearCrossSection();
+  function buildLayer(pts) {
+    var layer = L.layerGroup();
+    for (var i = 0; i < pts.length - 1; i++) {
+      L.polyline(
+        [[pts[i][0], pts[i][1]], [pts[i+1][0], pts[i+1][1]]],
+        {color: pts[i][2], weight: 4, opacity: 0.85, pane: 'crossSectionPane'}
+      ).addTo(layer);
+    }
+    return layer;
+  }
+  if (leftPts  && leftPts.length  > 0) csLeftLayer  = buildLayer(leftPts).addTo(map);
+  if (rightPts && rightPts.length > 0) csRightLayer = buildLayer(rightPts).addTo(map);
+}
+
+function clearCrossSection() {
+  if (csLeftLayer)  { try { map.removeLayer(csLeftLayer);  } catch(e) {} csLeftLayer  = null; }
+  if (csRightLayer) { try { map.removeLayer(csRightLayer); } catch(e) {} csRightLayer = null; }
+}
+
 function clearAll() {
   showTracks([]);
   clearOSMReference();
   clearAlignment();
   clearCandidates();
+  clearCrossSection();
 }
 </script>
 </body>
@@ -549,5 +575,23 @@ class MapWidget(QWidget):
         """Remove all candidate alignment overlays."""
         self._run_js("clearCandidates()")
 
+    def show_cross_section(self, left_pts: list, right_pts: list):
+        """
+        Draw colour-coded cross-section overlays.
+
+        Parameters
+        ----------
+        left_pts / right_pts : list of [lat, lon, color_hex]
+            One entry per sampled station; consecutive entries are connected
+            by polyline segments coloured by the first entry's colour.
+        """
+        self._run_js(
+            f"showCrossSection({json.dumps(left_pts)}, {json.dumps(right_pts)})"
+        )
+
+    def clear_cross_section(self):
+        """Remove cross-section overlays."""
+        self._run_js("clearCrossSection()")
+
     def clear_all(self):
-        self._run_js("clearAll()")   # clears tracks + osmRef + alignment + candidates
+        self._run_js("clearAll()")   # clears tracks + osmRef + alignment + candidates + cross-section

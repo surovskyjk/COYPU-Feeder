@@ -20,8 +20,9 @@ from .steps.step1_find import Step1Find
 from .steps.step2_section import Step2Section
 from .steps.step3_configure import Step3Configure
 from .steps.step4_candidates import Step4Candidates
-from .steps.step5_refine import Step5Refine
-from .steps.step6_export import Step6Export
+from .steps.step5_refine        import Step5Refine
+from .steps.step6_crosssection  import Step6CrossSection
+from .steps.step7_export        import Step7Export
 
 # Maximum map-view span (km) allowed for "search in view"
 _MAX_VIEW_KM = 20.0
@@ -77,14 +78,16 @@ class App(QMainWindow):
         self.step3              = Step3Configure()
         self.step4_candidates   = Step4Candidates()
         self.step5_refine       = Step5Refine()
-        self.step6_export       = Step6Export()
+        self.step6_crosssec     = Step6CrossSection()
+        self.step7_export       = Step7Export()
 
         self.stack.addWidget(self.step1)            # 0
         self.stack.addWidget(self.step2)            # 1
         self.stack.addWidget(self.step3)            # 2
         self.stack.addWidget(self.step4_candidates) # 3
         self.stack.addWidget(self.step5_refine)     # 4
-        self.stack.addWidget(self.step6_export)     # 5
+        self.stack.addWidget(self.step6_crosssec)   # 5
+        self.stack.addWidget(self.step7_export)     # 6
 
         h.addWidget(self.stack)
         self.statusBar().showMessage(
@@ -133,15 +136,20 @@ class App(QMainWindow):
             self._on_refine_alignment_update
         )
 
-        # Step 6 (export) → back
-        self.step6_export.back_requested.connect(lambda: self._goto_step(4))
+        # Step 6 (cross-section) → back / done / map overlay
+        self.step6_crosssec.back_requested.connect(lambda: self._goto_step(4))
+        self.step6_crosssec.analysis_done.connect(self._on_analysis_done)
+        self.step6_crosssec.cross_section_ready.connect(self._on_cross_section_ready)
 
-        # Step 6 (export) → alignment display / fit / export / restart
-        self.step6_export.osm_track_ready.connect(self._on_osm_track_ready)
-        self.step6_export.alignment_ready.connect(self._on_alignment_ready)
-        self.step6_export.fit_to_alignment_requested.connect(self._on_fit_to_alignment)
-        self.step6_export.export_finished.connect(self._on_export_finished)
-        self.step6_export.start_over_requested.connect(self._start_over)
+        # Step 7 (export) → back
+        self.step7_export.back_requested.connect(lambda: self._goto_step(5))
+
+        # Step 7 (export) → alignment display / fit / export / restart
+        self.step7_export.osm_track_ready.connect(self._on_osm_track_ready)
+        self.step7_export.alignment_ready.connect(self._on_alignment_ready)
+        self.step7_export.fit_to_alignment_requested.connect(self._on_fit_to_alignment)
+        self.step7_export.export_finished.connect(self._on_export_finished)
+        self.step7_export.start_over_requested.connect(self._start_over)
 
     # ------------------------------------------------------------------
     # System colour-scheme changes (dark ↔ light)
@@ -452,16 +460,35 @@ class App(QMainWindow):
 
     def _on_refinement_done(self, elements: list):
         self._final_elements = elements
-        # Wrap elements as a per-track list (one track for now)
-        elements_list = [elements]
-        self.step6_export.prepare(
+        self.step6_crosssec.prepare(elements, self._work_epsg)
+        self.statusBar().showMessage(
+            "Refinement complete. Run cross-section analysis or skip to export."
+        )
+        self._goto_step(5)
+
+    # ------------------------------------------------------------------
+    # Cross-section analysis done → go to Step 7
+    # ------------------------------------------------------------------
+
+    def _on_analysis_done(self, results: list):
+        # results may be [] if the step was skipped
+        elements_list = [self._final_elements]
+        self.step7_export.prepare(
             elements_list, self._selected_tracks, self._settings,
             self._work_epsg, self._xy_list,
         )
-        self.statusBar().showMessage(
-            "Refinement complete. Choose a file and click 'Start Export'."
+        n = len(results)
+        msg = (
+            f"Cross-section: {n} stations analysed. Choose a file and export."
+            if n else
+            "Skipped cross-section analysis. Choose a file and export."
         )
-        self._goto_step(5)
+        self.statusBar().showMessage(msg)
+        self._goto_step(6)
+
+    def _on_cross_section_ready(self, left_pts: list, right_pts: list):
+        """Show coloured cross-section overlays on the map."""
+        self.map_widget.show_cross_section(left_pts, right_pts)
 
     # ------------------------------------------------------------------
     # Export finished
@@ -485,7 +512,7 @@ class App(QMainWindow):
         self._final_elements     = []
         self._xy_list            = []
         self._chainages_list     = []
-        self.map_widget.clear_all()   # clears tracks + cyan OSM ref + red alignment + candidates
+        self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section
         self.sidebar.reset()
         self._goto_step(0)
         self.statusBar().showMessage(
