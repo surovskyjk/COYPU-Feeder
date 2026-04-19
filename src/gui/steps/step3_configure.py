@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSlider, QDoubleSpinBox, QScrollArea, QFormLayout, QGroupBox,
+    QSlider, QDoubleSpinBox, QSpinBox, QScrollArea, QFormLayout, QGroupBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
@@ -43,75 +43,48 @@ class Step3Configure(QWidget):
         pf.addRow("Project name:", self._project_edit)
         v.addWidget(proj_group)
 
-        # ── Geometry ─────────────────────────────────────────────────
-        geo_group = QGroupBox("Geometry Settings")
-        gf = QVBoxLayout(geo_group)
-        gform = QFormLayout()
+        # ── Export Settings ───────────────────────────────────────────
+        exp_group = QGroupBox("Export Settings")
+        exp_group.setToolTip(
+            "These settings control the LandXML output — elevation sampling\n"
+            "density and vertical curve shape.  They do not affect how the\n"
+            "horizontal geometry candidates are computed."
+        )
+        ef = QFormLayout(exp_group)
 
-        # Smoothing
-        smooth_row = QHBoxLayout()
-        self._smooth_slider = QSlider(Qt.Orientation.Horizontal)
-        self._smooth_slider.setRange(5, 51)
-        self._smooth_slider.setSingleStep(2)
-        self._smooth_slider.setPageStep(2)
-        self._smooth_slider.setValue(21)
-        self._smooth_lbl = QLabel("21")
-        self._smooth_lbl.setFixedWidth(28)
-        self._smooth_slider.valueChanged.connect(self._on_smooth)
-        smooth_row.addWidget(self._smooth_slider)
-        smooth_row.addWidget(self._smooth_lbl)
-        gform.addRow("Curvature smooth window:", smooth_row)
-
-        # Sample interval
         self._sample_spin = QDoubleSpinBox()
         self._sample_spin.setRange(1.0, 500.0)
         self._sample_spin.setSingleStep(5.0)
         self._sample_spin.setValue(20.0)
         self._sample_spin.setSuffix(" m")
-        gform.addRow("Elevation sample interval:", self._sample_spin)
+        self._sample_spin.setToolTip(
+            "Distance between elevation sampling points along the alignment.\n"
+            "Smaller = more elevation detail in the LandXML output."
+        )
+        ef.addRow("Elevation sample interval:", self._sample_spin)
 
-        # Vertical curve length
         self._vc_spin = QDoubleSpinBox()
         self._vc_spin.setRange(10.0, 2000.0)
         self._vc_spin.setSingleStep(10.0)
         self._vc_spin.setValue(100.0)
         self._vc_spin.setSuffix(" m")
-        gform.addRow("Vertical curve length:", self._vc_spin)
+        self._vc_spin.setToolTip(
+            "Length of fitted parabolic vertical curves (sags and crests)\n"
+            "in the LandXML output.  Mainline: 100–500 m."
+        )
+        ef.addRow("Vertical curve length:", self._vc_spin)
 
-        gf.addLayout(gform)
+        v.addWidget(exp_group)
 
-        # Min element lengths (per-type)
-        min_group = QGroupBox("Minimum Element Lengths")
-        mf = QFormLayout(min_group)
-
-        self._min_line_spin = QDoubleSpinBox()
-        self._min_line_spin.setRange(1.0, 500.0)
-        self._min_line_spin.setValue(10.0)
-        self._min_line_spin.setSuffix(" m")
-        mf.addRow("Minimum Line length:", self._min_line_spin)
-
-        self._min_arc_spin = QDoubleSpinBox()
-        self._min_arc_spin.setRange(1.0, 500.0)
-        self._min_arc_spin.setValue(10.0)
-        self._min_arc_spin.setSuffix(" m")
-        mf.addRow("Minimum Arc (Curve) length:", self._min_arc_spin)
-
-        self._min_spiral_spin = QDoubleSpinBox()
-        self._min_spiral_spin.setRange(1.0, 500.0)
-        self._min_spiral_spin.setValue(10.0)
-        self._min_spiral_spin.setSuffix(" m")
-        mf.addRow("Minimum Spiral length:", self._min_spiral_spin)
-
-        gf.addWidget(min_group)
-        v.addWidget(geo_group)
-
-        # ── Alignment accuracy ────────────────────────────────────────
+        # ── Alignment Accuracy ────────────────────────────────────────
         acc_group = QGroupBox("Alignment Accuracy")
         acc_group.setToolTip(
             "Controls how closely the fitted geometric elements must follow\n"
-            "the original OSM polyline. After the initial curvature-based fit,\n"
-            "any element whose maximum deviation exceeds the threshold is\n"
-            "recursively split and re-fitted."
+            "the original OSM polyline.\n\n"
+            "Typical values:\n"
+            "  0.10 m — centimetre accuracy (slow, many elements)\n"
+            "  0.50 m — balanced (default)\n"
+            "  2.00 m — coarse / fast"
         )
         af = QFormLayout(acc_group)
 
@@ -121,10 +94,9 @@ class Step3Configure(QWidget):
         self._max_dev_spin.setValue(0.50)
         self._max_dev_spin.setSuffix(" m")
         self._max_dev_spin.setToolTip(
-            "Maximum allowed deviation between the fitted alignment element\n"
-            "and the original OSM polyline.\n"
-            "Smaller values → more elements, higher accuracy.\n"
-            "Typical range: 0.05 m (cm accuracy) to 2.0 m (rough fit)."
+            "Maximum allowed perpendicular distance between any fitted\n"
+            "element and the OSM polyline.\n"
+            "All three algorithms use this as their convergence target."
         )
         af.addRow("Max deviation from OSM line:", self._max_dev_spin)
 
@@ -141,23 +113,32 @@ class Step3Configure(QWidget):
         )
         af.addRow("Minimum curve radius:", self._min_radius_spin)
 
-        self._check_interval_spin = QDoubleSpinBox()
-        self._check_interval_spin.setRange(1.0, 50.0)
-        self._check_interval_spin.setSingleStep(1.0)
-        self._check_interval_spin.setValue(5.0)
-        self._check_interval_spin.setSuffix(" m")
-        self._check_interval_spin.setToolTip(
-            "Sampling interval along each fitted element for deviation checking.\n"
-            "Smaller values catch localised deviations more precisely but are\n"
-            "slower. 5 m is a good default for typical railway OSM data."
-        )
-        af.addRow("Deviation check interval:", self._check_interval_spin)
-
         v.addWidget(acc_group)
 
         # ── Candidate Generation ──────────────────────────────────────
         cand_group = QGroupBox("Candidate Generation")
         cf = QFormLayout(cand_group)
+
+        # Curvature smooth window — Segment & Fit only
+        smooth_row = QHBoxLayout()
+        self._smooth_slider = QSlider(Qt.Orientation.Horizontal)
+        self._smooth_slider.setRange(5, 51)
+        self._smooth_slider.setSingleStep(2)
+        self._smooth_slider.setPageStep(2)
+        self._smooth_slider.setValue(21)
+        self._smooth_lbl = QLabel("21")
+        self._smooth_lbl.setFixedWidth(28)
+        self._smooth_slider.valueChanged.connect(self._on_smooth)
+        smooth_row.addWidget(self._smooth_slider)
+        smooth_row.addWidget(self._smooth_lbl)
+        smooth_lbl_row = QLabel("Curvature smooth window\n(Segment & Fit):")
+        smooth_lbl_row.setToolTip(
+            "Savitzky-Golay smoothing window applied to the curvature profile\n"
+            "before segmenting into Line / Arc zones.\n"
+            "Used by the 'Segment & Fit' algorithm only.\n"
+            "Larger = smoother, fewer segments; smaller = more sensitive to noise."
+        )
+        cf.addRow(smooth_lbl_row, smooth_row)
 
         self._merge_pct_spin = QDoubleSpinBox()
         self._merge_pct_spin.setRange(5.0, 40.0)
@@ -166,13 +147,26 @@ class Step3Configure(QWidget):
         self._merge_pct_spin.setValue(15.0)
         self._merge_pct_spin.setSuffix(" %")
         self._merge_pct_spin.setToolTip(
-            "Controls how aggressively consecutive arcs are merged.\n"
-            "Low (5 %): many small, precise arc segments — Tight candidate.\n"
-            "High (40 %): fewer, smoother arcs — Smooth candidate.\n"
-            "The Balanced candidate uses this value directly;\n"
-            "Tight uses half of it; Smooth uses double."
+            "Controls how aggressively adjacent arc segments are merged.\n"
+            "  5 %  → many small, precise arcs\n"
+            " 15 %  → balanced (default)\n"
+            " 30 %  → fewer, longer arcs\n\n"
+            "Also used as the DP regularisation strength and MC perturbation range."
         )
         cf.addRow("Radius merge tolerance:", self._merge_pct_spin)
+
+        self._time_budget_spin = QSpinBox()
+        self._time_budget_spin.setRange(10, 300)
+        self._time_budget_spin.setSingleStep(10)
+        self._time_budget_spin.setValue(60)
+        self._time_budget_spin.setSuffix(" s")
+        self._time_budget_spin.setToolTip(
+            "Maximum wall-clock time allowed per algorithm.\n"
+            "Applies to 'DP Segmentation' and 'Progressive MC'.\n"
+            "Larger value → more iterations, better accuracy, longer wait.\n"
+            "30 s is usually sufficient for sections under 10 km."
+        )
+        cf.addRow("Max computing time:", self._time_budget_spin)
 
         v.addWidget(cand_group)
 
@@ -207,15 +201,18 @@ class Step3Configure(QWidget):
 
     def _on_next(self):
         self.config_confirmed.emit({
-            "project_name":      self._project_edit.text().strip() or "Railway Alignment",
-            "smooth_window":     self._smooth_slider.value(),
-            "sample_interval":   self._sample_spin.value(),
-            "vc_length":         self._vc_spin.value(),
-            "min_line_length":   self._min_line_spin.value(),
-            "min_arc_length":    self._min_arc_spin.value(),
-            "min_spiral_length": self._min_spiral_spin.value(),
-            "max_deviation":     self._max_dev_spin.value(),
-            "check_interval":    self._check_interval_spin.value(),
-            "min_radius":        self._min_radius_spin.value(),
-            "merge_radius_pct":  self._merge_pct_spin.value(),
+            "project_name":    self._project_edit.text().strip() or "Railway Alignment",
+            "smooth_window":   self._smooth_slider.value(),
+            "sample_interval": self._sample_spin.value(),
+            "vc_length":       self._vc_spin.value(),
+            "max_deviation":   self._max_dev_spin.value(),
+            "min_radius":      self._min_radius_spin.value(),
+            "merge_radius_pct": self._merge_pct_spin.value(),
+            "time_budget_s":   float(self._time_budget_spin.value()),
+            # Keep these with defaults so downstream code that still references
+            # them (e.g. old ExportWorker path) does not KeyError.
+            "check_interval":  5.0,
+            "min_line_length":   10.0,
+            "min_arc_length":    10.0,
+            "min_spiral_length": 10.0,
         })

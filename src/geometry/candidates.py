@@ -171,6 +171,7 @@ class CandidateGenerator:
         self.max_deviation  = settings.get("max_deviation",    0.5)
         self.check_interval = settings.get("check_interval",   5.0)
         self.merge_pct      = settings.get("merge_radius_pct", 15.0)
+        self.time_budget_s  = settings.get("time_budget_s",    60.0)
 
     def run_all(self) -> list[CandidateAlignment]:
         results = []
@@ -189,13 +190,13 @@ class CandidateGenerator:
             results.append(c)
         return results
 
-    def _run_one(self, algo_id: str) -> CandidateAlignment:
+    def _run_one(self, algo_id: str, progress_cb=None, preview_cb=None) -> CandidateAlignment:
         if algo_id == "segment_fit":
-            return self._run_segment_fit()
+            return self._run_segment_fit(progress_cb=progress_cb)
         elif algo_id == "dp_segment":
-            return self._run_dp()
+            return self._run_dp(progress_cb=progress_cb)
         elif algo_id == "progressive_mc":
-            return self._run_progressive_mc()
+            return self._run_progressive_mc(progress_cb=progress_cb, preview_cb=preview_cb)
         elif algo_id == "raw":
             return self._run_raw()
         else:
@@ -205,13 +206,17 @@ class CandidateGenerator:
     # Algorithm 1 — Segment & Fit
     # ------------------------------------------------------------------
 
-    def _run_segment_fit(self) -> CandidateAlignment:
+    def _run_segment_fit(self, progress_cb=None) -> CandidateAlignment:
         """
         Curvature segmentation + independent primitive fitting + tangent-point
         C0/C1 assembly.  Fast and reliable for clean OSM data.
         """
         from geometry.alignment import _fit_circle_kasa
         from geometry.curvature import compute_curvature, smooth_curvature
+
+        def _p(msg):
+            if progress_cb:
+                progress_cb(msg)
 
         xy, chainages = self.xy, self.chainages
         N = len(xy)
@@ -225,6 +230,7 @@ class CandidateGenerator:
 
         LINE_TOL = 0.001
 
+        _p("Computing curvature profile…")
         kappa        = compute_curvature(xy)
         kappa_smooth = smooth_curvature(kappa, window=self.smooth_window)
 
@@ -240,12 +246,14 @@ class CandidateGenerator:
                 micro_types.append("Arc")
                 micro_sign.append(+1 if k > 0.0 else -1)
 
+        _p("Segmenting by curvature sign…")
         segments = _merge_segments_by_sign(micro_types, micro_sign, xy)
         if not segments:
             elements = _two_point_line(xy, chainages)
             metrics  = evaluate_candidate(elements, xy, chainages, self.check_interval)
             return CandidateAlignment("segment_fit", "Segment & Fit", elements, **metrics)
 
+        _p("Fitting circle arcs (Kasa)…")
         # Kasa refinement
         for seg in segments:
             if seg.seg_type == "Arc":
@@ -267,6 +275,7 @@ class CandidateGenerator:
             segments = _merge_consecutive_lines(segments, xy)
 
         # Stage-2 radius merge
+        _p("Merging similar-radius arcs…")
         segments = _merge_arcs_by_radius(segments, xy, self.merge_pct)
 
         # Re-run Kasa after merge
@@ -278,7 +287,9 @@ class CandidateGenerator:
                     if cx is not None and r is not None and self.min_radius <= r < 1e6:
                         seg.R_median = float(r)
 
+        _p("Assembling elements with tangent junctions…")
         elements = _connect_segments_tangent(segments, xy, chainages, self.min_radius)
+        _p("Evaluating quality…")
         metrics  = evaluate_candidate(elements, xy, chainages, self.check_interval)
         return CandidateAlignment("segment_fit", "Segment & Fit", elements, **metrics)
 
@@ -286,18 +297,29 @@ class CandidateGenerator:
     # Algorithm 2 — DP Segmentation
     # ------------------------------------------------------------------
 
-    def _run_dp(self) -> CandidateAlignment:
+    def _run_dp(self, progress_cb=None) -> CandidateAlignment:
         """
         Imai-Iri dynamic programming: finds the globally optimal segmentation
         (minimum SSE + regularisation × element count).
         O(N²) cost table; practical for N < 1000 OSM nodes.
         """
+        def _p(msg):
+            if progress_cb:
+                progress_cb(msg)
+
         # lam scales with merge_pct: higher tolerance → fewer, longer elements
         lam = max(1.0, self.merge_pct) ** 2 * 0.5
-        segments = _dp_segmentation(self.xy, self.chainages, lam, self.min_radius)
+        _p("Building cost table…")
+        segments = _dp_segmentation(
+            self.xy, self.chainages, lam, self.min_radius,
+            progress_cb=progress_cb,
+            time_budget_s=self.time_budget_s,
+        )
+        _p("Assembling elements with tangent junctions…")
         elements = _connect_segments_tangent(
             segments, self.xy, self.chainages, self.min_radius
         )
+        _p("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
         return CandidateAlignment("dp_segment", "DP Segmentation", elements, **metrics)
 
@@ -305,7 +327,7 @@ class CandidateGenerator:
     # Algorithm 3 — Progressive MC
     # ------------------------------------------------------------------
 
-    def _run_progressive_mc(self) -> CandidateAlignment:
+    def _run_progressive_mc(self, progress_cb=None, preview_cb=None) -> CandidateAlignment:
         """
         Progressive element insertion with simulated annealing.
         Guaranteed to reach max_deviation if feasible.
@@ -315,7 +337,12 @@ class CandidateGenerator:
             max_deviation=self.max_deviation,
             min_radius=self.min_radius,
             merge_pct=self.merge_pct,
+            time_budget_s=self.time_budget_s,
+            progress_cb=progress_cb,
+            preview_cb=preview_cb,
         )
+        if progress_cb:
+            progress_cb("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
         return CandidateAlignment("progressive_mc", "Progressive MC", elements, **metrics)
 
@@ -792,10 +819,12 @@ def _arc_sse_and_fit(
 
 
 def _dp_segmentation(
-    xy:         np.ndarray,
-    chainages:  np.ndarray,
-    lam:        float,
-    min_radius: float,
+    xy:           np.ndarray,
+    chainages:    np.ndarray,
+    lam:          float,
+    min_radius:   float,
+    progress_cb=None,
+    time_budget_s: float = 60.0,
 ) -> list[_Segment]:
     """
     Imai-Iri DP: find the segmentation of OSM[0..N-1] minimising
@@ -804,6 +833,12 @@ def _dp_segmentation(
     lam controls the trade-off: larger → fewer, longer elements.
     To keep O(N²) tractable, spans longer than max_span points skip the arc fit.
     """
+    t_dp_start = time.monotonic()
+
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+
     N = len(xy)
     if N < 2:
         return []
@@ -822,6 +857,7 @@ def _dp_segmentation(
         # build a reverse map: subsampled index → original index
         orig_idx = sub_idx
         Ndp = len(xy_dp)
+        _p(f"Subsampled {N} → {Ndp} nodes for cost table…")
     else:
         xy_dp    = xy
         ch_dp    = chainages
@@ -838,7 +874,20 @@ def _dp_segmentation(
     arc_R_arr = np.zeros((Ndp, Ndp), dtype=float)
     arc_rot   = np.empty((Ndp, Ndp), dtype=object)
 
+    _p(f"Building cost table (0/{Ndp} rows)…")
+    last_report_i = -1
+    report_every  = max(1, Ndp // 10)   # report ~10 times across the table
+
     for i in range(Ndp - 1):
+        # Time-budget check (DP rarely exceeds it, but guard anyway)
+        if time.monotonic() - t_dp_start > time_budget_s:
+            _p(f"Time limit reached at row {i}/{Ndp}; using partial cost table.")
+            break
+
+        if i - last_report_i >= report_every:
+            _p(f"Cost table: {i}/{Ndp} rows…")
+            last_report_i = i
+
         for j in range(i + 1, min(i + max_span, Ndp)):
             l_sse = _line_sse(xy_dp, i, j)
             best_sse  = l_sse
@@ -861,6 +910,8 @@ def _dp_segmentation(
             cost_val[i, j]  = best_sse
             cost_type[i, j] = best_type
 
+    _p("Running dynamic programming…")
+
     # Dynamic programming on the subsampled index space
     dp_cost = np.full(Ndp, np.inf, dtype=float)
     dp_prev = np.full(Ndp, -1,    dtype=int)
@@ -874,6 +925,8 @@ def _dp_segmentation(
             if c < dp_cost[j]:
                 dp_cost[j] = c
                 dp_prev[j] = i
+
+    _p("Tracing optimal segmentation…")
 
     # Reconstruct breakpoints (in subsampled space)
     bp_sub: list[int] = []
@@ -1016,7 +1069,10 @@ def _worst_osm_deviation(
 ) -> tuple[float, int]:
     """
     Return (max_deviation, worst_osm_idx) over all OSM points.
-    Uses perpendicular distance from each OSM point to the nearest element.
+
+    Vectorised per-element: computes perpendicular distances for all points
+    in an element's chainage window at once using numpy, which is significantly
+    faster than the previous point-by-point scalar loop.
     """
     worst_dev = 0.0
     worst_idx = len(xy) // 2
@@ -1024,25 +1080,51 @@ def _worst_osm_deviation(
     for el in elements:
         sta0 = el.get("sta_start", 0.0)
         sta1 = sta0 + el.get("length", 0.0)
-        mask = (chainages >= sta0 - 0.1) & (chainages <= sta1 + 0.1)
+        mask    = (chainages >= sta0 - 0.1) & (chainages <= sta1 + 0.1)
         idx_arr = np.where(mask)[0]
-        for idx in idx_arr:
-            d = _point_to_element_dist(xy[idx], el)
-            if d > worst_dev:
-                worst_dev = d
-                worst_idx = int(idx)
+        if len(idx_arr) == 0:
+            continue
+
+        pts = xy[idx_arr]  # shape (K, 2)
+
+        etype = el.get("type", "Line")
+        if etype == "Arc":
+            center = np.array(el["center"], dtype=float)
+            r      = float(el.get("radius", 1.0))
+            dists  = np.abs(np.linalg.norm(pts - center, axis=1) - r)
+        else:
+            # Line (or unknown — treat as Line)
+            start  = np.array(el.get("start", [0.0, 0.0]), dtype=float)
+            end    = np.array(el.get("end",   [0.0, 0.0]), dtype=float)
+            seg    = end - start
+            seg_sq = float(np.dot(seg, seg))
+            if seg_sq < 1e-18:
+                dists = np.linalg.norm(pts - start, axis=1)
+            else:
+                t    = np.dot(pts - start, seg) / seg_sq
+                t    = np.clip(t, 0.0, 1.0)
+                proj = start + t[:, np.newaxis] * seg
+                dists = np.linalg.norm(pts - proj, axis=1)
+
+        local_max = float(dists.max())
+        if local_max > worst_dev:
+            worst_dev = local_max
+            worst_idx = int(idx_arr[int(dists.argmax())])
 
     return worst_dev, worst_idx
 
 
 def _progressive_mc_build(
-    xy:           np.ndarray,
-    chainages:    np.ndarray,
+    xy:            np.ndarray,
+    chainages:     np.ndarray,
     max_deviation: float,
-    min_radius:   float,
-    merge_pct:    float = 15.0,
-    max_elements: int   = 80,
-    time_budget_s: float = 45.0,
+    min_radius:    float,
+    merge_pct:     float = 15.0,
+    max_elements:  int   = 80,
+    time_budget_s: float = 60.0,
+    progress_cb=None,
+    preview_cb=None,
+    preview_interval_s: float = 7.0,
 ) -> list[dict]:
     """
     Progressive insertion with simulated annealing.
@@ -1057,13 +1139,22 @@ def _progressive_mc_build(
 
     On completion, the final boundary/type assignment is assembled with
     tangent-point junctions (via _connect_segments_tangent).
+
+    progress_cb(msg: str)        — called at each iteration with status text
+    preview_cb(elements: list)   — called every ~preview_interval_s seconds with
+                                   a preliminary element list for map visualisation
     """
     N = len(xy)
     if N < 2:
         return []
 
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+
     rng = np.random.default_rng(42)
-    t_start = time.monotonic()
+    t_start        = time.monotonic()
+    t_last_preview = t_start
 
     # Initial state: one Line covering everything
     boundaries: list[int] = [0, N - 1]
@@ -1071,12 +1162,17 @@ def _progressive_mc_build(
 
     T = max(max_deviation * 2.0, 0.5)   # SA initial temperature
 
+    _p("Starting — 1 element, evaluating…")
+
     iteration = 0
     while True:
         # ── time / size budget ───────────────────────────────────────────
-        if time.monotonic() - t_start > time_budget_s:
+        elapsed = time.monotonic() - t_start
+        if elapsed > time_budget_s:
+            _p(f"Time limit reached ({time_budget_s:.0f} s). Finalising…")
             break
         if len(boundaries) >= max_elements + 1:
+            _p(f"Element limit reached ({max_elements}). Finalising…")
             break
 
         # ── evaluate current state ───────────────────────────────────────
@@ -1087,7 +1183,46 @@ def _progressive_mc_build(
             break
         worst_dev, worst_idx = _worst_osm_deviation(elements, xy, chainages)
 
+        n_el = len(boundaries) - 1
+        _p(
+            f"Iteration {iteration + 1}  |  {n_el} element{'s' if n_el != 1 else ''}"
+            f"  |  max deviation {worst_dev:.3f} m"
+            f"  |  {elapsed:.0f}/{time_budget_s:.0f} s"
+        )
+
+        # ── periodic preview for map visualisation ───────────────────────
+        if preview_cb is not None:
+            now = time.monotonic()
+            if now - t_last_preview >= preview_interval_s:
+                try:
+                    # Build a quick tangent-junction version of current state
+                    _preview_segs: list[_Segment] = []
+                    for k in range(len(boundaries) - 1):
+                        i0p, i1p = boundaries[k], boundaries[k + 1]
+                        typ_p  = types[k]
+                        defl_p = _segment_deflection(xy[i0p: i1p + 1])
+                        rot_p  = "ccw" if defl_p >= 0 else "cw"
+                        R_p    = math.inf
+                        if typ_p == "Arc":
+                            res = _fit_arc_robust(xy, i0p, i1p, min_radius)
+                            if res:
+                                R_p = res[2]
+                            else:
+                                typ_p = "Line"
+                        _preview_segs.append(_Segment(
+                            seg_type=typ_p, start_idx=i0p, end_idx=i1p,
+                            R_median=R_p, rot=rot_p, deflection=defl_p,
+                        ))
+                    preview_elements = _connect_segments_tangent(
+                        _preview_segs, xy, chainages, min_radius
+                    )
+                    preview_cb(preview_elements)
+                except Exception:
+                    pass
+                t_last_preview = now
+
         if worst_dev <= max_deviation:
+            _p(f"Converged! Max deviation {worst_dev:.3f} m within {max_deviation:.3f} m target")
             break
 
         # ── find which segment contains the worst point ──────────────────
@@ -1177,6 +1312,8 @@ def _progressive_mc_build(
             T *= 0.95
 
         iteration += 1
+
+    _p("Assembling final elements with tangent junctions…")
 
     # ── final assembly with tangent-point junctions ───────────────────────
     segments: list[_Segment] = []

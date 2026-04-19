@@ -1,8 +1,18 @@
 """
 Step 4 — Candidate Alignments.
-Runs three algorithms (Curvature Heuristic, RANSAC Arc Fit, Greedy Split)
-in a background thread and shows metrics cards for each.
-The user picks one candidate to proceed to Step 5 (Refine).
+
+Runs four algorithms (Segment & Fit, DP Segmentation, Progressive MC, Raw OSM)
+in a background thread and shows a metrics card per algorithm.
+
+Each card has:
+  • A thin coloured bar identifying the algorithm
+  • A per-card indeterminate progress bar while the algorithm runs
+  • A live status label showing what the algorithm is doing
+  • Quality metrics once the algorithm finishes
+  • A "Select This" button to proceed to Step 5
+
+Progressive MC also emits intermediate (preview) results every ~7 s so the map
+shows a preliminary alignment before the final result is ready.
 """
 
 from __future__ import annotations
@@ -12,7 +22,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QGroupBox, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +30,7 @@ from PySide6.QtGui import QFont
 # ---------------------------------------------------------------------------
 
 class CandidateCard(QGroupBox):
-    """A single algorithm result card with metrics and a Select button."""
+    """A single algorithm result card with progress indicator, metrics and Select button."""
     select_clicked = Signal(str)   # algorithm_id
 
     def __init__(self, algo_id: str, label: str, color: str, parent=None):
@@ -31,18 +41,37 @@ class CandidateCard(QGroupBox):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 10, 8, 8)
         layout.setSpacing(4)
 
-        # Coloured indicator bar
-        dot = QFrame()
-        dot.setFixedHeight(4)
-        dot.setStyleSheet(f"background: {self._color}; border-radius: 2px;")
-        layout.addWidget(dot)
+        # ── Coloured accent bar ───────────────────────────────────────
+        bar = QFrame()
+        bar.setFixedHeight(4)
+        bar.setStyleSheet(f"background: {self._color}; border-radius: 2px;")
+        layout.addWidget(bar)
 
-        # Metrics
-        metrics_layout = QVBoxLayout()
-        metrics_layout.setSpacing(2)
+        # ── Per-card progress bar (indeterminate) ─────────────────────
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)   # indeterminate mode
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet(
+            f"QProgressBar {{ background: #333; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {self._color}; border-radius: 3px; }}"
+        )
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
+
+        # ── Live status label ─────────────────────────────────────────
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #666; font-size: 9px; font-style: italic;")
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setVisible(False)
+        layout.addWidget(self._status_lbl)
+
+        # ── Quality metrics ───────────────────────────────────────────
+        gform = QVBoxLayout()
+        gform.setSpacing(2)
 
         dev_row = QHBoxLayout()
         dev_row.addWidget(QLabel("Max deviation:"))
@@ -50,7 +79,7 @@ class CandidateCard(QGroupBox):
         self._dev_lbl.setStyleSheet("color: #aaa;")
         dev_row.addWidget(self._dev_lbl)
         dev_row.addStretch()
-        metrics_layout.addLayout(dev_row)
+        gform.addLayout(dev_row)
 
         rmse_row = QHBoxLayout()
         rmse_row.addWidget(QLabel("RMSE:"))
@@ -58,7 +87,7 @@ class CandidateCard(QGroupBox):
         self._rmse_lbl.setStyleSheet("color: #aaa;")
         rmse_row.addWidget(self._rmse_lbl)
         rmse_row.addStretch()
-        metrics_layout.addLayout(rmse_row)
+        gform.addLayout(rmse_row)
 
         n_row = QHBoxLayout()
         n_row.addWidget(QLabel("Elements:"))
@@ -66,11 +95,11 @@ class CandidateCard(QGroupBox):
         self._n_lbl.setStyleSheet("color: #aaa;")
         n_row.addWidget(self._n_lbl)
         n_row.addStretch()
-        metrics_layout.addLayout(n_row)
+        gform.addLayout(n_row)
 
-        layout.addLayout(metrics_layout)
+        layout.addLayout(gform)
 
-        # Select button
+        # ── Select button ─────────────────────────────────────────────
         self._btn = QPushButton("Select This")
         self._btn.setEnabled(False)
         self._btn.setStyleSheet(
@@ -82,26 +111,69 @@ class CandidateCard(QGroupBox):
         self._btn.clicked.connect(lambda: self.select_clicked.emit(self._algo_id))
         layout.addWidget(self._btn)
 
+    # ------------------------------------------------------------------
+    # State transitions
+    # ------------------------------------------------------------------
+
     def set_pending(self):
-        """Reset card to 'computing' state."""
-        self._dev_lbl.setText("computing…")
+        """Reset card to 'waiting to start' state."""
+        self._dev_lbl.setText("—")
+        self._dev_lbl.setStyleSheet("color: #aaa;")
         self._rmse_lbl.setText("—")
         self._n_lbl.setText("—")
         self._btn.setEnabled(False)
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setVisible(False)
+        self._status_lbl.setText("")
+
+    def set_running(self, message: str = "Starting…"):
+        """Mark card as actively computing."""
+        self._dev_lbl.setText("computing…")
+        self._dev_lbl.setStyleSheet("color: #888;")
+        self._progress_bar.setVisible(True)
+        self._status_lbl.setText(message)
+        self._status_lbl.setVisible(True)
+
+    def set_progress(self, message: str):
+        """Update the live status label while running."""
+        self._status_lbl.setText(message)
+        if not self._progress_bar.isVisible():
+            self._progress_bar.setVisible(True)
+        if not self._status_lbl.isVisible():
+            self._status_lbl.setVisible(True)
+
+    def set_preview(self, candidate):
+        """Show preliminary metrics while the algorithm is still running."""
+        if candidate.n_elements > 0:
+            self._n_lbl.setText(f"{candidate.n_elements}  (preliminary)")
+            self._n_lbl.setStyleSheet("color: #888;")
+        # max_deviation is 0 in preview CandidateAlignment objects (not computed yet)
+        # so only show it if it's non-zero
+        if candidate.max_deviation > 0:
+            self._dev_lbl.setText(f"{candidate.max_deviation:.2f} m  ⟳")
+            self._dev_lbl.setStyleSheet("color: #888;")
 
     def set_result(self, candidate):
         """Update card with completed CandidateAlignment metrics."""
         self._dev_lbl.setText(f"{candidate.max_deviation:.2f} m")
+        self._dev_lbl.setStyleSheet("color: #aaa;")
         self._rmse_lbl.setText(f"{candidate.rmse:.2f} m")
+        self._rmse_lbl.setStyleSheet("color: #aaa;")
         self._n_lbl.setText(str(candidate.n_elements))
+        self._n_lbl.setStyleSheet("color: #aaa;")
         self._btn.setEnabled(len(candidate.elements) > 0)
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setVisible(False)
 
     def set_error(self):
         """Mark card as failed."""
         self._dev_lbl.setText("error")
+        self._dev_lbl.setStyleSheet("color: #e57373;")
         self._rmse_lbl.setText("—")
         self._n_lbl.setText("—")
         self._btn.setEnabled(False)
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setVisible(False)
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +194,11 @@ class Step4Candidates(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._candidates: dict = {}   # algo_id → CandidateAlignment
+        self._candidates: dict = {}   # algo_id → final CandidateAlignment
+        self._previews:   dict = {}   # algo_id → preliminary CandidateAlignment
         self._worker = None
         self._cards: list[CandidateCard] = []
+        self._n_done = 0
         self._build()
 
     def _build(self):
@@ -137,9 +211,12 @@ class Step4Candidates(QWidget):
         title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
         layout.addWidget(title)
 
-        # Progress bar (hidden initially)
+        # Overall progress bar (determinate: 0 → number of algorithms)
         self._progress = QProgressBar()
-        self._progress.setRange(0, 0)   # indeterminate
+        self._progress.setRange(0, len(self.ALGO_DEFS))
+        self._progress.setValue(0)
+        self._progress.setFixedHeight(10)
+        self._progress.setTextVisible(False)
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
 
@@ -187,6 +264,8 @@ class Step4Candidates(QWidget):
         self._chainages_list = chainages_list
         self._work_epsg      = work_epsg
         self._candidates.clear()
+        self._previews.clear()
+        self._n_done = 0
 
         # Reset all cards
         for card in self._cards:
@@ -197,14 +276,18 @@ class Step4Candidates(QWidget):
             self._progress.setVisible(False)
             return
 
-        self._status_lbl.setText("Running algorithms…")
+        n_algos = len(self.ALGO_DEFS)
+        self._status_lbl.setText(f"Running {n_algos} algorithms…")
+        self._progress.setRange(0, n_algos)
+        self._progress.setValue(0)
         self._progress.setVisible(True)
-        self._progress.setRange(0, 0)   # indeterminate
 
         # Stop any existing worker
         if self._worker is not None:
             try:
                 self._worker.candidate_ready.disconnect()
+                self._worker.candidate_preview.disconnect()
+                self._worker.progress_update.disconnect()
                 self._worker.all_done.disconnect()
                 self._worker.failed.disconnect()
             except Exception:
@@ -216,39 +299,80 @@ class Step4Candidates(QWidget):
 
         self._worker = CandidateWorker(xy_list, chainages_list, settings_copy, self)
         self._worker.candidate_ready.connect(self._on_candidate_ready)
+        self._worker.candidate_preview.connect(self._on_candidate_preview)
+        self._worker.progress_update.connect(self._on_progress_update)
         self._worker.candidate_error.connect(self._on_candidate_error)
         self._worker.all_done.connect(self._on_all_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
+        # Mark first card as running immediately (algorithms run sequentially)
+        if self._cards:
+            self._cards[0].set_running()
+
     # ------------------------------------------------------------------
     # Worker callbacks
     # ------------------------------------------------------------------
 
+    def _on_progress_update(self, algo_id: str, message: str):
+        """Route live status messages to the matching card."""
+        for card in self._cards:
+            if card._algo_id == algo_id:
+                card.set_progress(message)
+
+    def _on_candidate_preview(self, algo_id: str, preview):
+        """Intermediate result from MC — update map but don't mark card as done."""
+        self._previews[algo_id] = preview
+        for card in self._cards:
+            if card._algo_id == algo_id:
+                card.set_preview(preview)
+        self._emit_map_update()
+
     def _on_candidate_ready(self, algo_id: str, candidate):
+        """Final result — update card metrics and map overlay."""
         self._candidates[algo_id] = candidate
+        self._previews.pop(algo_id, None)   # final result supersedes any preview
+        self._n_done += 1
+        self._progress.setValue(self._n_done)
+
         for card in self._cards:
             if card._algo_id == algo_id:
                 if candidate.elements:
                     card.set_result(candidate)
                 else:
                     card.set_error()
-        # Notify App to update map overlay with all received candidates so far
-        self.candidate_map_update.emit(list(self._candidates.values()))
+
+        self._emit_map_update()
+
+        # Mark the next card as running if algorithms run sequentially
+        algo_ids = [a for a, _, _ in self.ALGO_DEFS]
+        if algo_id in algo_ids:
+            next_idx = algo_ids.index(algo_id) + 1
+            if next_idx < len(self._cards) and next_idx >= self._n_done:
+                self._cards[next_idx].set_running()
+
+        remaining = len(self.ALGO_DEFS) - self._n_done
+        if remaining > 0:
+            self._status_lbl.setText(
+                f"{self._n_done}/{len(self.ALGO_DEFS)} done — "
+                f"{remaining} algorithm{'s' if remaining > 1 else ''} still running…"
+            )
 
     def _on_all_done(self):
         self._progress.setVisible(False)
         n = sum(1 for c in self._candidates.values() if c.elements)
         self._status_lbl.setText(
-            f"{n}/{len(self.ALGO_DEFS)} algorithms succeeded. Select one to continue."
+            f"{n}/{len(self.ALGO_DEFS)} algorithms succeeded. "
+            f"Select one to continue to Step 5."
         )
 
     def _on_candidate_error(self, algo_id: str, error: str):
         """One algorithm failed — mark its card, keep others running."""
+        self._n_done += 1
+        self._progress.setValue(self._n_done)
         for card in self._cards:
             if card._algo_id == algo_id:
                 card.set_error()
-        # Show truncated error in status
         short = error.split("\n")[0][:120]
         self._status_lbl.setText(f"⚠ {algo_id}: {short}")
 
@@ -260,3 +384,13 @@ class Step4Candidates(QWidget):
         c = self._candidates.get(algo_id)
         if c and c.elements:
             self.candidate_selected.emit(c)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _emit_map_update(self):
+        """Combine final results with any in-flight previews and update the map."""
+        # Final results take precedence over previews for the same algo_id
+        combined: dict = {**self._previews, **self._candidates}
+        self.candidate_map_update.emit(list(combined.values()))

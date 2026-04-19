@@ -91,19 +91,32 @@ class FetchWorker(QThread):
 
 class CandidateWorker(QThread):
     """
-    Runs all three candidate alignment algorithms sequentially in the background.
+    Runs all four candidate alignment algorithms sequentially in the background.
 
     Signals
     -------
-    candidate_ready(str, object)   algorithm_id, CandidateAlignment
-    candidate_error(str, str)      algorithm_id, error message (per-algo failure)
-    all_done()                     all algorithms finished
-    failed(str)                    fatal setup error (e.g. no data)
+    candidate_ready(str, object)    algorithm_id, CandidateAlignment (final)
+    candidate_preview(str, object)  algorithm_id, CandidateAlignment (intermediate —
+                                    emitted periodically by Progressive MC for live
+                                    map updates while the algorithm is still running)
+    progress_update(str, str)       algorithm_id, human-readable status message
+    candidate_error(str, str)       algorithm_id, error message (per-algo failure)
+    all_done()                      all algorithms finished
+    failed(str)                     fatal setup error (e.g. no data)
     """
-    candidate_ready = Signal(str, object)
-    candidate_error = Signal(str, str)     # algo_id, error message
-    all_done        = Signal()
-    failed          = Signal(str)
+    candidate_ready   = Signal(str, object)
+    candidate_preview = Signal(str, object)   # intermediate result
+    progress_update   = Signal(str, str)      # (algo_id, message)
+    candidate_error   = Signal(str, str)
+    all_done          = Signal()
+    failed            = Signal(str)
+
+    _ALGO_COLORS = {
+        "segment_fit":    "#ff9800",
+        "dp_segment":     "#66bb6a",
+        "progressive_mc": "#42a5f5",
+        "raw":            "#e040fb",
+    }
 
     def __init__(self, xy_list, chainages_list, settings: dict, parent=None):
         super().__init__(parent)
@@ -124,12 +137,35 @@ class CandidateWorker(QThread):
 
             gen = CandidateGenerator(xy, chs, self._settings)
 
-            for algo_id, color in zip(
-                ["tight",    "balanced", "smooth",   "raw"],
-                ["#ff9800",  "#66bb6a",  "#42a5f5",  "#e040fb"],
-            ):
+            for algo_id in ["segment_fit", "dp_segment", "progressive_mc", "raw"]:
+                color = self._ALGO_COLORS.get(algo_id, "#ffffff")
+
+                # --- progress text callback (called from algorithm internals) ---
+                def _pcb(msg, _id=algo_id):
+                    self.progress_update.emit(_id, msg)
+
+                # --- preview callback (MC only: intermediate element list → WGS84) ---
+                def _prev_cb(elements, _id=algo_id, _color=color):
+                    if not elements:
+                        return
+                    try:
+                        geo_xy    = reconstruct_alignment_projected(elements, sample_interval=5.0)
+                        geo_wgs84 = projected_to_wgs84(geo_xy, work_epsg)
+                        preview = CandidateAlignment(
+                            algorithm_id=_id,
+                            label=gen.LABELS.get(_id, _id),
+                            elements=elements,
+                            n_elements=len(elements),
+                            color_hex=_color,
+                            geo_wgs84=geo_wgs84,
+                        )
+                        self.candidate_preview.emit(_id, preview)
+                    except Exception:
+                        pass
+
                 try:
-                    c = gen._run_one(algo_id)
+                    _pcb("Starting…")
+                    c = gen._run_one(algo_id, progress_cb=_pcb, preview_cb=_prev_cb)
                     c.color_hex = color
                     # Compute dense WGS84 points for map display
                     if c.elements:
