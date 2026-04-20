@@ -28,6 +28,7 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://z.overpass-api.de/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.maptime.io/api/interpreter",
 ]
 
 # Per-endpoint timeout.  Short so failures are discovered quickly.
@@ -206,6 +207,104 @@ def _fetch_relation_via_osm_api(
     query_equiv = f"[out:json];relation({relation_id});way(r);(._; >;);out body;"
     _cache_put(_query_key(query_equiv), data)
     return data
+
+
+def _fetch_relation_members_via_osm_api(
+    parent_relation_id: int,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> list[dict]:
+    """
+    Fetch member relations of a parent relation via the official OSM API v0.6.
+
+    Two-step process:
+      1. GET /relation/{id}        → extract member relation IDs
+      2. GET /relations?relations=… → batch-fetch tags for those members
+
+    Returns a list of dicts in the same shape as fetch_relation_members().
+    """
+    def _p(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
+
+    # Step 1 — get the list of member IDs
+    _p("OSM API: fetching parent relation…")
+    url = f"{OSM_API_BASE}/relation/{parent_relation_id}"
+    resp = requests.get(url, timeout=OSM_API_TIMEOUT)
+    resp.raise_for_status()
+
+    root = ET.fromstring(resp.text)
+    member_ids: list[int] = []
+    for rel_el in root.findall("relation"):
+        for m in rel_el.findall("member"):
+            if m.get("type") == "relation":
+                try:
+                    member_ids.append(int(m.get("ref")))
+                except (TypeError, ValueError):
+                    pass
+
+    if not member_ids:
+        return []
+
+    # Step 2 — batch-fetch tags (max 500 IDs per request)
+    BATCH = 500
+    results: list[dict] = []
+    for i in range(0, len(member_ids), BATCH):
+        batch = member_ids[i: i + BATCH]
+        ids_str = ",".join(str(x) for x in batch)
+        _p(f"OSM API: fetching tags for {len(batch)} relations…")
+        url2 = f"{OSM_API_BASE}/relations?relations={ids_str}"
+        resp2 = requests.get(url2, timeout=OSM_API_TIMEOUT)
+        resp2.raise_for_status()
+        root2 = ET.fromstring(resp2.text)
+        for rel_el in root2.findall("relation"):
+            rid  = int(rel_el.get("id"))
+            tags = {t.get("k"): t.get("v") for t in rel_el.findall("tag")}
+            results.append({
+                "id":       rid,
+                "name":     tags.get("name", f"Relation {rid}"),
+                "ref":      tags.get("ref", ""),
+                "network":  tags.get("network", ""),
+                "operator": tags.get("operator", ""),
+                "from":     tags.get("from", ""),
+                "to":       tags.get("to", ""),
+            })
+
+    # Sort: numeric ref first, then alphabetical name
+    def _sort_key(r: dict):
+        try:
+            return (0, int(r.get("ref", "")), r["name"])
+        except (ValueError, TypeError):
+            return (1, 0, r["name"])
+
+    results.sort(key=_sort_key)
+    return results
+
+
+def _fetch_relation_metadata_via_osm_api(
+    relation_id: int,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> Optional[dict]:
+    """
+    Fetch tags for a single relation via the official OSM API v0.6.
+    Returns a dict in the same shape as fetch_relation_metadata(), or None.
+    """
+    if progress_cb:
+        progress_cb("OSM API: fetching relation metadata…")
+    url  = f"{OSM_API_BASE}/relation/{relation_id}"
+    resp = requests.get(url, timeout=OSM_API_TIMEOUT)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+    for rel_el in root.findall("relation"):
+        tags = {t.get("k"): t.get("v") for t in rel_el.findall("tag")}
+        return {
+            "id":       relation_id,
+            "name":     tags.get("name", f"Relation {relation_id}"),
+            "network":  tags.get("network", ""),
+            "operator": tags.get("operator", ""),
+            "from":     tags.get("from", ""),
+            "to":       tags.get("to", ""),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +513,8 @@ def fetch_relation_members(
     Returns a list of dicts with the same shape as search_by_ref().
     Members that are ways or nodes (not relations) are silently skipped.
     Results are sorted by ref tag (numeric where possible), then by name.
+
+    Falls back to the official OSM API v0.6 if all Overpass mirrors fail.
     """
     query = f"""
 [out:json][timeout:{TIMEOUT}];
@@ -421,7 +522,16 @@ relation({parent_relation_id});
 rel(r);
 out tags;
 """
-    data = _run_query(query, progress_cb=progress_cb, ttl=_CACHE_TTL_SEARCH)
+    try:
+        data = _run_query(query, progress_cb=progress_cb, ttl=_CACHE_TTL_SEARCH)
+    except Exception as overpass_exc:
+        try:
+            return _fetch_relation_members_via_osm_api(
+                parent_relation_id, progress_cb=progress_cb
+            )
+        except Exception:
+            raise overpass_exc
+
     results = []
     for el in data.get("elements", []):
         if el.get("type") != "relation":
@@ -453,13 +563,25 @@ def fetch_relation_metadata(
     relation_id: int,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
-    """Fetch tags for a single relation."""
+    """
+    Fetch tags for a single relation.
+    Falls back to the official OSM API v0.6 if all Overpass mirrors fail.
+    """
     query = f"""
 [out:json][timeout:15];
 relation({relation_id});
 out tags;
 """
-    data = _run_query(query, progress_cb=progress_cb)
+    try:
+        data = _run_query(query, progress_cb=progress_cb)
+    except Exception as overpass_exc:
+        try:
+            return _fetch_relation_metadata_via_osm_api(
+                relation_id, progress_cb=progress_cb
+            )
+        except Exception:
+            raise overpass_exc
+
     elements = data.get("elements", [])
     if not elements:
         return None
