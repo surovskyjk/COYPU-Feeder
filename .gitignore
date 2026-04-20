@@ -12,3 +12,4 @@ output/
 *.egg-info/
 dist/
 build/
+release/

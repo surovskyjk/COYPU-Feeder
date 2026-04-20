@@ -12,6 +12,36 @@ Elevation is sampled from the [Open-Elevation](https://open-elevation.com/) DEM 
 
 ---
 
+## Download
+
+Pre-built Windows x64 binaries are published as [GitHub Releases](https://github.com/surovskyjk/Coypu-Feeder/releases/latest).
+
+1. Download `Coypu-Feeder-v1.0.0-windows-x64.zip`
+2. Extract to any folder
+3. Run `Coypu-Feeder.exe`
+
+No Python installation required.
+
+---
+
+## Features
+
+- **Find any railway** by timetable reference number, name, or direct OSM relation ID
+- **Search in map view** — find all railway route-relations visible in the current map window (≤ 20 × 20 km)
+- **Czech Railways browser** — lazy-loads all ~300 lines from the *Railways in Czech Republic* OSM collection with instant client-side filtering
+- **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
+- **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
+- **5 candidate alignment algorithms** — compare results side by side on the map before choosing one for export
+- **Clothoid transition curves** — entry/exit spirals at every arc, with shift-compensated arc radius
+- **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
+- **Refinement step** — manually trim the alignment ends before export
+- **Elevation sampling** — DEM-based vertical profile at a configurable chainage interval, fitted with parabolic vertical curves
+- **LandXML 1.2 export** — complete `<Alignment>` with horizontal and vertical geometry, CRS metadata, and station equations
+- **Exported alignment drawn on map** — bright red overlay with zoom-to-fit
+- **Dark / light mode** — automatically follows the OS system theme
+
+---
+
 ## Screenshots
 
 > *3-column layout: step sidebar | interactive map | step panel*
@@ -21,83 +51,12 @@ Elevation is sampled from the [Open-Elevation](https://open-elevation.com/) DEM 
 │ [1] Find Railway  │        Interactive Leaflet Map         │  Step   │
 │ [2] Select        │  (tile provider selector + railway     │  panel  │
 │ [3] Configure     │   overlay toggle)                      │ 340 px  │
-│ [4] Export        │                                        │         │
+│ [4] Candidates    │                                        │         │
+│ [5] Refine        │                                        │         │
+│ [6] Cross-section │                                        │         │
+│ [7] Export        │                                        │         │
 │   200 px sidebar  │                                        │         │
-├──────────────────────────────────────────────────────────────────────┤
-│ Status bar                                                           │
 └──────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Features
-
-- **Find any railway** by timetable reference number, name, number embedded in name, or direct OSM relation ID
-- **Search in map view** — find all railway route-relations visible in the current map window (≤ 20 × 20 km area limit)
-- **Czech Railways browser** — lazy-loads all ~300 lines from the *Railways in Czech Republic* OSM collection (relation 2332889) with instant client-side filtering
-- **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
-- **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
-- **Geometry fitting** — curvature-based segmentation into Line / Circular Arc / Clothoid spiral elements with per-type minimum length thresholds
-- **Radius continuity enforcement** — spiral `radiusStart`/`radiusEnd` are automatically matched to adjacent Line (∞) and Arc (finite radius)
-- **Elevation sampling** — DEM-based vertical profile at a configurable chainage interval, fitted with parabolic vertical curves
-- **LandXML 1.2 export** — complete `<Alignment>` element with horizontal and vertical geometry, station equations, and CRS metadata
-- **Exported alignment drawn on map** — bright red overlay, zoom-to-fit button
-- **Dark / light mode** — automatically follows the OS system theme; switches tile provider accordingly
-
----
-
-## Requirements
-
-### Python
-
-Python **3.10 or newer** is required (PySide6 uses the stable ABI from 3.10+).
-
-### Dependencies
-
-Install with pip:
-
-```bash
-pip install -r requirements.txt
-```
-
-| Package | Version | Purpose |
-|---|---|---|
-| `PySide6` | 6.11.0 | GUI framework (Qt 6), WebEngine for the map |
-| `requests` | 2.33.1 | Overpass API and elevation API HTTP calls |
-| `pyproj` | 3.7.2 | WGS84 ↔ projected CRS transformations |
-| `numpy` | 2.4.4 | Curvature computation, SVD line fitting |
-| `scipy` | 1.17.1 | Savitzky-Golay smoothing, curve fitting |
-| `lxml` | 6.0.3 | LandXML file generation |
-| `shapely` | 2.1.2 | Geometry utilities |
-| `overpy` | 0.7 | Overpass API helper |
-
-> **Note:** `PySide6` bundles QtWebEngine (Chromium). On Windows this requires the Microsoft Visual C++ Redistributable. On Linux, `libglib2.0` and `libnss3` must be installed.
-
-### Internet access
-
-The following external services are used at runtime:
-
-| Service | Used for |
-|---|---|
-| Overpass API (`overpass-api.de`, `overpass.kumi.systems`, `overpass.private.coffee`) | Railway geometry and relation metadata |
-| CARTO / OpenStreetMap / OpenTopoMap / Esri / OpenRailwayMap tile servers | Map background tiles |
-| Open-Elevation API (`api.open-elevation.com`) | DEM elevation sampling |
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/surovskyjk/Coypu-Feeder.git
-cd Coypu-Feeder
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# Linux / macOS:
-source venv/bin/activate
-
-pip install -r requirements.txt
-python main.py
 ```
 
 ---
@@ -111,7 +70,7 @@ Three ways to find a railway:
 **Search tab**
 - *Timetable line number (ref tag)* — exact match on the OSM `ref` tag (e.g. `210`)
 - *Name* — partial name search (e.g. `Praha`)
-- *Number in relation name* — finds lines whose name contains the number, even when the `ref` tag is missing (e.g. `212` matches `212 – Čerčany – Světlá nad Sázavou`)
+- *Number in relation name* — finds lines whose name contains the number, even when the `ref` tag is missing
 - *By relation ID* — direct fetch using the numeric OSM relation ID (e.g. `3128446`)
 
 **In View tab**
@@ -122,32 +81,79 @@ Click *Load Czech Railway Lines* once to fetch all members of OSM relation 23328
 
 Double-click any result or select it and click *Fetch selected* to load the full relation geometry.
 
+---
+
 ### Step 2 — Select Section
 
 The loaded tracks appear in a list and are drawn on the map in distinct colours. You can:
 
 - Select individual tracks or use *Select all* / *Clear selection*
 - Click a track row to highlight it on the map in yellow
-- Click *👁 Highlight selected* to re-highlight after a multi-selection change
-- Click *🔄 Reset colours* to restore all tracks to their original colours
 - Click *📍 Fit map to tracks* to zoom the map to show all tracks
 
 Click **Next → Configure** when your selection is ready.
 
+---
+
 ### Step 3 — Configure
 
-| Setting | Default | Description |
+Configure geometry parameters before running the fitting algorithms:
+
+| Group | Setting | Default | Description |
+|---|---|---|---|
+| **Project** | Project name | `Railway Alignment` | Written into the LandXML `<Project>` element |
+| **Export Settings** | Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
+| | Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
+| | Spiral length | 20 m | Entry/exit clothoid length for *Segment & Fit (Spirals)*; 0 = disabled |
+| **Alignment Accuracy** | Max deviation from OSM line | 0.50 m | Maximum allowed perpendicular distance between fitted element and OSM polyline |
+| | Minimum curve radius | 150 m | Minimum horizontal curve radius enforced on all arc elements |
+| | Min straight radius | 0 m (disabled) | OSM curvature radius threshold above which sections are forced to Line elements |
+| | Min straight length | 200 m | Minimum length of a low-curvature section to be forced to a Line |
+| **Candidate Generation** | Curvature smooth window | 21 | Savitzky-Golay window length (Segment & Fit only) |
+| | Radius merge tolerance | 15 % | Controls how aggressively adjacent arcs are merged |
+| | Max computing time | 60 s | Time budget per algorithm (DP Segmentation and Progressive MC) |
+| | MC window length | 500 m | Length of each Progressive MC optimisation window |
+| | Min tangent length | 30 m | Minimum Line length between same-sense Arcs (Progressive MC consolidation) |
+
+---
+
+### Step 4 — Candidates
+
+All five candidate alignment algorithms are run simultaneously in background threads. Results appear on the map as coloured overlays as each finishes:
+
+| Colour | Algorithm | Description |
 |---|---|---|
-| Project name | `Railway Alignment` | Written into the LandXML `<Project>` element |
-| Output CRS preset | WGS 84 | Target coordinate reference system for the output file |
-| Custom EPSG | *(empty)* | Overrides the preset; enter any valid EPSG code |
-| Curvature smooth window | 21 | Savitzky-Golay window length for curvature pre-smoothing (odd, 5–51) |
-| Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
-| Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
-| Minimum Line length | 10 m | Segments shorter than this are merged into adjacent elements |
-| Minimum Arc length | 10 m | As above for circular arc elements |
-| Minimum Spiral length | 10 m | As above for clothoid transition elements |
-| Force positive coordinates | off | Applies `abs()` to all coordinates — use for S-JTSK positive convention |
+| 🟠 Orange | **Segment & Fit** | Curvature-based segmentation followed by iterative Line/Arc fitting |
+| 🩵 Cyan | **Segment & Fit (Spirals)** | As above, but inserts clothoid transition spirals (L–S–A–S–L) at every arc |
+| 🔵 Blue | **DP Segmentation** | Douglas-Peucker-based segmentation with constrained arc fitting |
+| 🟣 Purple | **Progressive MC** | Monte-Carlo window-optimisation with C1 continuity at every boundary |
+| 🟢 Green | **OSM Polyline** | The raw OSM geometry as-is (reference only, no fitting) |
+
+Each result card shows the element count, maximum deviation, mean deviation, and a quality score. Select one candidate and click **Next →** to proceed.
+
+---
+
+### Step 5 — Refine
+
+Trim the alignment ends by adjusting the start and end chainage. The live map preview updates as you move the sliders. Use this step to remove poorly-fitted sections at the very beginning or end of the alignment.
+
+Click **Next →** to accept the trimmed alignment.
+
+---
+
+### Step 6 — Cross-Section
+
+The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export.
+
+Click **Next → Export** to proceed.
+
+---
+
+### Step 7 — Export
+
+1. Choose an output CRS from the preset list or enter a custom EPSG code
+2. Click **Browse…** and choose an output `.xml` file path
+3. Click **▶ Start Export**
 
 **Available CRS presets:**
 
@@ -162,31 +168,13 @@ Click **Next → Configure** when your selection is ready.
 | ETRS89 / UTM zone 33N | 25833 |
 | Auto UTM (from track centroid) | — |
 
-### Step 4 — Export
-
-1. Click **Browse…** and choose an output `.xml` file path
-2. Click **▶ Start Export**
-
-The progress bar tracks five stages:
-
-| Stage | Description |
-|---|---|
-| Projecting | WGS84 → working CRS |
-| Fitting | Curvature segmentation and element fitting |
-| Querying | DEM elevation sampling via Open-Elevation |
-| Building | LandXML tree construction |
-| Writing | File output |
-
-On completion:
-- The exported alignment is drawn on the map as a **bright red line** with a white glow halo
-- Click **📍 Zoom to exported line** to fit the map to the alignment
-- Click **🔄 Export Another Railway** to start over from Step 1
+The progress bar tracks the export stages (Projecting → Fitting → Querying elevation → Building XML → Writing). On completion, the exported alignment is drawn on the map as a **bright red line** with a white glow halo.
 
 ---
 
 ## Output Format
 
-The output is a valid **LandXML 1.2** file containing:
+The output is a valid **LandXML 1.2** file:
 
 ```xml
 <LandXML version="1.2" ...>
@@ -199,7 +187,7 @@ The output is a valid **LandXML 1.2** file containing:
         <Spiral staStart="..." length="..." radiusStart="INF" radiusEnd="450.0"
                 clothoidConstant="..." rot="cw|ccw" spiType="clothoid"/>
         <Curve staStart="..." length="..." radius="450.0" rot="cw|ccw"/>
-        <Spiral .../>
+        <Spiral radiusStart="450.0" radiusEnd="INF" .../>
         ...
       </CoordGeom>
       <Profile>
@@ -216,25 +204,60 @@ The output is a valid **LandXML 1.2** file containing:
 
 Key properties guaranteed by the geometry engine:
 - **Radius continuity** at every element boundary: `Line → Spiral (radiusStart=∞)`, `Spiral → Arc (radiusEnd = arc radius)`, etc.
-- **Clothoid parameter** `A = √(R × L)` recomputed after any continuity correction
-- `staStart` and `staEnd` present on every element
+- **Clothoid parameter** `A = √(R × L)` recomputed from the actual fitted radius and spiral length
+- **Shift compensation** for spirals: arc radius is inflated by `p = L²/(24R)` so the L–S–A–S–L path tracks the same OSM centreline as the no-spiral fit
+- `staStart` present on every element
 
 ---
 
-## Map Tile Providers
+## Requirements (source installation)
 
-The map toolbar lets you choose the background layer at any time:
+### Python
 
-| Provider | Style |
+Python **3.10 or newer**.
+
+### Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+| Package | Purpose |
 |---|---|
-| OpenStreetMap | Standard detailed map |
-| CARTO Dark Matter | Dark UI-friendly basemap |
-| CARTO Voyager | Clean light basemap |
-| OpenTopoMap | Terrain with contour lines |
-| Esri Satellite | Aerial imagery |
-| OpenRailwayMap | Railway infrastructure only |
+| `PySide6` | GUI framework (Qt 6), WebEngine for the map |
+| `requests` | Overpass API and elevation API HTTP calls |
+| `pyproj` | WGS84 ↔ projected CRS transformations |
+| `numpy` | Curvature computation, SVD line fitting |
+| `scipy` | Savitzky-Golay smoothing, Fresnel integrals |
+| `lxml` | LandXML file generation |
+| `shapely` | Geometry utilities |
+| `overpy` | Overpass API helper |
 
-The **🚂 Railway overlay** checkbox independently toggles the OpenRailwayMap layer on top of the selected base map.
+### Internet access
+
+| Service | Used for |
+|---|---|
+| Overpass API (`overpass-api.de`, `overpass.kumi.systems`) | Railway geometry and relation metadata |
+| CARTO / OpenStreetMap / OpenTopoMap / Esri / OpenRailwayMap tile servers | Map background tiles |
+| Open-Elevation API (`api.open-elevation.com`) | DEM elevation sampling |
+
+---
+
+## Installation (from source)
+
+```bash
+git clone https://github.com/surovskyjk/Coypu-Feeder.git
+cd Coypu-Feeder
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+# Linux / macOS
+source venv/bin/activate
+
+pip install -r requirements.txt
+python main.py
+```
 
 ---
 
@@ -242,32 +265,39 @@ The **🚂 Railway overlay** checkbox independently toggles the OpenRailwayMap l
 
 ```
 Coypu-Feeder/
-├── main.py                     # Entry point
+├── main.py                       # Entry point
 ├── requirements.txt
+├── coypu_feeder.spec             # PyInstaller build spec
 ├── LICENSE
 └── src/
     ├── gui/
-    │   ├── app.py              # QMainWindow, signal wiring
-    │   ├── map_widget.py       # Leaflet map via QWebEngineView + local HTTP server
-    │   ├── step_sidebar.py     # Numbered step sidebar
-    │   ├── theme.py            # Dark/light Fusion palette + stylesheet
-    │   ├── worker.py           # QThread workers (Search, Fetch, Export)
-    │   ├── static/             # Leaflet 1.9.4 JS + CSS (served locally)
+    │   ├── app.py                # QMainWindow, signal wiring
+    │   ├── map_widget.py         # Leaflet map via QWebEngineView + local HTTP server
+    │   ├── step_sidebar.py       # Numbered step sidebar
+    │   ├── theme.py              # Dark/light Fusion palette + stylesheet
+    │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Export)
+    │   ├── static/               # Leaflet 1.9.4 JS + CSS (served locally)
     │   └── steps/
-    │       ├── step1_find.py   # Search / In View / Czech Railways tabs
-    │       ├── step2_section.py
-    │       ├── step3_configure.py
-    │       └── step4_export.py
+    │       ├── step1_find.py     # Search / In View / Czech Railways tabs
+    │       ├── step2_section.py  # Track selection
+    │       ├── step3_configure.py# Geometry parameters
+    │       ├── step4_candidates.py  # 5-algorithm candidate comparison
+    │       ├── step5_refine.py   # End trimming
+    │       ├── step6_crosssection.py  # Deviation profile
+    │       └── step7_export.py   # CRS selection + LandXML export
     ├── osm/
-    │   ├── query.py            # Overpass API queries
-    │   └── parser.py           # OSM way → Track objects
+    │   ├── query.py              # Overpass API queries
+    │   └── parser.py             # OSM way → Track objects
     ├── geometry/
-    │   ├── curvature.py        # Curvature computation and segmentation
-    │   ├── alignment.py        # Element fitting + continuity enforcement
-    │   ├── elevation.py        # DEM sampling and vertical geometry
-    │   └── projection.py       # CRS transformations (pyproj)
+    │   ├── alignment.py          # Element fitting + continuity enforcement
+    │   ├── candidates.py         # 5 candidate-generation algorithms
+    │   ├── curvature.py          # Curvature computation and segmentation
+    │   ├── elevation.py          # DEM sampling and vertical geometry
+    │   └── projection.py         # CRS transformations (pyproj)
+    ├── data/
+    │   └── suggested_lines.py    # Curated Czech railway line database
     └── landxml/
-        └── builder.py          # LandXML 1.2 tree builder and file writer
+        └── builder.py            # LandXML 1.2 tree builder and file writer
 ```
 
 ---
