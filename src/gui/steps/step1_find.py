@@ -9,6 +9,7 @@ Three tabs:
                        ("Railways in Czech Republic"), loaded once on demand
 """
 
+
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
 
-from gui.worker import SearchWorker, FetchWorker, CzukWorker
+from gui.worker import SearchWorker, FetchWorker
 
 # OSM relation ID for the Czech Railways collection
 CZ_RAILWAYS_RELATION = 2332889
@@ -57,9 +58,8 @@ def _friendly_error(raw: str) -> str:
 
 
 class Step1Find(QWidget):
-    railway_fetched          = Signal(object, dict)   # (overpass_data_or_tracks, info)
+    railway_fetched          = Signal(object, dict)   # (overpass_data, info)
     search_in_view_requested = Signal()               # → App requests map bounds
-    czuk_fetch_requested     = Signal()               # → App requests map bounds for ČÚZK
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,7 +67,6 @@ class Step1Find(QWidget):
         # Cache for the Czech Railways member list (fetched once)
         self._cz_all_results: list[dict] = []
         self._cz_loaded = False
-        self._czuk_tracks: list = []   # fetched Track objects from ČÚZK WFS
         self._build()
 
     # ------------------------------------------------------------------
@@ -83,7 +82,6 @@ class Step1Find(QWidget):
         self._tabs.addTab(self._build_search_tab(),  "Search")
         self._tabs.addTab(self._build_view_tab(),    "In View")
         self._tabs.addTab(self._build_cz_tab(),      "Czech Railways")
-        self._tabs.addTab(self._build_czuk_tab(),    "ČÚZK (CZ)")
         layout.addWidget(self._tabs)
 
         # Shared fetch-status bar (visible only while a FetchWorker is running)
@@ -287,69 +285,6 @@ class Step1Find(QWidget):
 
         return w
 
-    # ── ČÚZK INSPIRE WFS tab ─────────────────────────────────────────
-
-    def _build_czuk_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(6)
-
-        hdr = QLabel("ČÚZK INSPIRE — Czech Railway Tracks")
-        hdr.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
-        v.addWidget(hdr)
-
-        hint = QLabel(
-            "Downloads railway track geometry directly from the Czech national\n"
-            "GIS database (ČÚZK INSPIRE WFS), independent of Overpass/OSM.\n\n"
-            "Zoom the map to your area of interest (a few tens of km),\n"
-            "then click the button below."
-        )
-        hint.setStyleSheet("color:#888; font-size:10px;")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-
-        self._czuk_fetch_btn = QPushButton(
-            "🗺  Fetch from Current Map View"
-        )
-        self._czuk_fetch_btn.setMinimumHeight(36)
-        self._czuk_fetch_btn.setStyleSheet(
-            "QPushButton { background:#1565c0; color:#fff; border-radius:4px; padding:5px; }"
-            "QPushButton:hover { background:#1976d2; }"
-            "QPushButton:disabled { background:#555; color:#888; }"
-        )
-        self._czuk_fetch_btn.clicked.connect(self.czuk_fetch_requested.emit)
-        v.addWidget(self._czuk_fetch_btn)
-
-        self._czuk_status = QLabel("")
-        self._czuk_status.setStyleSheet("color:#aaa; font-size:10px;")
-        self._czuk_status.setWordWrap(True)
-        v.addWidget(self._czuk_status)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#555;")
-        v.addWidget(sep)
-
-        v.addWidget(QLabel("Found segments:"))
-
-        self._czuk_list = QListWidget()
-        self._czuk_list.setAlternatingRowColors(True)
-        self._czuk_list.setSelectionMode(
-            QListWidget.SelectionMode.ExtendedSelection
-        )
-        v.addWidget(self._czuk_list, stretch=1)
-
-        czuk_load_row = QHBoxLayout()
-        self._czuk_load_btn = QPushButton("📥  Load selected segments")
-        self._czuk_load_btn.setEnabled(False)
-        self._czuk_load_btn.clicked.connect(self._load_czuk_selected)
-        czuk_load_row.addStretch()
-        czuk_load_row.addWidget(self._czuk_load_btn)
-        v.addLayout(czuk_load_row)
-
-        return w
-
     # ------------------------------------------------------------------
     # Search actions
     # ------------------------------------------------------------------
@@ -497,99 +432,6 @@ class Step1Find(QWidget):
             r = item.data(Qt.ItemDataRole.UserRole)
             if r:
                 self._do_fetch(r["id"])
-
-    # ── ČÚZK actions ─────────────────────────────────────────────────
-
-    def do_czuk_fetch(self, south: float, west: float,
-                      north: float, east: float) -> None:
-        """Called by App with the current map bounds to start a ČÚZK WFS query."""
-        self._czuk_fetch_btn.setEnabled(False)
-        self._czuk_fetch_btn.setText("Fetching…")
-        self._czuk_status.setText("Connecting to ČÚZK INSPIRE WFS…")
-        self._czuk_list.clear()
-        self._czuk_load_btn.setEnabled(False)
-        self._czuk_tracks = []
-
-        worker = CzukWorker(south, west, north, east, self)
-        worker.tracks_ready.connect(self._on_czuk_tracks_ready)
-        worker.failed.connect(self._on_czuk_failed)
-        worker.status_update.connect(self._czuk_status.setText)
-        worker.finished.connect(
-            lambda: self._czuk_fetch_btn.setEnabled(True)
-        )
-        worker.finished.connect(
-            lambda: self._czuk_fetch_btn.setText("🗺  Fetch from Current Map View")
-        )
-        worker.finished.connect(lambda: self._cleanup_worker(worker))
-        self._workers.append(worker)
-        worker.start()
-
-    def _on_czuk_tracks_ready(self, tracks: list) -> None:
-        self._czuk_tracks = tracks
-        self._czuk_list.clear()
-        if not tracks:
-            self._czuk_status.setText(
-                "No railway links found in this area. "
-                "Try zooming into a Czech railway corridor."
-            )
-            self._czuk_load_btn.setEnabled(False)
-            return
-
-        for i, t in enumerate(tracks):
-            item = QListWidgetItem(t.name)
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            self._czuk_list.addItem(item)
-
-        self._czuk_list.selectAll()
-        total_km = sum(
-            self._approx_track_km(t) for t in tracks
-        )
-        self._czuk_status.setText(
-            f"Found {len(tracks)} segment{'s' if len(tracks) != 1 else ''}"
-            f" ({total_km:.1f} km total). Select segments and click Load."
-        )
-        self._czuk_load_btn.setEnabled(True)
-
-    def _on_czuk_failed(self, error: str) -> None:
-        self._czuk_status.setText(f"ČÚZK error: {error}")
-        self._czuk_load_btn.setEnabled(False)
-
-    def _load_czuk_selected(self) -> None:
-        selected_items = self._czuk_list.selectedItems()
-        if not selected_items or not self._czuk_tracks:
-            return
-        indices = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items]
-        selected_tracks = [self._czuk_tracks[i] for i in indices
-                           if i < len(self._czuk_tracks)]
-        if not selected_tracks:
-            return
-        info = {
-            "id":       0,
-            "name":     f"ČÚZK WFS ({len(selected_tracks)} segments)",
-            "network":  "ČÚZK INSPIRE",
-            "operator": "ČÚZK",
-            "from":     "",
-            "to":       "",
-        }
-        # Emit pre-parsed Track objects — app.py detects the list type
-        self.railway_fetched.emit(selected_tracks, info)
-
-    @staticmethod
-    def _approx_track_km(track) -> float:
-        """Quick km estimate from Track.nodes (lat, lon tuples)."""
-        import math
-        nodes = track.nodes
-        total = 0.0
-        for i in range(len(nodes) - 1):
-            lat1, lon1 = nodes[i]
-            lat2, lon2 = nodes[i + 1]
-            dlat = math.radians(lat2 - lat1)
-            dlon = math.radians(lon2 - lon1)
-            a = (math.sin(dlat / 2) ** 2
-                 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-                 * math.sin(dlon / 2) ** 2)
-            total += 6371.0 * 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
-        return total
 
     # ── Shared fetch ──────────────────────────────────────────────────
 

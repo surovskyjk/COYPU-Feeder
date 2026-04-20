@@ -107,11 +107,9 @@ class App(QMainWindow):
             lambda msg: self.statusBar().showMessage(f"⚠ {msg}")
         )
 
-        # Map bounds → "Lines in View" search and ČÚZK fetch
+        # Map bounds → "Lines in View" search
         self.step1.search_in_view_requested.connect(self._on_search_in_view)
-        self.step1.czuk_fetch_requested.connect(self._on_czuk_fetch_requested)
         self.map_widget.bounds_ready.connect(self._on_map_bounds_ready)
-        self._pending_bounds_for: str = "view_search"   # "view_search" | "czuk"
 
         # Step 1 → fetch railway
         self.step1.railway_fetched.connect(self._on_railway_fetched)
@@ -237,25 +235,11 @@ class App(QMainWindow):
 
     def _on_search_in_view(self):
         """Step 1 requested a search — ask the map for its current bounds."""
-        self._pending_bounds_for = "view_search"
         self.step1.set_view_search_busy(True)
         self.map_widget.request_bounds()
 
-    def _on_czuk_fetch_requested(self):
-        """Step 1 requested a ČÚZK WFS fetch — ask the map for its bounds."""
-        self._pending_bounds_for = "czuk"
-        self.map_widget.request_bounds()
-
     def _on_map_bounds_ready(self, s: float, w: float, n: float, e: float):
-        """Map returned its bounds; dispatch to ČÚZK or Overpass handler."""
-        if getattr(self, "_pending_bounds_for", "view_search") == "czuk":
-            self._pending_bounds_for = "view_search"   # reset
-            self.step1.do_czuk_fetch(s, w, n, e)
-            self.statusBar().showMessage(
-                "Fetching railway track data from ČÚZK INSPIRE WFS…"
-            )
-            return
-
+        """Map returned its bounds; run 'Lines in View' search."""
         # ── Overpass "Lines in View" search ──────────────────────────
         center_lat = (s + n) / 2.0
         lat_km = (n - s) * 111.0
@@ -308,18 +292,13 @@ class App(QMainWindow):
 
     def _on_railway_fetched(self, overpass_data, relation_info: dict):
         from osm.parser import parse_tracks
-        if isinstance(overpass_data, list):
-            # Pre-parsed Track objects from ČÚZK WFS (or other non-Overpass source)
-            self._tracks = overpass_data
-        else:
-            # Raw Overpass JSON dict — parse normally
-            try:
-                self._tracks = parse_tracks(overpass_data)
-            except Exception as exc:
-                QMessageBox.critical(self, "Parse error",
-                                     f"Failed to parse track data:\n{exc}")
-                self.statusBar().showMessage(f"⚠ Parse error: {exc}")
-                return
+        try:
+            self._tracks = parse_tracks(overpass_data)
+        except Exception as exc:
+            QMessageBox.critical(self, "Parse error",
+                                 f"Failed to parse track data:\n{exc}")
+            self.statusBar().showMessage(f"⚠ Parse error: {exc}")
+            return
 
         if not self._tracks:
             QMessageBox.warning(

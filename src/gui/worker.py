@@ -86,32 +86,6 @@ class FetchWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# ČÚZK WFS worker
-# ---------------------------------------------------------------------------
-
-class CzukWorker(QThread):
-    """Fetches railway track geometry from the ČÚZK INSPIRE WFS service."""
-    tracks_ready  = Signal(list)   # list[Track]
-    failed        = Signal(str)
-    status_update = Signal(str)
-
-    def __init__(self, south: float, west: float, north: float, east: float,
-                 parent=None):
-        super().__init__(parent)
-        self._bbox = (south, west, north, east)
-
-    def run(self):
-        try:
-            from osm.czuk_wfs import fetch_railway_links
-            cb = lambda msg: self.status_update.emit(msg)
-            s, w, n, e = self._bbox
-            tracks = fetch_railway_links(s, w, n, e, progress_cb=cb)
-            self.tracks_ready.emit(tracks)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-# ---------------------------------------------------------------------------
 # Candidate worker
 # ---------------------------------------------------------------------------
 
