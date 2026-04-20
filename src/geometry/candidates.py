@@ -154,12 +154,13 @@ def _point_to_element_dist(pt: np.ndarray, el: dict) -> float:
 class CandidateGenerator:
     """Run all four candidate algorithms on a projected XY polyline."""
 
-    COLORS = ["#ff9800", "#66bb6a", "#42a5f5", "#e040fb"]
+    COLORS = ["#ff9800", "#66bb6a", "#42a5f5", "#e040fb", "#26c6da"]
     LABELS = {
-        "segment_fit":    "Segment & Fit",
-        "dp_segment":     "DP Segmentation",
-        "progressive_mc": "Progressive MC",
-        "raw":            "OSM Polyline",
+        "segment_fit":         "Segment & Fit",
+        "segment_fit_spirals": "Segment & Fit (Spirals)",
+        "dp_segment":          "DP Segmentation",
+        "progressive_mc":      "Progressive MC",
+        "raw":                 "OSM Polyline",
     }
 
     def __init__(self, xy: np.ndarray, chainages: np.ndarray, settings: dict):
@@ -176,6 +177,7 @@ class CandidateGenerator:
         self.min_tangent_length = settings.get("min_tangent_length",  30.0)
         self.min_kappa_radius   = settings.get("min_kappa_radius",     0.0)
         self.min_kappa_length   = settings.get("min_kappa_length",   200.0)
+        self.spiral_length      = settings.get("spiral_length",       20.0)
 
         # Precompute forced-line chainage ranges once (shared by all algorithms)
         self._forced_ch_ranges: list[tuple[float, float]] = _compute_forced_line_ranges(
@@ -187,7 +189,7 @@ class CandidateGenerator:
 
     def run_all(self) -> list[CandidateAlignment]:
         results = []
-        algo_ids = ["segment_fit", "dp_segment", "progressive_mc", "raw"]
+        algo_ids = ["segment_fit", "segment_fit_spirals", "dp_segment", "progressive_mc", "raw"]
         for algo_id, color in zip(algo_ids, self.COLORS):
             try:
                 c = self._run_one(algo_id)
@@ -205,6 +207,8 @@ class CandidateGenerator:
     def _run_one(self, algo_id: str, progress_cb=None, preview_cb=None) -> CandidateAlignment:
         if algo_id == "segment_fit":
             return self._run_segment_fit(progress_cb=progress_cb)
+        elif algo_id == "segment_fit_spirals":
+            return self._run_segment_fit_spirals(progress_cb=progress_cb)
         elif algo_id == "dp_segment":
             return self._run_dp(progress_cb=progress_cb)
         elif algo_id == "progressive_mc":
@@ -310,7 +314,48 @@ class CandidateGenerator:
         return CandidateAlignment("segment_fit", "Segment & Fit", elements, **metrics)
 
     # ------------------------------------------------------------------
-    # Algorithm 2 — DP Segmentation
+    # Algorithm 2 — Segment & Fit with Spirals
+    # ------------------------------------------------------------------
+
+    def _run_segment_fit_spirals(self, progress_cb=None) -> CandidateAlignment:
+        """
+        Segment & Fit with clothoid transition curves (Euler spirals).
+
+        Runs the identical curvature-segmentation and fitting pipeline as
+        _run_segment_fit, then inserts entry/exit spirals of length
+        `spiral_length` around every Arc element that sits between two Lines.
+
+        The circular arc radius is inflated by p = L²/(24·R) to compensate
+        for the inward shift that clothoid spirals introduce, so the combined
+        L–S–A–S–L path tracks the same OSM centreline as the base Segment & Fit.
+        """
+        def _p(msg):
+            if progress_cb:
+                progress_cb(msg)
+
+        _p("Running Segment & Fit base…")
+        base     = self._run_segment_fit(progress_cb=_p)
+        elements = base.elements
+
+        if not elements:
+            return CandidateAlignment(
+                "segment_fit_spirals", "Segment & Fit (Spirals)", []
+            )
+
+        L = self.spiral_length
+        if L > 0:
+            _p(f"Inserting clothoid spirals (L = {L:.0f} m)…")
+            elements = _insert_spirals_into_elements(elements, L, self.min_radius)
+
+        _p("Evaluating quality…")
+        xy, chainages = self.xy, self.chainages
+        metrics = evaluate_candidate(elements, xy, chainages, self.check_interval)
+        return CandidateAlignment(
+            "segment_fit_spirals", "Segment & Fit (Spirals)", elements, **metrics
+        )
+
+    # ------------------------------------------------------------------
+    # Algorithm 3 — DP Segmentation
     # ------------------------------------------------------------------
 
     def _run_dp(self, progress_cb=None) -> CandidateAlignment:
@@ -2501,3 +2546,239 @@ def _post_process_elements(
     elements = _merge_adjacent_line_elements(elements)
 
     return elements
+
+
+# ---------------------------------------------------------------------------
+# Spiral insertion helper (used by _run_segment_fit_spirals)
+# ---------------------------------------------------------------------------
+
+def _insert_spirals_into_elements(
+    elements:      list[dict],
+    spiral_length: float,
+    min_radius:    float,
+) -> list[dict]:
+    """
+    Insert entry and exit clothoid spirals around every Arc element that sits
+    between two Line elements.
+
+    Geometry — PI-based tangent point placement
+    -------------------------------------------
+    For each Line→Arc→Line triplet:
+
+    1. Find the Point of Intersection (PI) of the incoming and outgoing tangent
+       lines (extension of the two adjacent Lines).
+    2. Compute the effective spiral length L_eff:
+          L_eff = min(spiral_length,
+                      0.85 × 2 × prev_line_length,
+                      0.85 × 2 × next_line_length)
+       so that TC (= PI − T_s × dir_in) stays on Line_before and
+       CT (= PI + T_s × dir_out) stays on Line_after.
+       If L_eff < L_MIN (2 m) after reduction, the arc is skipped.
+    3. Shift-compensated radius:
+          p      = L_eff² / (24 × R_fit)
+          R_arc  = R_fit + p
+    4. Spiral tangent length from PI:
+          k   = L_eff/2 − L_eff³/(240 × R_arc²)
+          T_s = (R_arc + p) × tan(|δ|/2) + k
+       This places TC and CT exactly on the tangent lines by construction.
+    5. Call ``_compute_zone_geometry(TC, dir_in, δ, R_arc, L_eff, L_eff)``
+       to obtain accurate Fresnel-integral coordinates for the full L–S–A–S–L.
+
+    At inflection points the predefined spiral_length is automatically
+    shortened (step 2) so the spirals fit within the short connector Line.
+
+    Returns a new list; input is not modified.
+
+    Spiral element dict fields (consumed by ``_add_spiral`` in builder.py):
+        type, sta_start, length, start, end,
+        radius_start (inf for entry), radius_end (R_arc for entry),
+        clothoid_A = sqrt(R_arc × L_eff), rot
+    Exit spiral: radius_start = R_arc, radius_end = inf.
+    """
+    from geometry.alignment import _compute_zone_geometry
+
+    _L_MIN = 2.0   # spirals shorter than this are not worth inserting
+
+    if spiral_length <= 0 or not elements:
+        return list(elements)
+
+    work = [dict(e) for e in elements]
+    out: list[dict] = []
+    skip_next = False
+
+    for i in range(len(work)):
+        if skip_next:
+            skip_next = False
+            continue
+
+        el = work[i]
+
+        # Only handle Arc flanked by Line on both sides
+        if (el.get("type") != "Arc"
+                or i == 0 or i == len(work) - 1
+                or work[i - 1].get("type") != "Line"
+                or work[i + 1].get("type") != "Line"):
+            out.append(el)
+            continue
+
+        prev_el = work[i - 1]
+        next_el = work[i + 1]
+        R_fit   = el.get("radius", 0.0)
+        delta   = el.get("_deflection", 0.0)   # signed total arc deflection (rad)
+
+        if R_fit <= 0 or math.isinf(R_fit) or abs(delta) < 1e-6:
+            out.append(el)
+            continue
+
+        phi_in  = prev_el.get("direction_rad", 0.0)
+        phi_out = next_el.get("direction_rad", 0.0)
+
+        # ── Find PI (Point of Intersection of tangent lines) ─────────────
+        # Solve: TS_orig + t*(cos φ_in, sin φ_in) = ST_orig + s*(cos φ_out, sin φ_out)
+        TS_orig = np.array(el["start"], dtype=float)
+        ST_orig = np.array(el["end"],   dtype=float)
+        dx = float(ST_orig[0] - TS_orig[0])
+        dy = float(ST_orig[1] - TS_orig[1])
+        sin_d = math.sin(delta)
+        if abs(sin_d) < 1e-9:
+            out.append(el)
+            continue
+        # Cramer's rule: det = sin(φ_in − φ_out) = −sin(δ)
+        # t_pi = (−dx·sin φ_out + dy·cos φ_out) / det
+        #      = (dx·sin φ_out − dy·cos φ_out) / sin_d
+        t_pi = (dx * math.sin(phi_out) - dy * math.cos(phi_out)) / sin_d
+        PI = TS_orig + t_pi * np.array([math.cos(phi_in), math.sin(phi_in)])
+
+        # t_pi is the arc's "simple tangent length" from TS_orig to PI.
+        # Available free length on each side (from TS_orig backward / from ST_orig forward):
+        #   T_s ≈ t_pi + L/2  →  L ≈ 2*(T_s − t_pi)
+        #   For TC on Line_before: T_s − t_pi ≤ prev_el["length"]  →  L ≤ 2*prev_el["length"]
+        #   For CT on Line_after:  T_s − t_pi ≤ next_el["length"]  →  L ≤ 2*next_el["length"]
+        avail_prev = prev_el.get("length", 0.0)
+        avail_next = next_el.get("length", 0.0)
+        L_eff = min(spiral_length, 0.85 * 2.0 * avail_prev, 0.85 * 2.0 * avail_next)
+
+        if L_eff < _L_MIN:
+            out.append(el)
+            continue
+
+        # ── Shift-compensated arc radius ──────────────────────────────────
+        p     = L_eff * L_eff / (24.0 * R_fit)
+        R_arc = R_fit + p
+
+        # Check remaining arc angle after removing both spirals
+        arc_angle_rem = abs(delta) - 2.0 * L_eff / R_arc
+        if arc_angle_rem < 0.02:
+            out.append(el)
+            continue
+
+        # ── Tangent length from PI to TC / CT ────────────────────────────
+        k   = L_eff / 2.0 - L_eff ** 3 / (240.0 * R_arc ** 2)
+        T_s = (R_arc + p) * math.tan(abs(delta) / 2.0) + k
+
+        TC = PI - T_s * np.array([math.cos(phi_in),  math.sin(phi_in)])
+        CT_check = PI + T_s * np.array([math.cos(phi_out), math.sin(phi_out)])
+
+        # Guard: TC must stay between prev_start and TS_orig (on Line_before)
+        prev_start  = np.array(prev_el["start"], dtype=float)
+        dist_tc_from_prev_start = float(np.linalg.norm(TC - prev_start))
+        if dist_tc_from_prev_start < 1e-3 or dist_tc_from_prev_start >= avail_prev + t_pi - 0.01:
+            out.append(el)
+            continue
+
+        # ── Full L–S–A–S–L geometry (Fresnel-accurate) ───────────────────
+        zone = _compute_zone_geometry(TC, phi_in, delta, R_arc,
+                                      L_entry=L_eff, L_exit=L_eff)
+        if zone is None:
+            out.append(el)
+            continue
+
+        CT        = zone["CT"]
+        zas       = zone["arc_start"]
+        zac       = zone["arc_center"]
+        zae       = zone["arc_end"]
+        z_arc_len = zone["arc_len"]
+        rot       = zone["rot"]
+        clothoid_A = math.sqrt(R_arc * L_eff)
+        next_end_pt = np.array(next_el["end"], dtype=float)
+
+        # Guard: CT must not overshoot the end of Line_after
+        if float(np.linalg.norm(next_end_pt - CT)) < 1e-3:
+            out.append(el)
+            continue
+
+        # ── 1. Truncate Line_before to TC ─────────────────────────────────
+        tc_list  = TC.tolist()
+        new_prev = dict(prev_el)
+        new_prev["end"]    = tc_list
+        new_prev["length"] = float(np.linalg.norm(TC - prev_start))
+        # Replace the last element in `out` (which is prev_el, from prev iteration)
+        if out and out[-1] is prev_el:
+            out[-1] = new_prev
+        else:
+            out.append(new_prev)
+
+        # ── 2. Entry spiral ──────────────────────────────────────────────
+        sta_tc = new_prev.get("sta_start", 0.0) + new_prev["length"]
+        entry_sp: dict = {
+            "type":         "Spiral",
+            "sta_start":    sta_tc,
+            "length":       L_eff,
+            "start":        tc_list,
+            "end":          zas.tolist(),
+            "radius_start": float("inf"),
+            "radius_end":   R_arc,
+            "clothoid_A":   clothoid_A,
+            "rot":          rot,
+        }
+        out.append(entry_sp)
+
+        # ── 3. Circular arc ───────────────────────────────────────────────
+        chord   = float(np.linalg.norm(zae - zas))
+        new_arc: dict = {
+            "type":        "Arc",
+            "sta_start":   sta_tc + L_eff,
+            "length":      z_arc_len,
+            "start":       zas.tolist(),
+            "end":         zae.tolist(),
+            "center":      zac.tolist(),
+            "radius":      R_arc,
+            "rot":         rot,
+            "chord":       chord,
+            "_deflection": zone["arc_angle"] * (1 if delta >= 0 else -1),
+        }
+        out.append(new_arc)
+
+        # ── 4. Exit spiral ────────────────────────────────────────────────
+        ct_list = CT.tolist()
+        exit_sp: dict = {
+            "type":         "Spiral",
+            "sta_start":    sta_tc + L_eff + z_arc_len,
+            "length":       L_eff,
+            "start":        zae.tolist(),
+            "end":          ct_list,
+            "radius_start": R_arc,
+            "radius_end":   float("inf"),
+            "clothoid_A":   clothoid_A,
+            "rot":          rot,
+        }
+        out.append(exit_sp)
+
+        # ── 5. Truncated Line_after from CT ───────────────────────────────
+        new_next = dict(next_el)
+        new_next["start"]         = ct_list
+        new_next["length"]        = float(np.linalg.norm(next_end_pt - CT))
+        new_next["direction_rad"] = math.atan2(
+            float(next_end_pt[1] - CT[1]),
+            float(next_end_pt[0] - CT[0]),
+        )
+        out.append(new_next)
+        skip_next = True   # work[i+1] already replaced above
+
+    # ── Recompute sta_start chain ─────────────────────────────────────────
+    sta = 0.0
+    for e in out:
+        e["sta_start"] = sta
+        sta += e.get("length", 0.0)
+
+    return out

@@ -74,6 +74,21 @@ class Step3Configure(QWidget):
         )
         ef.addRow("Vertical curve length:", self._vc_spin)
 
+        self._spiral_length_spin = QDoubleSpinBox()
+        self._spiral_length_spin.setRange(0.0, 200.0)
+        self._spiral_length_spin.setSingleStep(5.0)
+        self._spiral_length_spin.setDecimals(0)
+        self._spiral_length_spin.setValue(20.0)
+        self._spiral_length_spin.setSuffix(" m")
+        self._spiral_length_spin.setSpecialValueText("Disabled")
+        self._spiral_length_spin.setToolTip(
+            "Length of each entry/exit clothoid spiral for the\n"
+            "'Segment & Fit (Spirals)' algorithm.\n"
+            "0 = disabled (produces same result as Segment & Fit).\n"
+            "Typical mainline railway: 20–80 m."
+        )
+        ef.addRow("Spiral length:", self._spiral_length_spin)
+
         v.addWidget(exp_group)
 
         # ── Alignment Accuracy ────────────────────────────────────────
@@ -270,6 +285,7 @@ class Step3Configure(QWidget):
             "min_tangent_length": self._min_tangent_spin.value(),
             "min_kappa_radius":   self._min_kappa_radius_spin.value(),
             "min_kappa_length":   self._min_kappa_length_spin.value(),
+            "spiral_length":      self._spiral_length_spin.value(),
             # Keep these with defaults so downstream code that still references
             # them (e.g. old ExportWorker path) does not KeyError.
             "check_interval":  5.0,
