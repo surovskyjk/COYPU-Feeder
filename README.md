@@ -14,7 +14,7 @@ Elevation is sampled from the [Open-Elevation](https://open-elevation.com/) DEM 
 
 ## Download
 
-Pre-built Windows x64 binaries are published as [GitHub Releases](https://github.com/surovskyjk/Coypu-Feeder/releases/latest).
+Pre-built Windows x64 binaries are published as [GitHub Releases](https://github.com/surovskyjk/COYPU-Feeder/releases/latest).
 
 1. Download `Coypu-Feeder-v1.0.0-windows-x64.zip`
 2. Extract to any folder
@@ -240,8 +240,8 @@ pip install -r requirements.txt
 ## Installation (from source)
 
 ```bash
-git clone https://github.com/surovskyjk/Coypu-Feeder.git
-cd Coypu-Feeder
+git clone https://github.com/surovskyjk/COYPU-Feeder.git
+cd COYPU-Feeder
 python -m venv venv
 
 # Windows
@@ -258,7 +258,7 @@ python main.py
 ## Project Structure
 
 ```
-Coypu-Feeder/
+COYPU-Feeder/
 ├── main.py                       # Entry point
 ├── requirements.txt
 ├── coypu_feeder.spec             # PyInstaller build spec
