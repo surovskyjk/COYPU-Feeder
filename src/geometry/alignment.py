@@ -1094,19 +1094,30 @@ def _compute_zone_geometry(
     dir_arc_end = dir_arc_start + sign * arc_angle
 
     # ── Exit spiral ──────────────────────────────────────────────────────
+    # The exit spiral has DECREASING curvature (1/R at arc_end → 0 at CT).
+    # Traversed backwards from CT it is an entry spiral with the opposite
+    # turn sign, so its endpoint offsets must be applied in the frame of the
+    # OUTGOING tangent (mirrored), not the arc-end tangent:
+    #     CT = arc_end + Rot(φ_out) · (x_sp, −sign·y_sp)
+    # (The previous forward-entry construction misplaced CT laterally by
+    #  ≈ sign·(θ_s − 2·atan(y_sp/x_sp)) ≈ θ_s/3 — the "alignment doesn't end
+    #  on the tangent" bug.)
     if L_exit > 0:
+        dir_ct = dir_arc_end + sign * theta_exit    # = dir_in + sign·|δ|
         x_sp, y_sp = _compute_clothoid_shift(L_exit, R)
-        cos_e = math.cos(dir_arc_end)
-        sin_e = math.sin(dir_arc_end)
-        ct_x = float(arc_end[0]) + cos_e * x_sp - sign * sin_e * y_sp
-        ct_y = float(arc_end[1]) + sin_e * x_sp + sign * cos_e * y_sp
+        cos_o = math.cos(dir_ct)
+        sin_o = math.sin(dir_ct)
+        ct_x = float(arc_end[0]) + cos_o * x_sp + sign * sin_o * y_sp
+        ct_y = float(arc_end[1]) + sin_o * x_sp - sign * cos_o * y_sp
         CT = np.array([ct_x, ct_y])
+        # Sample from arc_end (r = L_exit) to CT (r = 0), where r is the
+        # remaining spiral length measured backwards from CT.
         spiral_exit_pts = []
-        for frac in np.linspace(0, 1, n_pts + 1):
-            L_s = frac * L_exit
-            xe, ye = _compute_clothoid_shift(L_s, R) if L_s > 0 else (0.0, 0.0)
-            wx = float(arc_end[0]) + cos_e * xe - sign * sin_e * ye
-            wy = float(arc_end[1]) + sin_e * xe + sign * cos_e * ye
+        for frac in np.linspace(1, 0, n_pts + 1):
+            r = frac * L_exit
+            xe, ye = _compute_clothoid_shift(r, R) if r > 0 else (0.0, 0.0)
+            wx = float(CT[0]) - (cos_o * xe + sign * sin_o * ye)
+            wy = float(CT[1]) - (sin_o * xe - sign * cos_o * ye)
             spiral_exit_pts.append([wx, wy])
         spiral_exit_pts = np.array(spiral_exit_pts)
     else:

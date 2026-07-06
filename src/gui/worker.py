@@ -144,11 +144,9 @@ class CandidateWorker(QThread):
     failed            = Signal(str)
 
     _ALGO_COLORS = {
-        "segment_fit":         "#ff9800",
-        "segment_fit_spirals": "#26c6da",
-        "dp_segment":          "#66bb6a",
-        "progressive_mc":      "#42a5f5",
-        "raw":                 "#e040fb",
+        "level1": "#e040fb",   # OSM polyline — purple
+        "level2": "#ff9800",   # Lines + Arcs — orange
+        "level3": "#26c6da",   # Lines + Spirals + Arcs — cyan
     }
 
     def __init__(self, xy_list, chainages_list, settings: dict, parent=None):
@@ -187,8 +185,7 @@ class CandidateWorker(QThread):
 
             gen = CandidateGenerator(xy, chs, self._settings)
 
-            algo_ids = ["segment_fit", "segment_fit_spirals",
-                        "dp_segment", "progressive_mc", "raw"]
+            algo_ids = ["level1", "level2", "level3"]
             sweep_n = int(self._settings.get("sweep_n", 3))
 
             for algo_id in algo_ids:

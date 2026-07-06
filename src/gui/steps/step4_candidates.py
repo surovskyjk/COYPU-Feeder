@@ -1,8 +1,12 @@
 """
 Step 4 — Candidate Alignments.
 
-Runs four algorithms (Segment & Fit, DP Segmentation, Progressive MC, Raw OSM)
-in a background thread and shows a metrics card per algorithm.
+Runs the three alignment levels in a background thread and shows a metrics
+card per level:
+
+  Level 1 — the raw OSM polyline (reference; no C1 continuity)
+  Level 2 — Lines + circular Arcs from the tangent polygon (C1)
+  Level 3 — Lines + clothoid Spirals + Arcs (C1, spiral radii matched)
 
 Each card has:
   • A thin coloured bar identifying the algorithm
@@ -33,10 +37,12 @@ class CandidateCard(QGroupBox):
     """A single algorithm result card with progress indicator, metrics and Select button."""
     select_clicked = Signal(str)   # algorithm_id
 
-    def __init__(self, algo_id: str, label: str, color: str, parent=None):
+    def __init__(self, algo_id: str, label: str, color: str,
+                 description: str = "", parent=None):
         super().__init__(label, parent)
-        self._algo_id = algo_id
-        self._color   = color
+        self._algo_id     = algo_id
+        self._color       = color
+        self._description = description
         self._build()
 
     def _build(self):
@@ -49,6 +55,13 @@ class CandidateCard(QGroupBox):
         bar.setFixedHeight(4)
         bar.setStyleSheet(f"background: {self._color}; border-radius: 2px;")
         layout.addWidget(bar)
+
+        # ── Description ───────────────────────────────────────────────
+        if self._description:
+            desc = QLabel(self._description)
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color: #888; font-size: 10px;")
+            layout.addWidget(desc)
 
         # ── Per-card progress bar (indeterminate) ─────────────────────
         self._progress_bar = QProgressBar()
@@ -211,12 +224,17 @@ class Step4Candidates(QWidget):
     candidate_map_update = Signal(list)     # list[CandidateAlignment] for map overlay
     back_requested       = Signal()         # user clicked ← Back to Configure
 
+    # (algo_id, card title, colour, description)
     ALGO_DEFS = [
-        ("segment_fit",         "Segment & Fit",           "#ff9800"),
-        ("segment_fit_spirals", "Segment & Fit (Spirals)", "#26c6da"),
-        ("dp_segment",          "DP Segmentation",         "#66bb6a"),
-        ("progressive_mc",      "Progressive MC",          "#42a5f5"),
-        ("raw",                 "OSM Polyline",            "#e040fb"),
+        ("level1", "Level 1 — OSM Polyline", "#e040fb",
+         "The raw OSM geometry, one Line per vertex pair. "
+         "Exact but not a design alignment (no C1 continuity)."),
+        ("level2", "Level 2 — Lines + Arcs", "#ff9800",
+         "Tangent polygon from the OSM line; a circular curve tangent "
+         "to both tangents at every PI. Fully C1-continuous."),
+        ("level3", "Level 3 — Lines + Spirals + Arcs", "#26c6da",
+         "As Level 2, plus clothoid transition spirals at every curve. "
+         "Spiral radius matches the arc exactly; C1-continuous."),
     ]
 
     def __init__(self, parent=None):
@@ -253,8 +271,8 @@ class Step4Candidates(QWidget):
         layout.addWidget(self._status_lbl)
 
         # Algorithm cards
-        for algo_id, label, color in self.ALGO_DEFS:
-            card = CandidateCard(algo_id, label, color, self)
+        for algo_id, label, color, desc in self.ALGO_DEFS:
+            card = CandidateCard(algo_id, label, color, desc, self)
             card.select_clicked.connect(self._on_select)
             layout.addWidget(card)
             self._cards.append(card)
@@ -372,7 +390,7 @@ class Step4Candidates(QWidget):
         self._emit_map_update()
 
         # Mark the next card as running if algorithms run sequentially
-        algo_ids = [a for a, _, _ in self.ALGO_DEFS]
+        algo_ids = [d[0] for d in self.ALGO_DEFS]
         if algo_id in algo_ids:
             next_idx = algo_ids.index(algo_id) + 1
             if next_idx < len(self._cards) and next_idx >= self._n_done:

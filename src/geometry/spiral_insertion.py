@@ -262,18 +262,22 @@ def insert_spiral(
         arc_exit_heading = _arc_end_heading(arc)
         arc_end          = np.array(arc.get("end", [0.0, 0.0]), dtype=float)
 
-        # Spiral start = current Arc.end; compute spiral exit (CT) via Fresnel
+        # Spiral start = current Arc.end; compute spiral exit (CT) via Fresnel.
+        # The exit spiral has DECREASING curvature; traversed backwards from
+        # CT it is an entry spiral with the opposite turn sign, so the
+        # endpoint offsets apply in the OUTGOING tangent frame (mirrored):
+        #     CT = arc_end + Rot(φ_out)·(x_sp, −sign·y_sp)
         from geometry.alignment import _compute_clothoid_shift
         x_sp, y_sp = _compute_clothoid_shift(L_spiral, R)
-        cos_d = math.cos(arc_exit_heading)
-        sin_d = math.sin(arc_exit_heading)
-        CT = np.array([
-            float(arc_end[0]) + cos_d * x_sp - sign * sin_d * y_sp,
-            float(arc_end[1]) + sin_d * x_sp + sign * cos_d * y_sp,
-        ])
 
         # CT heading (entry of shortened Line)
         CT_heading = arc_exit_heading + sign * L_spiral / (2.0 * R)
+        cos_o = math.cos(CT_heading)
+        sin_o = math.sin(CT_heading)
+        CT = np.array([
+            float(arc_end[0]) + cos_o * x_sp + sign * sin_o * y_sp,
+            float(arc_end[1]) + sin_o * x_sp - sign * cos_o * y_sp,
+        ])
 
         A_cloth = math.sqrt(R * L_spiral)
         spiral = {
@@ -469,12 +473,26 @@ def enforce_c1_chain(elements: list[dict]) -> list[dict]:
                 continue
 
             x_sp, y_sp = _compute_clothoid_shift(L, R)
-            cos_h = math.cos(heading)
-            sin_h = math.sin(heading)
-            end = np.array([
-                pos[0] + cos_h * x_sp - sign * sin_h * y_sp,
-                pos[1] + sin_h * x_sp + sign * cos_h * y_sp,
-            ])
+            is_exit = (not math.isinf(r_start)) and math.isinf(r_end)
+            if is_exit:
+                # Exit spiral (κ decreasing): mirrored construction — the
+                # endpoint offsets apply in the OUTGOING tangent frame:
+                #     end = pos + Rot(h_out)·(x_sp, −sign·y_sp)
+                h_out = heading + sign * L / (2.0 * R)
+                cos_o = math.cos(h_out)
+                sin_o = math.sin(h_out)
+                end = np.array([
+                    pos[0] + cos_o * x_sp + sign * sin_o * y_sp,
+                    pos[1] + sin_o * x_sp - sign * cos_o * y_sp,
+                ])
+            else:
+                # Entry spiral (κ increasing): forward Fresnel construction
+                cos_h = math.cos(heading)
+                sin_h = math.sin(heading)
+                end = np.array([
+                    pos[0] + cos_h * x_sp - sign * sin_h * y_sp,
+                    pos[1] + sin_h * x_sp + sign * cos_h * y_sp,
+                ])
             el["end"] = end.tolist()
 
             # Heading change = sign * L / (2R)

@@ -31,7 +31,7 @@ No Python installation required.
 - **Czech Railways browser** — lazy-loads all ~300 lines from the *Railways in Czech Republic* OSM collection with instant client-side filtering
 - **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
-- **5 candidate alignment algorithms** — compare results side by side on the map before choosing one for export
+- **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
 - **Clothoid transition curves** — entry/exit spirals at every arc, with shift-compensated arc radius
 - **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
 - **Refinement step** — manually trim the alignment ends before export
@@ -105,31 +105,25 @@ Configure geometry parameters before running the fitting algorithms:
 | **Export Settings** | Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
 | | Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
 | | Spiral length | 20 m | Entry/exit clothoid length for *Segment & Fit (Spirals)*; 0 = disabled |
-| **Alignment Accuracy** | Max deviation from OSM line | 0.50 m | Maximum allowed perpendicular distance between fitted element and OSM polyline |
-| | Minimum curve radius | 150 m | Minimum horizontal curve radius enforced on all arc elements |
-| | Min straight radius | 0 m (disabled) | OSM curvature radius threshold above which sections are forced to Line elements |
-| | Min straight length | 200 m | Minimum length of a low-curvature section to be forced to a Line |
-| **Candidate Generation** | Curvature smooth window | 21 | Savitzky-Golay window length (Segment & Fit only) |
-| | Radius merge tolerance | 15 % | Controls how aggressively adjacent arcs are merged |
-| | Max computing time | 60 s | Time budget per algorithm (DP Segmentation and Progressive MC) |
-| | MC window length | 500 m | Length of each Progressive MC optimisation window |
-| | Min tangent length | 30 m | Minimum Line length between same-sense Arcs (Progressive MC consolidation) |
+| **Alignment Geometry** | Max deviation (PI tolerance) | 1.0 m | Douglas-Peucker tolerance for extracting the tangent polygon (Points of Intersection) |
+| | Minimum curve radius | 150 m | Minimum horizontal curve radius for all circular arcs |
+| | Spiral length (Level 3) | 20 m | Clothoid length; auto-shortened where tangents are too short |
 
 ---
 
 ### Step 4 — Candidates
 
-All five candidate alignment algorithms are run simultaneously in background threads. Results appear on the map as coloured overlays as each finishes:
+Three alignment **levels** are computed in a background thread. Results appear on the map as coloured overlays as each finishes:
 
-| Colour | Algorithm | Description |
+| Colour | Level | Description |
 |---|---|---|
-| 🟠 Orange | **Segment & Fit** | Curvature-based segmentation followed by iterative Line/Arc fitting |
-| 🩵 Cyan | **Segment & Fit (Spirals)** | As above, but inserts clothoid transition spirals (L–S–A–S–L) at every arc |
-| 🔵 Blue | **DP Segmentation** | Douglas-Peucker-based segmentation with constrained arc fitting |
-| 🟣 Purple | **Progressive MC** | Monte-Carlo window-optimisation with C1 continuity at every boundary |
-| 🟢 Green | **OSM Polyline** | The raw OSM geometry as-is (reference only, no fitting) |
+| 🟣 Purple | **Level 1 — OSM Polyline** | The raw OSM geometry, one Line per vertex pair. Exact but no C1 continuity (reference only) |
+| 🟠 Orange | **Level 2 — Lines + Arcs** | Tangent polygon from the OSM line; a circular curve tangent to both tangents at every PI. Fully C1-continuous |
+| 🩵 Cyan | **Level 3 — Lines + Spirals + Arcs** | As Level 2, plus clothoid transition spirals at every curve. Spiral radius matches the arc exactly |
 
-Each result card shows the element count, maximum deviation, mean deviation, and a quality score. Select one candidate and click **Next →** to proceed.
+Construction principle (Levels 2 & 3): the OSM polyline is simplified into a **tangent polygon** whose interior vertices are the Points of Intersection (PIs). Split curves are automatically re-merged, the curve radius is estimated from the genuinely curved OSM points, and the alignment **starts and ends exactly at the original OSM endpoints**. For Level 3 the spiral tangent length uses the exact Fresnel-based shift: `T_s = (R + p)·tan(|δ|/2) + k`, so every Line–Spiral–Arc–Spiral–Line zone closes on the outgoing tangent by construction. Where a spiral cannot fit, the curve falls back to a plain arc — C1 continuity is never sacrificed.
+
+Each result card shows the element count, maximum deviation, RMSE, and the worst C1 heading mismatch (green < 0.1°). Step 4 automatically tries three PI tolerances per level and keeps the best result. Select one level and click **Next →** to proceed.
 
 ---
 
@@ -290,7 +284,7 @@ Coypu-Feeder/
     │   └── parser.py             # OSM way → Track objects
     ├── geometry/
     │   ├── alignment.py          # Element fitting + continuity enforcement
-    │   ├── candidates.py         # 5 candidate-generation algorithms
+    │   ├── candidates.py         # Level 1/2/3 alignment construction (PI-based)
     │   ├── curvature.py          # Curvature computation and segmentation
     │   ├── elevation.py          # DEM sampling and vertical geometry
     │   └── projection.py         # CRS transformations (pyproj)
