@@ -28,11 +28,13 @@ var map = L.map('map', {zoomControl: true}).setView([50.05, 14.42], 7);
 
 /* Custom panes for z-ordering */
 map.createPane('tracksPane').style.zIndex      = '410';
+map.createPane('piPane').style.zIndex          = '615';
 map.createPane('osmRefPane').style.zIndex      = '630';
 map.createPane('candidatesPane').style.zIndex  = '620';
 map.createPane('alignmentGlowPane').style.zIndex = '640';
 map.createPane('alignmentPane').style.zIndex   = '650';
 map.createPane('crossSectionPane').style.zIndex = '625';
+map.createPane('stationPane').style.zIndex     = '660';
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -40,10 +42,17 @@ var trackLayers     = [];
 var osmRefLayers    = [];
 var alignmentLayers = [];
 var candidateLayers = [];
+var candIndex       = {};    // algo_id → [glow, main] (card-hover emphasis)
+var segIndex        = {};    // element_id → {main, glow} (highlight / hover)
+var piLayers        = [];    // PI markers + dashed virtual tangents
+var stationLayers   = [];    // station markers
 var csLeftLayer     = null;
 var csRightLayer    = null;
 var backend         = null;
 var _showRailOverlay = true;
+var _hoverTimer     = null;
+var _hoverPopup     = null;
+var _stationClickMode = false;
 
 /* ── Tile provider ─────────────────────────────────────────────── */
 function setTileProvider(url, subs, attr, maxZoom) {
@@ -205,28 +214,179 @@ function _fmtTooltip(seg) {
   return "<b>" + seg.type + "</b>";
 }
 
+function _fmtStatsPopup(seg) {
+  var p = seg.params || {};
+  var num = function(v, n) { if (v === undefined || v === null) return "—"; return Number(v).toFixed(n === undefined ? 2 : n); };
+  var eid = p.element_id || "?";
+  var staEnd = (p.sta_start || 0) + (p.length || 0);
+  var html = "<b>" + eid + " · " + seg.type + "</b><br>" +
+             "Length: "  + num(p.length)  + " m<br>" +
+             "Station: " + num((p.sta_start||0)/1000, 3) + " → " + num(staEnd/1000, 3) + " km<br>";
+  if (seg.type === "Arc") {
+    html += "Radius: " + num(p.radius) + " m<br>";
+    if (p._deflection !== undefined && p._deflection !== null)
+      html += "Deflection: " + num(p._deflection * 180 / Math.PI) + "°<br>";
+  }
+  if (seg.type === "Spiral") {
+    var rs = (p.radius_start === null || p.radius_start === undefined) ? "∞" : num(p.radius_start, 0);
+    var re = (p.radius_end   === null || p.radius_end   === undefined) ? "∞" : num(p.radius_end, 0);
+    html += "A: " + num(p.clothoid_A) + " m · R: " + rs + " → " + re + "<br>";
+  }
+  html += "<span style='color:#aaa'>Deviation vs OSM — max: " + num(p._max_dev) +
+          " m · mean: " + num(p._mean_dev) + " m</span>";
+  return html;
+}
+
+function _clearHover() {
+  if (_hoverTimer) { clearTimeout(_hoverTimer); _hoverTimer = null; }
+  if (_hoverPopup) { try { map.closePopup(_hoverPopup); } catch(e){} _hoverPopup = null; }
+}
+
 function showAlignmentSegmented(segments) {
   clearAlignment();
+  segIndex = {};
   var all = [];
   segments.forEach(function(seg) {
     var pts = (seg.points || []).map(function(n){ return [n[0], n[1]]; });
     if (pts.length < 2) return;
     all = all.concat(pts);
-    /* White glow halo */
+    var col = ELEMENT_COLOR[seg.type] || '#ffffff';
+    /* Glow halo — invisible until hovered/highlighted (glowing effect) */
     var glow = L.polyline(pts, {
-      color: '#ffffff', weight: 11, opacity: 0.20, pane: 'alignmentGlowPane'
+      color: col, weight: 13, opacity: 0.0, pane: 'alignmentGlowPane'
     }).addTo(map);
     alignmentLayers.push(glow);
     /* Coloured main element */
-    var col = ELEMENT_COLOR[seg.type] || '#ffffff';
     var pl = L.polyline(pts, {
       color: col, weight: 4, opacity: 0.95, pane: 'alignmentPane'
     }).addTo(map);
     pl.bindTooltip(_fmtTooltip(seg), {sticky: true, direction: 'top', className: 'aln-tip'});
     alignmentLayers.push(pl);
+
+    var eid = (seg.params || {}).element_id;
+    if (eid) segIndex[eid] = {main: pl, glow: glow};
+
+    /* Hover: immediate glow; after 3 s an ID + statistics popup */
+    pl.on('mouseover', function(ev) {
+      pl.setStyle({weight: 7, opacity: 1.0});
+      glow.setStyle({opacity: 0.45});
+      _clearHover();
+      var at = ev.latlng;
+      _hoverTimer = setTimeout(function() {
+        _hoverPopup = L.popup({closeButton: false, className: 'aln-tip', autoPan: false})
+          .setLatLng(at)
+          .setContent(_fmtStatsPopup(seg))
+          .openOn(map);
+      }, 3000);
+    });
+    pl.on('mouseout', function() {
+      pl.setStyle({weight: 4, opacity: 0.95});
+      glow.setStyle({opacity: 0.0});
+      _clearHover();
+    });
   });
   if (all.length)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
+}
+
+/* Highlight one element from the table (row click) */
+function highlightElement(elementId) {
+  Object.keys(segIndex).forEach(function(k) {
+    var e = segIndex[k];
+    e.main.setStyle({weight: 4, opacity: 0.95});
+    e.glow.setStyle({opacity: 0.0});
+  });
+  var sel = segIndex[elementId];
+  if (sel) {
+    sel.main.setStyle({weight: 8, opacity: 1.0});
+    sel.glow.setStyle({opacity: 0.55});
+    sel.main.bringToFront();
+    try {
+      var b = sel.main.getBounds();
+      if (!map.getBounds().contains(b)) map.panTo(b.getCenter());
+    } catch(e){}
+  }
+}
+
+/* ── PI overlay: markers + dashed virtual tangent extensions ───── */
+function showPIOverlay(payload) {
+  clearPIOverlay();
+  if (!payload) return;
+  (payload.tangents || []).forEach(function(t) {
+    var pl = L.polyline([t.from, t.to], {
+      color: '#9e9e9e', weight: 2, opacity: 0.55,
+      dashArray: '6 6', pane: 'piPane'
+    }).addTo(map);
+    piLayers.push(pl);
+  });
+  (payload.pis || []).forEach(function(pi) {
+    var omitted = !!pi.omitted;
+    var mk = L.circleMarker(pi.latlon, {
+      radius: 5,
+      color:   omitted ? '#9e9e9e' : '#37474f',
+      weight:  2,
+      fillColor: omitted ? 'transparent' : '#ffffff',
+      fillOpacity: omitted ? 0.0 : 0.9,
+      pane: 'piPane'
+    }).addTo(map);
+    var d = (pi.defl_deg === undefined || pi.defl_deg === null)
+            ? "" : " · δ=" + Number(pi.defl_deg).toFixed(1) + "°";
+    mk.bindTooltip("PI " + pi.id + d + (omitted ? " (omitted)" : ""),
+                   {direction: 'top', className: 'aln-tip'});
+    piLayers.push(mk);
+  });
+}
+
+function clearPIOverlay() {
+  piLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
+  piLayers = [];
+}
+
+/* ── Station markers + click-to-place mode ─────────────────────── */
+function showStations(stations) {
+  clearStations();
+  (stations || []).forEach(function(s) {
+    var mk = L.circleMarker(s.latlon, {
+      radius: 7, color: '#4a148c', weight: 2,
+      fillColor: '#ffd54f', fillOpacity: 0.95, pane: 'stationPane'
+    }).addTo(map);
+    mk.bindTooltip("🚉 " + (s.name || "?") +
+                   " · km " + Number(s.km || 0).toFixed(3),
+                   {direction: 'top', permanent: false, className: 'aln-tip'});
+    stationLayers.push(mk);
+  });
+}
+
+function clearStations() {
+  stationLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
+  stationLayers = [];
+}
+
+function setStationClickMode(on) {
+  _stationClickMode = !!on;
+  map.getContainer().style.cursor = on ? 'crosshair' : '';
+}
+
+map.on('click', function(ev) {
+  if (_stationClickMode && backend && backend.on_map_clicked) {
+    backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
+  }
+});
+
+/* ── Candidate emphasis (Step 4 card hover) ────────────────────── */
+function emphasizeCandidate(algoId) {
+  Object.keys(candIndex).forEach(function(k) {
+    var pair = candIndex[k];
+    if (!pair) return;
+    pair[0].setStyle({opacity: 0.15});
+    pair[1].setStyle({weight: 4, opacity: algoId ? 0.35 : 0.9});
+  });
+  if (algoId && candIndex[algoId]) {
+    var sel = candIndex[algoId];
+    sel[0].setStyle({opacity: 0.3});
+    sel[1].setStyle({weight: 7, opacity: 1.0});
+    sel[1].bringToFront();
+  }
 }
 
 function flyToAlignment() {
@@ -239,6 +399,8 @@ function flyToAlignment() {
 function clearAlignment() {
   alignmentLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
   alignmentLayers = [];
+  segIndex = {};
+  _clearHover();
 }
 
 /* ── Candidate overlays (one per algorithm) ──────────────────── */
@@ -260,6 +422,7 @@ function showCandidates(candidates) {
     }).addTo(map);
     pl.bindTooltip(c.label || '', {sticky: true});
     candidateLayers.push(pl);
+    if (c.algo) candIndex[c.algo] = [glow, pl];
   });
 }
 
@@ -268,6 +431,7 @@ function clearCandidates() {
     try{ map.removeLayer(l); }catch(e){}
   });
   candidateLayers = [];
+  candIndex = {};
 }
 
 /* ── Cross-section overlays (left / right, colour-coded) ──────── */
@@ -298,6 +462,8 @@ function clearAll() {
   clearAlignment();
   clearCandidates();
   clearCrossSection();
+  clearPIOverlay();
+  clearStations();
 }
 </script>
 </body>

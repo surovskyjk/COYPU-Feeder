@@ -75,6 +75,8 @@ class PIData:
     spiral_len_auto:  float = 0.0
     omitted:          bool  = False
     merged_with_next: bool  = False       # spiral-merge state (feature: merge)
+    merged_with_prev: bool  = False       # set on the partner PI
+    merge_partner:    int   = -1          # PI index of the merge partner
     premerge_spiral_len: float = -1.0     # value to restore on undo-merge
 
 
@@ -3203,10 +3205,16 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
         if abs(delta) < _PI_EPS_ANG:
             continue    # collinear: tangents merge into one line
 
-        # Available beyond the PI: share the next segment with the next PI
+        # Available beyond the PI: share the next segment with the next PI.
+        # Merged PI pairs are exempt from the sharing margins: their spiral
+        # tangent lengths are solved to meet exactly (T_s,a + T_s,b = D).
         d_seg_out = float(np.hypot(*(B - PI)))
-        d_out = d_seg_out * (0.5 if k < m - 2 else 1.0) - 0.1
-        T_max = min(d_in - 0.1, d_out)
+        if pi_data.merged_with_next:
+            d_out = d_seg_out
+        else:
+            d_out = d_seg_out * (0.5 if k < m - 2 else 1.0) - 0.1
+        d_in_eff = d_in if pi_data.merged_with_prev else d_in - 0.1
+        T_max = min(d_in_eff, d_out)
         if T_max <= 0.5:
             continue    # no room at all — drop the curve (stay on tangent)
 
@@ -3222,11 +3230,18 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
             else:                                # override (may be 0 = none)
                 L_target = float(pi_data.spiral_len)
         L_res = L_target if L_target >= _PI_L_MIN else 0.0
+        is_merged = pi_data.merged_with_next or pi_data.merged_with_prev
 
         # ── Radius: override or auto-estimate from the OSM points ────────
-        R_fit_max = max(1.0, (T_max - 0.55 * L_res) * 0.98 / half_tan)
-        if R_fit_max < min_radius and L_res > 0.0:
-            R_fit_max = max(1.0, (T_max * 0.98) / half_tan)
+        if is_merged:
+            # Merged pairs use exactly solved spiral lengths; no reserve or
+            # safety factor — otherwise the radius clamp would shorten T_s
+            # and re-open the gap.
+            R_fit_max = max(1.0, T_max / half_tan)
+        else:
+            R_fit_max = max(1.0, (T_max - 0.55 * L_res) * 0.98 / half_tan)
+            if R_fit_max < min_radius and L_res > 0.0:
+                R_fit_max = max(1.0, (T_max * 0.98) / half_tan)
 
         if pi_data.radius > 0:
             # User/applied override: guard only against geometric impossibility
@@ -3279,7 +3294,9 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
             # Arc must retain some angle: |δ| − L/R > EPS
             L = min(L, 0.9 * R * (abs(delta) - 0.01))
             # Tangent must fit: T_s ≈ R·tan + L/2  ≤ T_max
-            L = min(L, 2.0 * (T_max - R * half_tan) * 0.9)
+            # (merged pairs use the exact solved length — no safety factor)
+            slack = 1.0 if is_merged else 0.9
+            L = min(L, 2.0 * (T_max - R * half_tan) * slack)
             if L < _PI_L_MIN:
                 L = 0.0     # no spiral — fall back to plain arc
 
@@ -3290,7 +3307,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
             p_sh = y_sp - R * (1.0 - math.cos(theta_s))
             k_ab = x_sp - R * math.sin(theta_s)
             T_s  = (R + p_sh) * half_tan + k_ab
-            if T_s > T_max:
+            if T_s > T_max + 1e-6:
                 # One shrink pass on R, then give up the spiral
                 R_new = max(1.0, (T_max - k_ab) / half_tan - p_sh)
                 if R_new >= min(min_radius, R):
@@ -3300,7 +3317,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
                     p_sh = y_sp - R * (1.0 - math.cos(theta_s))
                     k_ab = x_sp - R * math.sin(theta_s)
                     T_s  = (R + p_sh) * half_tan + k_ab
-                if T_s > T_max or abs(delta) - L / R < 0.01:
+                if T_s > T_max + 1e-6 or abs(delta) - L / R < 0.01:
                     L = 0.0
 
         zone_ok = False
@@ -3374,15 +3391,43 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
     # ── Final tangent to the exact OSM end point ─────────────────────────
     _append_line(cur_pt, V[-1].copy())
 
-    # ── Station chain + stable element ids ───────────────────────────────
+    # ── Station chain + stable element ids + deviation stats ─────────────
     sta = 0.0
     for e in elements:
         e["sta_start"] = sta
         sta += e.get("length", 0.0)
     _assign_element_ids(elements)
+    annotate_element_deviations(elements, xy)
 
     model.elements = elements
     return elements
+
+
+def annotate_element_deviations(elements: list[dict], xy: np.ndarray) -> None:
+    """
+    Attach per-element deviation statistics (_max_dev / _mean_dev, metres)
+    by assigning every OSM point to its nearest element. Used by the map
+    hover popup.
+    """
+    if not elements or xy is None or len(xy) == 0:
+        return
+    n = len(elements)
+    sums   = [0.0] * n
+    counts = [0]   * n
+    maxs   = [0.0] * n
+    for pt in xy:
+        best, bi = float("inf"), -1
+        for i, el in enumerate(elements):
+            d = _point_to_element_dist(pt, el)
+            if d < best:
+                best, bi = d, i
+        if bi >= 0 and math.isfinite(best):
+            sums[bi]   += best
+            counts[bi] += 1
+            maxs[bi]    = max(maxs[bi], best)
+    for i, el in enumerate(elements):
+        el["_max_dev"]  = maxs[i]
+        el["_mean_dev"] = (sums[i] / counts[i]) if counts[i] else 0.0
 
 
 def _assign_element_ids(elements: list[dict]) -> None:
@@ -3542,6 +3587,180 @@ def _build_pi_alignment(
         use_spirals, progress_cb=progress_cb,
     )
     return model.elements
+
+
+# ---------------------------------------------------------------------------
+# Spiral merge — close a short intermediate straight between two curves
+# ---------------------------------------------------------------------------
+
+def _spiral_tangent_length(L: float, R: float, abs_delta: float) -> float:
+    """Exact Fresnel-based tangent length T_s = (R+p)·tan(|δ|/2) + k."""
+    from geometry.alignment import _compute_clothoid_shift
+    if L <= 0.0:
+        return R * math.tan(abs_delta / 2.0)
+    x_sp, y_sp = _compute_clothoid_shift(L, R)
+    theta_s = L / (2.0 * R)
+    p_sh = y_sp - R * (1.0 - math.cos(theta_s))
+    k_ab = x_sp - R * math.sin(theta_s)
+    return (R + p_sh) * math.tan(abs_delta / 2.0) + k_ab
+
+
+def _pi_zone_info(model: "PIAlignment", pi_index: int):
+    """(arc_element, entry_spiral, exit_spiral, |δ_full|) for a spiral zone."""
+    arc = entry = exit_ = None
+    for e in model.elements:
+        if e.get("_pi") != pi_index:
+            continue
+        if e["type"] == "Arc":
+            arc = e
+        elif e["type"] == "Spiral":
+            if math.isinf(float(e.get("radius_start", float("inf")))):
+                entry = e
+            else:
+                exit_ = e
+    if arc is None:
+        return None
+    R = float(arc["radius"])
+    abs_delta = abs(float(arc.get("_deflection", 0.0)))
+    if entry is not None:
+        abs_delta += float(entry["length"]) / (2.0 * R)
+    if exit_ is not None:
+        abs_delta += float(exit_["length"]) / (2.0 * R)
+    return arc, entry, exit_, abs_delta
+
+
+def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
+                            ) -> tuple[bool, str]:
+    """
+    Remove the short intermediate straight between the curves at PI a and
+    PI b by prolonging their transition spirals. The prolongation ΔL is the
+    same on both curves, and because the model stores ONE spiral length per
+    PI (used for both the entry and exit spiral of that curve), the spirals
+    on the far side of each circular curve prolong identically — each curve
+    stays symmetrical.
+
+    Solves  gap(ΔL) = D − T_s,a(L_a+ΔL) − T_s,b(L_b+ΔL) = 0  by Newton
+    iteration with the exact Fresnel tangent length, where D is the fixed
+    distance between the two PIs along their common tangent.
+
+    Returns (ok, message). On failure the model is left unchanged.
+    """
+    pids = {p.index: p for p in model.pis}
+    a, b = pids.get(pi_a), pids.get(pi_b)
+    if a is None or b is None:
+        return False, "PI not found in the model."
+    if a.omitted or b.omitted:
+        return False, "One of the PIs is omitted."
+
+    za = _pi_zone_info(model, pi_a)
+    zb = _pi_zone_info(model, pi_b)
+    if za is None or zb is None:
+        return False, "Both PIs must currently carry a curve."
+    arc_a, _, exit_a, delta_a = za
+    arc_b, entry_b, _, delta_b = zb
+    if exit_a is None or entry_b is None:
+        return False, "Both curves need transition spirals before merging."
+
+    R_a, R_b = float(arc_a["radius"]), float(arc_b["radius"])
+    L_a, L_b = float(exit_a["length"]), float(entry_b["length"])
+
+    # Current connector gap: the Line(s) between exit_a and entry_b
+    i_exit  = model.elements.index(exit_a)
+    i_entry = model.elements.index(entry_b)
+    gap = 0.0
+    for e in model.elements[i_exit + 1:i_entry]:
+        if e["type"] != "Line":
+            return False, "Elements other than a straight sit between the curves."
+        gap += float(e["length"])
+    if gap < 1e-6:
+        return False, "The curves are already joined."
+
+    # Fixed PI-to-PI distance along the common tangent
+    D = gap + _spiral_tangent_length(L_a, R_a, delta_a) \
+            + _spiral_tangent_length(L_b, R_b, delta_b)
+
+    # Newton on f(Δ) = D − T_a(L_a+Δ) − T_b(L_b+Δ);  dT/dL ≈ 1/2 each → f' ≈ −1
+    dL = gap                       # good initial guess (ΔL/2 + ΔL/2 = gap)
+    for _ in range(20):
+        f = D - _spiral_tangent_length(L_a + dL, R_a, delta_a) \
+              - _spiral_tangent_length(L_b + dL, R_b, delta_b)
+        if abs(f) < 1e-6:
+            break
+        h = 0.01
+        f2 = D - _spiral_tangent_length(L_a + dL + h, R_a, delta_a) \
+               - _spiral_tangent_length(L_b + dL + h, R_b, delta_b)
+        deriv = (f2 - f) / h
+        if abs(deriv) < 1e-9:
+            break
+        dL -= f / deriv
+        if dL < 0:
+            return False, "No prolongation closes the gap (negative solution)."
+
+    L_a_new, L_b_new = L_a + dL, L_b + dL
+
+    # Guards: each curve must keep a positive arc angle
+    if delta_a - L_a_new / R_a < 0.02:
+        return False, (f"Curve at PI {pi_a} is too short: prolonging its "
+                       f"spirals to {L_a_new:.1f} m would consume the arc.")
+    if delta_b - L_b_new / R_b < 0.02:
+        return False, (f"Curve at PI {pi_b} is too short: prolonging its "
+                       f"spirals to {L_b_new:.1f} m would consume the arc.")
+
+    # Apply with rollback: the rebuild's own T_max guards may clamp the
+    # lengths (outer tangents too short) — detect and roll back.
+    snap = [(p.spiral_len, p.premerge_spiral_len,
+             p.merged_with_next, p.merged_with_prev) for p in (a, b)]
+    a.premerge_spiral_len = L_a
+    b.premerge_spiral_len = L_b
+    a.spiral_len = L_a_new
+    b.spiral_len = L_b_new
+    a.merged_with_next = True
+    a.merge_partner = pi_b
+    b.merged_with_prev = True
+
+    els = rebuild_from_pi_model(model)
+    ok = (abs(a.spiral_len - L_a_new) < 0.05
+          and abs(b.spiral_len - L_b_new) < 0.05)
+    if ok:
+        # Verify the connector is actually gone
+        za2 = _pi_zone_info(model, pi_a)
+        zb2 = _pi_zone_info(model, pi_b)
+        if za2 and zb2 and za2[2] is not None and zb2[1] is not None:
+            i1 = model.elements.index(za2[2])
+            i2 = model.elements.index(zb2[1])
+            residual = sum(float(e["length"]) for e in model.elements[i1 + 1:i2])
+            ok = residual < 0.05
+        else:
+            ok = False
+    if not ok:
+        (a.spiral_len, a.premerge_spiral_len,
+         a.merged_with_next, a.merged_with_prev) = snap[0]
+        (b.spiral_len, b.premerge_spiral_len,
+         b.merged_with_next, b.merged_with_prev) = snap[1]
+        a.merge_partner = -1
+        rebuild_from_pi_model(model)
+        return False, ("Merging failed: the outer tangents are too short for "
+                       "the prolonged spirals (rolled back).")
+    return True, f"Merged: spirals prolonged to {L_a_new:.1f} m / {L_b_new:.1f} m."
+
+
+def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
+    """Restore the pre-merge spiral lengths of the pair merged at pi_a."""
+    pids = {p.index: p for p in model.pis}
+    a = pids.get(pi_a)
+    if a is None or not a.merged_with_next:
+        return False, "This PI has no merge to undo."
+    b = pids.get(a.merge_partner)
+    a.spiral_len = a.premerge_spiral_len if a.premerge_spiral_len >= 0 else -1.0
+    a.merged_with_next = False
+    a.merge_partner = -1
+    a.premerge_spiral_len = -1.0
+    if b is not None:
+        b.spiral_len = b.premerge_spiral_len if b.premerge_spiral_len >= 0 else -1.0
+        b.premerge_spiral_len = -1.0
+        b.merged_with_prev = False
+    rebuild_from_pi_model(model)
+    return True, "Merge undone."
 
 
 # ---------------------------------------------------------------------------

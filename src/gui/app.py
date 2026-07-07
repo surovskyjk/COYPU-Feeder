@@ -11,10 +11,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
-    QSizePolicy, QMessageBox, QApplication,
+    QSizePolicy, QMessageBox, QApplication, QSplitter,
 )
 
 from .map_widget import MapWidget
+from .element_table import ElementTableDock
 from .step_sidebar import StepSidebar
 from .steps.step1_find import Step1Find
 from .steps.step2_section import Step2Section
@@ -68,7 +69,17 @@ class App(QMainWindow):
         self.map_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        h.addWidget(self.map_widget, stretch=1)
+
+        # Map above, element table below (table shown in Step 5 only)
+        self.element_table = ElementTableDock()
+        self.element_table.setVisible(False)
+        self._map_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._map_splitter.addWidget(self.map_widget)
+        self._map_splitter.addWidget(self.element_table)
+        self._map_splitter.setStretchFactor(0, 3)
+        self._map_splitter.setStretchFactor(1, 1)
+        self._map_splitter.setCollapsible(0, False)
+        h.addWidget(self._map_splitter, stretch=1)
 
         self.stack = QStackedWidget()
         self.stack.setFixedWidth(340)
@@ -124,17 +135,20 @@ class App(QMainWindow):
         self.step3.config_confirmed.connect(self._on_config_confirmed)
         self.step3.back_requested.connect(lambda: self._goto_step(1))
 
-        # Step 4 (candidates) → map update + selection + back
+        # Step 4 (candidates) → map update + selection + hover emphasis + back
         self.step4_candidates.candidate_map_update.connect(self._on_candidate_map_update)
         self.step4_candidates.candidate_selected.connect(self._on_candidate_selected)
+        self.step4_candidates.candidate_hovered.connect(
+            self.map_widget.emphasize_candidate)
         self.step4_candidates.back_requested.connect(self._on_candidates_back)
 
-        # Step 5 (refine) → done / back / live map update
+        # Step 5 (refine) → done / back
         self.step5_refine.refinement_done.connect(self._on_refinement_done)
         self.step5_refine.back_requested.connect(self._on_refine_back)
-        self.step5_refine.alignment_update_requested.connect(
-            self._on_refine_alignment_update
-        )
+
+        # Element table (bottom dock) → rebuilds + row selection
+        self.element_table.rebuilt.connect(self._on_elements_rebuilt)
+        self.element_table.element_selected.connect(self._on_element_row_selected)
 
         # Step 6 (cross-section) → back / done / map overlay
         self.step6_crosssec.back_requested.connect(lambda: self._goto_step(4))
@@ -177,6 +191,8 @@ class App(QMainWindow):
     def _goto_step(self, idx: int):
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
+        # Element table dock is a Step-5 (Refine) feature
+        self.element_table.setVisible(idx == 4)
 
     # ------------------------------------------------------------------
     # Step 2 map interactions
@@ -404,6 +420,7 @@ class App(QMainWindow):
                 "nodes": [[lat, lon] for lat, lon in c.geo_wgs84],
                 "color": c.color_hex,
                 "label": c.label,
+                "algo":  c.algorithm_id,
             }
             for c in candidates
             if c.geo_wgs84
@@ -441,6 +458,14 @@ class App(QMainWindow):
         if segments:
             self.map_widget.show_alignment_segmented(segments)
 
+        # Element table dock (editable when the candidate carries a PI model)
+        pi_model = getattr(candidate, "pi_model", None)
+        self.element_table.prepare(
+            pi_model, getattr(candidate, "elements", []),
+            check_interval=self._settings.get("check_interval", 5.0),
+        )
+        self._show_pi_overlay(pi_model)
+
         self.statusBar().showMessage(
             f"Candidate '{getattr(candidate, 'label', '')}' selected — "
             f"{n_line} Lines · {n_arc} Arcs · {n_spiral} Spirals shown. "
@@ -455,18 +480,17 @@ class App(QMainWindow):
         self.map_widget.clear_osm_reference()
         self._goto_step(2)
 
-    def _on_refine_alignment_update(self, elements: list):
-        """Live map update from Step 5 when a spiral is inserted/removed."""
+    def _render_elements_on_map(self, elements: list):
+        """Render an element chain as the segmented alignment overlay."""
         from geometry.alignment import (
             reconstruct_alignment_projected,
             reconstruct_alignment_per_element,
         )
         from geometry.projection import projected_to_wgs84
 
-        if not elements or not self._xy_list:
+        if not elements:
             return
         try:
-            # Build per-element segments for tooltip-rich rendering.
             segments_payload = []
             try:
                 from gui.worker import _serialise_element_params
@@ -489,25 +513,68 @@ class App(QMainWindow):
                 geo_xy     = reconstruct_alignment_projected(elements, sample_interval=5.0)
                 geo_latlon = projected_to_wgs84(geo_xy, self._work_epsg)
                 self.map_widget.show_alignment([[[lat, lon] for lat, lon in geo_latlon]])
-
-            n_spirals  = sum(1 for e in elements if e.get("type") == "Spiral")
-            self.statusBar().showMessage(
-                f"Alignment updated — {len(elements)} elements "
-                f"({n_spirals} spiral{'s' if n_spirals != 1 else ''})."
-            )
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ Map update failed: {exc}")
+
+    def _show_pi_overlay(self, pi_model):
+        """Draw PI markers + dashed virtual tangent stubs for the model."""
+        from geometry.projection import projected_to_wgs84
+        if pi_model is None or len(getattr(pi_model, "V", [])) < 3:
+            self.map_widget.clear_pi_overlay()
+            return
+        try:
+            import math as _m
+            omitted = {p.index for p in pi_model.pis if p.omitted}
+            defl    = {p.index: p.deflection for p in pi_model.pis}
+            pi_pts  = []
+            for k in range(1, len(pi_model.V) - 1):
+                lat, lon = projected_to_wgs84(
+                    [(float(pi_model.V[k, 0]), float(pi_model.V[k, 1]))],
+                    self._work_epsg)[0]
+                pi_pts.append({
+                    "id": k, "latlon": [lat, lon],
+                    "omitted": k in omitted,
+                    "defl_deg": _m.degrees(defl.get(k, 0.0)),
+                })
+            tangents = []
+            for stub in getattr(pi_model, "tangent_stubs", []):
+                tc, pixy, ct = stub["tc"], stub["pi_xy"], stub["ct"]
+                wgs = projected_to_wgs84(
+                    [(tc[0], tc[1]), (pixy[0], pixy[1]), (ct[0], ct[1])],
+                    self._work_epsg)
+                tangents.append({"from": list(wgs[0]), "to": list(wgs[1])})
+                tangents.append({"from": list(wgs[1]), "to": list(wgs[2])})
+            self.map_widget.show_pi_overlay({"pis": pi_pts, "tangents": tangents})
+        except Exception as exc:
+            self.statusBar().showMessage(f"⚠ PI overlay failed: {exc}")
+
+    def _on_elements_rebuilt(self, elements: list, metrics: dict):
+        """Element table edited → refresh Step 5, map and PI overlay."""
+        self.step5_refine.set_elements(elements, metrics)
+        self._render_elements_on_map(elements)
+        self._show_pi_overlay(self.element_table._model)
+        n_spirals = sum(1 for e in elements if e.get("type") == "Spiral")
+        self.statusBar().showMessage(
+            f"Alignment rebuilt — {len(elements)} elements "
+            f"({n_spirals} spiral{'s' if n_spirals != 1 else ''}), "
+            f"max dev {metrics.get('max_deviation', 0.0):.2f} m."
+        )
+
+    def _on_element_row_selected(self, element_id: str):
+        self.map_widget.highlight_element(element_id)
 
     def _on_refine_back(self):
         """Go back from Refine to Candidates — restore all candidate overlays."""
         self.map_widget.clear_alignment()
+        self.map_widget.clear_pi_overlay()
+        self.element_table.clear()
         # Re-emit candidate overlays if available
         candidates = [c for c in self.step4_candidates._candidates.values()
                       if c.geo_wgs84]
         if candidates:
             payload = [
                 {"nodes": [[lat, lon] for lat, lon in c.geo_wgs84],
-                 "color": c.color_hex, "label": c.label}
+                 "color": c.color_hex, "label": c.label, "algo": c.algorithm_id}
                 for c in candidates
             ]
             self.map_widget.show_candidates(payload)
@@ -519,6 +586,7 @@ class App(QMainWindow):
 
     def _on_refinement_done(self, elements: list):
         self._final_elements = elements
+        self.map_widget.clear_pi_overlay()   # editing aid — Step 5 only
         self.step6_crosssec.prepare(elements, self._work_epsg)
         self.statusBar().showMessage(
             "Refinement complete. Run cross-section analysis or skip to export."
@@ -571,7 +639,8 @@ class App(QMainWindow):
         self._final_elements     = []
         self._xy_list            = []
         self._chainages_list     = []
-        self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section
+        self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
+        self.element_table.clear()
         self.sidebar.reset()
         self._goto_step(0)
         self.statusBar().showMessage(

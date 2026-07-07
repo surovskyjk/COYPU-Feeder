@@ -365,6 +365,7 @@ class DebugPage(QWebEnginePage):
 class MapBridge(QObject):
     bounds_ready = Signal(float, float, float, float)
     ready        = Signal()
+    map_clicked  = Signal(float, float)   # lat, lon (station-placement mode)
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -374,6 +375,10 @@ class MapBridge(QObject):
     def on_ready(self):
         self.ready.emit()
 
+    @Slot(float, float)
+    def on_map_clicked(self, lat, lon):
+        self.map_clicked.emit(lat, lon)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
@@ -382,6 +387,7 @@ class MapBridge(QObject):
 class MapWidget(QWidget):
     bounds_ready = Signal(float, float, float, float)
     js_error     = Signal(str)
+    map_clicked  = Signal(float, float)   # lat, lon (station-placement mode)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -441,6 +447,7 @@ class MapWidget(QWidget):
 
         self._bridge.ready.connect(self._on_map_ready)
         self._bridge.bounds_ready.connect(self.bounds_ready)
+        self._bridge.map_clicked.connect(self.map_clicked)
 
         # Write map.html into static/ and serve the whole directory locally.
         # Using http://127.0.0.1 as origin removes ALL cross-origin tile blocks.
@@ -591,6 +598,37 @@ class MapWidget(QWidget):
     def clear_candidates(self):
         """Remove all candidate alignment overlays."""
         self._run_js("clearCandidates()")
+
+    def show_pi_overlay(self, payload: dict):
+        """
+        Draw Points of Intersection + dashed virtual tangent extensions.
+
+        payload = {"pis":      [{"id", "latlon", "omitted", "defl_deg"}, …],
+                   "tangents": [{"from": [lat,lon], "to": [lat,lon]}, …]}
+        """
+        self._run_js(f"showPIOverlay({json.dumps(payload)})")
+
+    def clear_pi_overlay(self):
+        self._run_js("clearPIOverlay()")
+
+    def highlight_element(self, element_id: str):
+        """Emphasize (glow) one alignment element by its stable id."""
+        self._run_js(f"highlightElement({json.dumps(element_id)})")
+
+    def emphasize_candidate(self, algo_id: str):
+        """Thicken one Step-4 candidate polyline (empty string resets)."""
+        self._run_js(f"emphasizeCandidate({json.dumps(algo_id)})")
+
+    def show_stations(self, stations: list):
+        """stations = [{"name", "latlon": [lat,lon], "km"}, …]"""
+        self._run_js(f"showStations({json.dumps(stations)})")
+
+    def clear_stations(self):
+        self._run_js("clearStations()")
+
+    def set_station_click_mode(self, on: bool):
+        """Arm/disarm the click-to-place-station mode (crosshair cursor)."""
+        self._run_js(f"setStationClickMode({'true' if on else 'false'})")
 
     def show_cross_section(self, left_pts: list, right_pts: list):
         """

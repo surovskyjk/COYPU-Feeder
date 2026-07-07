@@ -35,7 +35,16 @@ from PySide6.QtGui import QFont, QColor
 
 class CandidateCard(QGroupBox):
     """A single algorithm result card with progress indicator, metrics and Select button."""
-    select_clicked = Signal(str)   # algorithm_id
+    select_clicked = Signal(str)        # algorithm_id
+    hover_changed  = Signal(str, bool)  # algorithm_id, hovering
+
+    def enterEvent(self, event):
+        self.hover_changed.emit(self._algo_id, True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hover_changed.emit(self._algo_id, False)
+        super().leaveEvent(event)
 
     def __init__(self, algo_id: str, label: str, color: str,
                  description: str = "", parent=None):
@@ -220,9 +229,10 @@ class CandidateCard(QGroupBox):
 # ---------------------------------------------------------------------------
 
 class Step4Candidates(QWidget):
-    candidate_selected   = Signal(object)   # CandidateAlignment
-    candidate_map_update = Signal(list)     # list[CandidateAlignment] for map overlay
-    back_requested       = Signal()         # user clicked ← Back to Configure
+    candidate_selected   = Signal(object)     # CandidateAlignment
+    candidate_map_update = Signal(list)       # list[CandidateAlignment] for map overlay
+    candidate_hovered    = Signal(str)        # algo_id being hovered ("" = none)
+    back_requested       = Signal()           # user clicked ← Back to Configure
 
     # (algo_id, card title, colour, description)
     ALGO_DEFS = [
@@ -274,6 +284,8 @@ class Step4Candidates(QWidget):
         for algo_id, label, color, desc in self.ALGO_DEFS:
             card = CandidateCard(algo_id, label, color, desc, self)
             card.select_clicked.connect(self._on_select)
+            card.hover_changed.connect(
+                lambda aid, on: self.candidate_hovered.emit(aid if on else ""))
             layout.addWidget(card)
             self._cards.append(card)
 
