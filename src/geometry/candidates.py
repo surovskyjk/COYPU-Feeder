@@ -45,6 +45,61 @@ class CandidateAlignment:
     geo_segments_wgs84:  list  = field(default_factory=list)
     # Maximum heading mismatch (degrees) across all junctions; sanity metric.
     max_heading_jump_deg: float = 0.0
+    # Editable PI model (Level 2/3 only; None otherwise). Source of truth
+    # for interactive editing in Step 5 — see PIAlignment.
+    pi_model:            object = None
+
+
+@dataclass
+class PIData:
+    """
+    One editable Point of Intersection of the tangent polygon.
+
+    Convention for the editable fields:
+      radius     > 0  → user/applied value used verbatim (still guarded)
+      radius    <= 0  → auto-estimate from the OSM points
+      spiral_len > 0  → user/applied spiral length (still guarded)
+      spiral_len == 0 → explicitly no spiral (plain arc)
+      spiral_len  < 0 → auto (use the model's default spiral length)
+
+    After every rebuild the *applied* values are written back into
+    `radius` / `spiral_len`, so the table always shows real numbers and
+    subsequent rebuilds are reproducible.
+    """
+    index:            int                 # vertex index into PIAlignment.V (stable per build)
+    xy:               tuple               # PI coordinates (projected)
+    deflection:       float               # polygon deflection (rad, signed, informational)
+    radius:           float = -1.0
+    radius_auto:      float = 0.0         # last auto-estimated radius (for reset)
+    spiral_len:       float = -1.0
+    spiral_len_auto:  float = 0.0
+    omitted:          bool  = False
+    merged_with_next: bool  = False       # spiral-merge state (feature: merge)
+    premerge_spiral_len: float = -1.0     # value to restore on undo-merge
+
+
+@dataclass
+class PIAlignment:
+    """
+    Editable PI model — the source of truth for Level 2/3 alignments.
+
+    `rebuild_from_pi_model` regenerates `elements` (and `tangent_stubs`)
+    from V + per-PI overrides; the OSM polyline is kept for radius
+    auto-estimation and quality evaluation.
+    """
+    V:              np.ndarray            # tangent polygon vertices (incl. endpoints)
+    idx:            list                  # original polyline index per vertex
+    pis:            list                  # list[PIData], one per interior vertex
+    xy_ref:         np.ndarray            # OSM polyline (projected)
+    chainages_ref:  np.ndarray
+    tol:            float                 # DP tolerance used
+    min_radius:     float
+    spiral_default: float                 # Step-3 spiral length setting
+    use_spirals:    bool
+    elements:       list = field(default_factory=list)
+    # Per-PI virtual tangent stubs for map display:
+    # {"pi": k, "pi_xy": [x, y], "tc": [x, y], "ct": [x, y]}
+    tangent_stubs:  list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +860,7 @@ class CandidateGenerator:
             if progress_cb:
                 progress_cb(msg)
         _p("Extracting tangent polygon (PIs)…")
-        elements = _build_pi_alignment(
+        model = extract_pi_model(
             self.xy, self.chainages,
             tolerance     = self.max_deviation,
             min_radius    = self.min_radius,
@@ -813,9 +868,11 @@ class CandidateGenerator:
             use_spirals   = False,
             progress_cb   = _p,
         )
+        elements = model.elements
         _p("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
-        return CandidateAlignment("level2", self.LABELS["level2"], elements, **metrics)
+        return CandidateAlignment("level2", self.LABELS["level2"], elements,
+                                  pi_model=model, **metrics)
 
     def _run_level3(self, progress_cb=None) -> CandidateAlignment:
         """
@@ -832,7 +889,7 @@ class CandidateGenerator:
             if progress_cb:
                 progress_cb(msg)
         _p("Extracting tangent polygon (PIs)…")
-        elements = _build_pi_alignment(
+        model = extract_pi_model(
             self.xy, self.chainages,
             tolerance     = self.max_deviation,
             min_radius    = self.min_radius,
@@ -840,9 +897,11 @@ class CandidateGenerator:
             use_spirals   = True,
             progress_cb   = _p,
         )
+        elements = model.elements
         _p("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
-        return CandidateAlignment("level3", self.LABELS["level3"], elements, **metrics)
+        return CandidateAlignment("level3", self.LABELS["level3"], elements,
+                                  pi_model=model, **metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -3031,26 +3090,41 @@ def _merge_pi_clusters(
     return V, idx
 
 
-def _build_pi_alignment(
-    xy:            np.ndarray,
-    chainages:     np.ndarray,
-    tolerance:     float,
-    min_radius:    float,
-    spiral_length: float,
-    use_spirals:   bool,
-    progress_cb=None,
-) -> list[dict]:
-    """
-    Build a C1-continuous alignment from the tangent polygon of the OSM
-    polyline.
+# Construction constants shared by extract / rebuild
+_PI_L_MIN       = 2.0     # minimum useful spiral length
+_PI_EPS_ANG     = 1e-4    # deflections below this are treated as straight
+_PI_MIN_TANGENT = 60.0    # Lines shorter than this between same-sense arcs
+                          # trigger a PI merge (one physical curve)
 
-    Level 2 (use_spirals=False):  Line – Arc – Line …
-    Level 3 (use_spirals=True):   Line – Spiral – Arc – Spiral – Line …
+
+def _polygon_deflection(V: np.ndarray, k: int) -> float:
+    """Signed deflection of the tangent polygon at interior vertex k."""
+    phi_a = math.atan2(V[k, 1] - V[k - 1, 1], V[k, 0] - V[k - 1, 0])
+    phi_b = math.atan2(V[k + 1, 1] - V[k, 1], V[k + 1, 0] - V[k, 0])
+    return _wrap_pi(phi_b - phi_a)
+
+
+def _fresh_pis(V: np.ndarray) -> list:
+    """One auto-everything PIData per interior polygon vertex."""
+    return [
+        PIData(index=k, xy=(float(V[k, 0]), float(V[k, 1])),
+               deflection=_polygon_deflection(V, k))
+        for k in range(1, len(V) - 1)
+    ]
+
+
+def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
+    """
+    (Re)construct the C1-continuous element chain from the PI model,
+    honouring per-PI overrides (radius, spiral_len, omitted).
+
+    Level 2 (model.use_spirals=False):  Line – Arc – Line …
+    Level 3 (model.use_spirals=True):   Line – Spiral – Arc – Spiral – Line …
 
     Guarantees
     ----------
-    • The first element starts exactly at xy[0]; the last element ends
-      exactly at xy[-1] (the original OSM endpoints).
+    • The first element starts exactly at xy_ref[0]; the last element ends
+      exactly at xy_ref[-1] (the original OSM endpoints).
     • Every junction is tangent (C1): arcs meet their tangents at
       T = R·tan(|δ|/2); spirals use the exact Fresnel shift
       p = y_sp − R(1−cos θ_s), k = x_sp − R·sin θ_s,
@@ -3060,106 +3134,107 @@ def _build_pi_alignment(
       radius exactly; radius at the line side is ∞.
     • Where geometry does not fit (short tangents, tiny deflection) the
       builder degrades gracefully: shorter spiral → no spiral (plain arc)
-      → smaller radius, in that order. C1 is never abandoned.
+      → smaller radius, in that order. C1 is never abandoned. Overridden
+      values are clamped by the same guards and the *applied* value is
+      written back into the PIData (visible in the element table).
+    • Omitted PIs are skipped; the self-healing incoming direction absorbs
+      their deflection into the next curve.
+
+    Side effects: fills model.elements, model.tangent_stubs, and writes the
+    applied radius / spiral_len (+ *_auto fields when auto-estimated) back
+    into each PIData. Elements carry stable "_pi" and "element_id" keys.
     """
     from geometry.alignment import (
         _compute_zone_geometry, _compute_clothoid_shift, _fit_circle_kasa,
     )
 
-    def _p(msg):
-        if progress_cb:
-            progress_cb(msg)
+    V, idx, xy = model.V, model.idx, model.xy_ref
+    tol           = model.tol
+    min_radius    = model.min_radius
+    use_spirals   = model.use_spirals
+    m = len(V)
 
-    n = len(xy)
-    if n < 2:
-        return []
-    if n == 2 or float(chainages[-1]) < 1.0:
-        return _two_point_line(xy, chainages)
+    model.tangent_stubs = []
 
-    # ── 1. Tangent polygon via Douglas-Peucker + curve-cluster merge ──────
-    tol = max(0.25, float(tolerance))
-    idx = _douglas_peucker_indices(xy, tol)
-    V   = xy[idx].astype(float)
-    merge_dist = max(60.0, 8.0 * tol)
-    V, idx = _merge_pi_clusters(V, idx, merge_dist)
+    if m < 2:
+        model.elements = []
+        return model.elements
+    if m == 2:
+        model.elements = _two_point_line(xy, model.chainages_ref)
+        _assign_element_ids(model.elements)
+        return model.elements
 
-    # Drop near-zero-deflection vertices (noise artefacts of the DP pass).
-    # Their tiny heading change is absorbed by the neighbouring curves via
-    # the self-healing construction below, so C1 continuity is unaffected —
-    # but a spurious PI would clip the radius-estimation window of its
-    # neighbour and bias the fitted radius.
-    MIN_PI_DEFL = math.radians(0.7)
-    changed = True
-    while changed and len(V) > 2:
-        changed = False
-        for k in range(1, len(V) - 1):
-            phi_a = math.atan2(V[k, 1] - V[k - 1, 1], V[k, 0] - V[k - 1, 0])
-            phi_b = math.atan2(V[k + 1, 1] - V[k, 1], V[k + 1, 0] - V[k, 0])
-            if abs(_wrap_pi(phi_b - phi_a)) < MIN_PI_DEFL:
-                V   = np.delete(V, k, axis=0)
-                idx = idx[:k] + idx[k + 1:]
-                changed = True
-                break
-    _p(f"{len(V) - 2} PIs found")
+    elements: list[dict] = []
+    cur_pt = V[0].copy()              # exact OSM start point
 
-    L_MIN       = 2.0      # minimum useful spiral length
-    EPS_ANG     = 1e-4     # deflections below this are treated as straight
-    MIN_TANGENT = 60.0     # Lines shorter than this between same-sense arcs
-                           # trigger a PI merge (one physical curve)
+    def _append_line(p0, p1, direction=None):
+        length = float(np.hypot(*(p1 - p0)))
+        if length < 1e-6:
+            return
+        if direction is None:
+            direction = math.atan2(float(p1[1] - p0[1]), float(p1[0] - p0[0]))
+        elements.append({
+            "type": "Line", "sta_start": 0.0, "length": length,
+            "start": p0.tolist(), "end": p1.tolist(),
+            "direction_rad": direction,
+        })
 
-    def _construct(V: np.ndarray, idx: list[int]) -> list[dict]:
-        """Build the element chain for one tangent polygon."""
-        m = len(V)
-        elements: list[dict] = []
-        cur_pt = V[0].copy()          # exact OSM start point
+    for k in range(1, m - 1):
+        pi_data = model.pis[k - 1]
+        if pi_data.omitted:
+            continue          # self-healing: next curve absorbs the deflection
 
-        def _append_line(p0, p1, direction=None):
-            length = float(np.hypot(*(p1 - p0)))
-            if length < 1e-6:
-                return
-            if direction is None:
-                direction = math.atan2(float(p1[1] - p0[1]), float(p1[0] - p0[0]))
-            elements.append({
-                "type": "Line", "sta_start": 0.0, "length": length,
-                "start": p0.tolist(), "end": p1.tolist(),
-                "direction_rad": direction,
-            })
+        PI, B = V[k], V[k + 1]
+        # Incoming direction from the ACTUAL current position (not the
+        # polygon segment): this makes the construction self-healing —
+        # any deflection lost at a skipped/omitted PI, or the mm-level
+        # lateral offset of a previous CT, is absorbed by the next curve,
+        # and tangency at the connecting Line is exact by definition.
+        u_in_vec = PI - cur_pt
+        d_in = float(np.hypot(*u_in_vec))
+        if d_in < 1e-6:
+            continue
+        u_in  = u_in_vec / d_in
+        u_out = B - PI;  u_out = u_out / max(1e-12, float(np.hypot(*u_out)))
+        phi_in  = math.atan2(float(u_in[1]),  float(u_in[0]))
+        phi_out = math.atan2(float(u_out[1]), float(u_out[0]))
+        delta   = _wrap_pi(phi_out - phi_in)
 
-        for k in range(1, m - 1):
-            PI, B = V[k], V[k + 1]
-            # Incoming direction from the ACTUAL current position (not the
-            # polygon segment): this makes the construction self-healing —
-            # any deflection lost at a skipped PI, or the mm-level lateral
-            # offset of a previous CT, is absorbed by the next curve, and
-            # tangency at the connecting Line is exact by definition.
-            u_in_vec = PI - cur_pt
-            d_in = float(np.hypot(*u_in_vec))
-            if d_in < 1e-6:
-                continue
-            u_in  = u_in_vec / d_in
-            u_out = B - PI;  u_out = u_out / max(1e-12, float(np.hypot(*u_out)))
-            phi_in  = math.atan2(float(u_in[1]),  float(u_in[0]))
-            phi_out = math.atan2(float(u_out[1]), float(u_out[0]))
-            delta   = _wrap_pi(phi_out - phi_in)
+        if abs(delta) < _PI_EPS_ANG:
+            continue    # collinear: tangents merge into one line
 
-            if abs(delta) < EPS_ANG:
-                continue    # collinear: tangents merge into one line
+        # Available beyond the PI: share the next segment with the next PI
+        d_seg_out = float(np.hypot(*(B - PI)))
+        d_out = d_seg_out * (0.5 if k < m - 2 else 1.0) - 0.1
+        T_max = min(d_in - 0.1, d_out)
+        if T_max <= 0.5:
+            continue    # no room at all — drop the curve (stay on tangent)
 
-            # Available beyond the PI: share the next segment with the next PI
-            d_seg_out = float(np.hypot(*(B - PI)))
-            d_out = d_seg_out * (0.5 if k < m - 2 else 1.0) - 0.1
-            T_max = min(d_in - 0.1, d_out)
-            if T_max <= 0.5:
-                continue    # no room at all — drop the curve (stay on tangent)
+        half_tan = math.tan(abs(delta) / 2.0)
+        if half_tan < 1e-9:
+            continue
 
-            half_tan = math.tan(abs(delta) / 2.0)
-            if half_tan < 1e-9:
-                continue
+        # ── Spiral length target (auto / override / none) ────────────────
+        L_target = 0.0
+        if use_spirals:
+            if pi_data.spiral_len < 0:          # auto
+                L_target = float(model.spiral_default)
+            else:                                # override (may be 0 = none)
+                L_target = float(pi_data.spiral_len)
+        L_res = L_target if L_target >= _PI_L_MIN else 0.0
 
-            # ── Radius from the OSM points around the PI ─────────────────
-            # Kasa circle fit restricted to the *curved* points only: points
-            # close to either tangent line belong to the straights and bias
-            # the fit towards a larger radius, so they are masked out.
+        # ── Radius: override or auto-estimate from the OSM points ────────
+        R_fit_max = max(1.0, (T_max - 0.55 * L_res) * 0.98 / half_tan)
+        if R_fit_max < min_radius and L_res > 0.0:
+            R_fit_max = max(1.0, (T_max * 0.98) / half_tan)
+
+        if pi_data.radius > 0:
+            # User/applied override: guard only against geometric impossibility
+            R = min(float(pi_data.radius), R_fit_max)
+        else:
+            # Auto: Kasa circle fit restricted to the *curved* points only —
+            # points close to either tangent line belong to the straights and
+            # bias the fit towards a larger radius, so they are masked out.
             i_lo = (idx[k - 1] + idx[k]) // 2
             i_hi = (idx[k] + idx[k + 1]) // 2
             R_est = None
@@ -3184,89 +3259,90 @@ def _build_pi_alignment(
                         R_E = E / sec_m1
                         if 10.0 < R_E < 1e6:
                             R_est = R_E if R_est is None else 0.5 * (R_est + R_E)
-
-            # Reserve tangent room for the spirals (Level 3) so they don't
-            # collapse to the minimum length; drop the reserve if it would
-            # push the radius below the user's floor.
-            L_res = float(spiral_length) if (use_spirals and spiral_length >= L_MIN) else 0.0
-            R_fit_max = max(1.0, (T_max - 0.55 * L_res) * 0.98 / half_tan)
-            if R_fit_max < min_radius and L_res > 0.0:
-                R_fit_max = max(1.0, (T_max * 0.98) / half_tan)
             if R_est is None:
                 R = min(max(min_radius, R_fit_max * 0.5), R_fit_max)
             else:
                 R = min(max(R_est, min_radius), R_fit_max)
-            if R < 1.0:
-                continue
-            # Guard: if even R_fit_max < min_radius we accept the smaller
-            # radius — C1 continuity is prioritised over the radius floor.
+            pi_data.radius_auto = R
+        if R < 1.0:
+            continue
+        # Guard: if even R_fit_max < min_radius we accept the smaller
+        # radius — C1 continuity is prioritised over the radius floor.
 
-            sign = 1.0 if delta >= 0 else -1.0
-            rot  = "ccw" if delta >= 0 else "cw"
+        sign = 1.0 if delta >= 0 else -1.0
+        rot  = "ccw" if delta >= 0 else "cw"
 
-            # ── Spiral length (Level 3) with graceful degradation ────────
-            L = 0.0
-            if use_spirals and spiral_length >= L_MIN:
-                L = float(spiral_length)
-                # Arc must retain some angle: |δ| − L/R > EPS
-                L = min(L, 0.9 * R * (abs(delta) - 0.01))
-                # Tangent must fit: T_s ≈ R·tan + L/2  ≤ T_max
-                L = min(L, 2.0 * (T_max - R * half_tan) * 0.9)
-                if L < L_MIN:
-                    L = 0.0     # no spiral — fall back to plain arc
+        # ── Spiral length with graceful degradation ──────────────────────
+        L = 0.0
+        if L_target >= _PI_L_MIN:
+            L = L_target
+            # Arc must retain some angle: |δ| − L/R > EPS
+            L = min(L, 0.9 * R * (abs(delta) - 0.01))
+            # Tangent must fit: T_s ≈ R·tan + L/2  ≤ T_max
+            L = min(L, 2.0 * (T_max - R * half_tan) * 0.9)
+            if L < _PI_L_MIN:
+                L = 0.0     # no spiral — fall back to plain arc
 
+        if L > 0.0:
+            # Exact Fresnel-based shift p and abscissa k
+            x_sp, y_sp = _compute_clothoid_shift(L, R)
+            theta_s = L / (2.0 * R)
+            p_sh = y_sp - R * (1.0 - math.cos(theta_s))
+            k_ab = x_sp - R * math.sin(theta_s)
+            T_s  = (R + p_sh) * half_tan + k_ab
+            if T_s > T_max:
+                # One shrink pass on R, then give up the spiral
+                R_new = max(1.0, (T_max - k_ab) / half_tan - p_sh)
+                if R_new >= min(min_radius, R):
+                    R = R_new
+                    x_sp, y_sp = _compute_clothoid_shift(L, R)
+                    theta_s = L / (2.0 * R)
+                    p_sh = y_sp - R * (1.0 - math.cos(theta_s))
+                    k_ab = x_sp - R * math.sin(theta_s)
+                    T_s  = (R + p_sh) * half_tan + k_ab
+                if T_s > T_max or abs(delta) - L / R < 0.01:
+                    L = 0.0
+
+        zone_ok = False
+        if L > 0.0:
+            TC   = PI - T_s * u_in
+            zone = _compute_zone_geometry(TC, phi_in, delta, R,
+                                          L_entry=L, L_exit=L)
+            if zone is not None:
+                zone_ok = True
+                _append_line(cur_pt, TC, direction=phi_in)
+                zas, zac, zae = zone["arc_start"], zone["arc_center"], zone["arc_end"]
+                CT, z_arc_len = zone["CT"], zone["arc_len"]
+                A_cl = math.sqrt(R * L)
+                elements.append({
+                    "type": "Spiral", "sta_start": 0.0, "length": L,
+                    "start": TC.tolist(), "end": zas.tolist(),
+                    "radius_start": float("inf"), "radius_end": R,
+                    "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                })
+                elements.append({
+                    "type": "Arc", "sta_start": 0.0, "length": z_arc_len,
+                    "start": zas.tolist(), "end": zae.tolist(),
+                    "center": zac.tolist(), "radius": R, "rot": rot,
+                    "chord": float(np.hypot(*(zae - zas))),
+                    "_deflection": zone["arc_angle"] * sign, "_pi": k,
+                })
+                elements.append({
+                    "type": "Spiral", "sta_start": 0.0, "length": L,
+                    "start": zae.tolist(), "end": CT.tolist(),
+                    "radius_start": R, "radius_end": float("inf"),
+                    "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                })
+                model.tangent_stubs.append({
+                    "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
+                    "tc": TC.tolist(), "ct": np.array(CT, dtype=float).tolist(),
+                })
+                cur_pt = np.array(CT, dtype=float)
+            # zone failed → fall through to plain arc
+
+        if not zone_ok:
             if L > 0.0:
-                # Exact Fresnel-based shift p and abscissa k
-                x_sp, y_sp = _compute_clothoid_shift(L, R)
-                theta_s = L / (2.0 * R)
-                p_sh = y_sp - R * (1.0 - math.cos(theta_s))
-                k_ab = x_sp - R * math.sin(theta_s)
-                T_s  = (R + p_sh) * half_tan + k_ab
-                if T_s > T_max:
-                    # One shrink pass on R, then give up the spiral
-                    R_new = max(1.0, (T_max - k_ab) / half_tan - p_sh)
-                    if R_new >= min(min_radius, R):
-                        R = R_new
-                        x_sp, y_sp = _compute_clothoid_shift(L, R)
-                        theta_s = L / (2.0 * R)
-                        p_sh = y_sp - R * (1.0 - math.cos(theta_s))
-                        k_ab = x_sp - R * math.sin(theta_s)
-                        T_s  = (R + p_sh) * half_tan + k_ab
-                    if T_s > T_max or abs(delta) - L / R < 0.01:
-                        L = 0.0
-
-            if L > 0.0:
-                TC   = PI - T_s * u_in
-                zone = _compute_zone_geometry(TC, phi_in, delta, R,
-                                              L_entry=L, L_exit=L)
-                if zone is not None:
-                    _append_line(cur_pt, TC, direction=phi_in)
-                    zas, zac, zae = zone["arc_start"], zone["arc_center"], zone["arc_end"]
-                    CT, z_arc_len = zone["CT"], zone["arc_len"]
-                    A_cl = math.sqrt(R * L)
-                    elements.append({
-                        "type": "Spiral", "sta_start": 0.0, "length": L,
-                        "start": TC.tolist(), "end": zas.tolist(),
-                        "radius_start": float("inf"), "radius_end": R,
-                        "clothoid_A": A_cl, "rot": rot, "_pi": k,
-                    })
-                    elements.append({
-                        "type": "Arc", "sta_start": 0.0, "length": z_arc_len,
-                        "start": zas.tolist(), "end": zae.tolist(),
-                        "center": zac.tolist(), "radius": R, "rot": rot,
-                        "chord": float(np.hypot(*(zae - zas))),
-                        "_deflection": zone["arc_angle"] * sign, "_pi": k,
-                    })
-                    elements.append({
-                        "type": "Spiral", "sta_start": 0.0, "length": L,
-                        "start": zae.tolist(), "end": CT.tolist(),
-                        "radius_start": R, "radius_end": float("inf"),
-                        "clothoid_A": A_cl, "rot": rot, "_pi": k,
-                    })
-                    cur_pt = np.array(CT, dtype=float)
-                    continue
-                # zone failed → fall through to plain arc
-
+                L = 0.0
             # ── Plain circular arc (Level 2, or Level-3 fallback) ────────
             T  = R * half_tan
             TS = PI - T * u_in
@@ -3281,72 +3357,191 @@ def _build_pi_alignment(
                 "chord": float(np.hypot(*(ST - TS))),
                 "_deflection": delta, "_pi": k,
             })
+            model.tangent_stubs.append({
+                "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
+                "tc": TS.tolist(), "ct": ST.tolist(),
+            })
             cur_pt = ST.copy()
 
-        # ── Final tangent to the exact OSM end point ─────────────────────
-        _append_line(cur_pt, V[-1].copy())
-        return elements
+        # Write back the *applied* values so the table shows reality and
+        # the next rebuild reproduces this result exactly.
+        pi_data.radius = R
+        if use_spirals:
+            pi_data.spiral_len = L
+            if pi_data.spiral_len_auto <= 0.0 and L > 0.0:
+                pi_data.spiral_len_auto = L
 
-    def _find_merge_pair(elements: list[dict]) -> tuple[int, int] | None:
-        """
-        Find the first pair of adjacent PIs whose curves are separated by a
-        Line shorter than MIN_TANGENT and turn in the same direction —
-        i.e. Douglas-Peucker split one physical curve in two.
-        """
-        curve_of: list[tuple[int, str]] = []   # (pi_index, rot) per curve group
-        gap_after: dict[int, float] = {}       # pi_index → connector Line length
-        last_pi = None
-        for i, e in enumerate(elements):
-            if e.get("_pi") is not None and e["type"] == "Arc":
-                curve_of.append((e["_pi"], e.get("rot", "")))
-                last_pi = e["_pi"]
-            elif e["type"] == "Line" and last_pi is not None:
-                gap_after[last_pi] = gap_after.get(last_pi, 0.0) + e["length"]
-        for (p1, r1), (p2, r2) in zip(curve_of[:-1], curve_of[1:]):
-            if p2 == p1 + 1 and r1 == r2 and gap_after.get(p1, 1e9) < MIN_TANGENT:
-                return (p1, p2)
-        return None
+    # ── Final tangent to the exact OSM end point ─────────────────────────
+    _append_line(cur_pt, V[-1].copy())
 
-    def _merge_pair(V, idx, k):
-        """Replace PIs k and k+1 with the intersection of the outer tangents."""
-        A, P1, P2, B = V[k - 1], V[k], V[k + 1], V[k + 2]
-        phi_in  = math.atan2(P1[1] - A[1],  P1[0] - A[0])
-        phi_out = math.atan2(B[1] - P2[1],  B[0] - P2[0])
-        sin_d = math.sin(_wrap_pi(phi_out - phi_in))
-        if abs(sin_d) < 1e-9:
-            return None
-        dx = float(P2[0] - P1[0]); dy = float(P2[1] - P1[1])
-        t  = (dx * math.sin(phi_out) - dy * math.cos(phi_out)) / sin_d
-        if t <= 0:
-            return None
-        PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
-        V2   = np.vstack([V[:k], PI_new[None, :], V[k + 2:]])
-        idx2 = idx[:k] + [(idx[k] + idx[k + 1]) // 2] + idx[k + 2:]
-        return V2, idx2
-
-    # ── 2. Construct; merge split curves; reconstruct (bounded loop) ──────
-    elements = _construct(V, idx)
-    for _ in range(6):
-        if len(V) < 4:
-            break
-        pair = _find_merge_pair(elements)
-        if pair is None:
-            break
-        merged = _merge_pair(V, idx, pair[0])
-        if merged is None:
-            break
-        V, idx = merged
-        _p(f"Merged split curve at PI {pair[0]} — {len(V) - 2} PIs")
-        elements = _construct(V, idx)
-
-    # Strip internal keys and rebuild the station chain
+    # ── Station chain + stable element ids ───────────────────────────────
     sta = 0.0
     for e in elements:
-        e.pop("_pi", None)
         e["sta_start"] = sta
         sta += e.get("length", 0.0)
+    _assign_element_ids(elements)
 
+    model.elements = elements
     return elements
+
+
+def _assign_element_ids(elements: list[dict]) -> None:
+    """
+    Stable, human-readable ids: Lines numbered sequentially (L1, L2, …);
+    Arcs/Spirals tied to their PI index (A3, S3-in, S3-out).
+    """
+    line_no = 0
+    for i, e in enumerate(elements):
+        et = e.get("type")
+        if et == "Line":
+            line_no += 1
+            e["element_id"] = f"L{line_no}"
+        elif et == "Arc":
+            k = e.get("_pi")
+            e["element_id"] = f"A{k}" if k is not None else f"A?{i}"
+        elif et == "Spiral":
+            k = e.get("_pi")
+            if k is None:
+                e["element_id"] = f"S?{i}"
+            else:
+                r_st = float(e.get("radius_start", float("inf")))
+                e["element_id"] = f"S{k}-in" if math.isinf(r_st) else f"S{k}-out"
+
+
+def _find_split_curve_pair(elements: list[dict]) -> tuple[int, int] | None:
+    """
+    Find the first pair of adjacent PIs whose curves are separated by a
+    Line shorter than _PI_MIN_TANGENT and turn in the same direction —
+    i.e. Douglas-Peucker split one physical curve in two.
+    """
+    curve_of: list[tuple[int, str]] = []   # (pi_index, rot) per curve group
+    gap_after: dict[int, float] = {}       # pi_index → connector Line length
+    last_pi = None
+    for e in elements:
+        if e.get("_pi") is not None and e["type"] == "Arc":
+            curve_of.append((e["_pi"], e.get("rot", "")))
+            last_pi = e["_pi"]
+        elif e["type"] == "Line" and last_pi is not None:
+            gap_after[last_pi] = gap_after.get(last_pi, 0.0) + e["length"]
+    for (p1, r1), (p2, r2) in zip(curve_of[:-1], curve_of[1:]):
+        if p2 == p1 + 1 and r1 == r2 and gap_after.get(p1, 1e9) < _PI_MIN_TANGENT:
+            return (p1, p2)
+    return None
+
+
+def _merge_polygon_pair(V, idx, k):
+    """Replace PIs k and k+1 with the intersection of the outer tangents."""
+    A, P1, P2, B = V[k - 1], V[k], V[k + 1], V[k + 2]
+    phi_in  = math.atan2(P1[1] - A[1],  P1[0] - A[0])
+    phi_out = math.atan2(B[1] - P2[1],  B[0] - P2[0])
+    sin_d = math.sin(_wrap_pi(phi_out - phi_in))
+    if abs(sin_d) < 1e-9:
+        return None
+    dx = float(P2[0] - P1[0]); dy = float(P2[1] - P1[1])
+    t  = (dx * math.sin(phi_out) - dy * math.cos(phi_out)) / sin_d
+    if t <= 0:
+        return None
+    PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
+    V2   = np.vstack([V[:k], PI_new[None, :], V[k + 2:]])
+    idx2 = idx[:k] + [(idx[k] + idx[k + 1]) // 2] + idx[k + 2:]
+    return V2, idx2
+
+
+def extract_pi_model(
+    xy:            np.ndarray,
+    chainages:     np.ndarray,
+    tolerance:     float,
+    min_radius:    float,
+    spiral_length: float,
+    use_spirals:   bool,
+    progress_cb=None,
+) -> "PIAlignment":
+    """
+    Extract the editable PI model from the OSM polyline:
+    Douglas-Peucker tangent polygon → cluster merge → noise-PI prefilter →
+    construct → iterative split-curve re-merge. Returns a PIAlignment with
+    the built element chain and auto values written into each PIData.
+    """
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+
+    n = len(xy)
+    tol = max(0.25, float(tolerance))
+
+    if n < 2:
+        V = np.zeros((0, 2)); idx = []
+    elif n == 2 or float(chainages[-1]) < 1.0:
+        V = xy[[0, -1]].astype(float); idx = [0, n - 1]
+    else:
+        # ── Tangent polygon via Douglas-Peucker + curve-cluster merge ────
+        idx = _douglas_peucker_indices(xy, tol)
+        V   = xy[idx].astype(float)
+        merge_dist = max(60.0, 8.0 * tol)
+        V, idx = _merge_pi_clusters(V, idx, merge_dist)
+
+        # Drop near-zero-deflection vertices (noise artefacts of the DP
+        # pass). Their tiny heading change is absorbed by the neighbouring
+        # curves via the self-healing construction, so C1 continuity is
+        # unaffected — but a spurious PI would clip the radius-estimation
+        # window of its neighbour and bias the fitted radius.
+        MIN_PI_DEFL = math.radians(0.7)
+        changed = True
+        while changed and len(V) > 2:
+            changed = False
+            for k in range(1, len(V) - 1):
+                if abs(_polygon_deflection(V, k)) < MIN_PI_DEFL:
+                    V   = np.delete(V, k, axis=0)
+                    idx = idx[:k] + idx[k + 1:]
+                    changed = True
+                    break
+        _p(f"{len(V) - 2} PIs found")
+
+    model = PIAlignment(
+        V=V, idx=list(idx), pis=_fresh_pis(V),
+        xy_ref=xy, chainages_ref=chainages,
+        tol=tol, min_radius=min_radius,
+        spiral_default=float(spiral_length), use_spirals=use_spirals,
+    )
+
+    if len(V) < 2:
+        model.elements = []
+        return model
+
+    # ── Construct; merge split curves; reconstruct (bounded loop) ────────
+    elements = rebuild_from_pi_model(model, progress_cb)
+    for _ in range(6):
+        if len(model.V) < 4:
+            break
+        pair = _find_split_curve_pair(elements)
+        if pair is None:
+            break
+        merged = _merge_polygon_pair(model.V, model.idx, pair[0])
+        if merged is None:
+            break
+        model.V, model.idx = merged
+        model.pis = _fresh_pis(model.V)
+        _p(f"Merged split curve at PI {pair[0]} — {len(model.V) - 2} PIs")
+        elements = rebuild_from_pi_model(model, progress_cb)
+
+    return model
+
+
+def _build_pi_alignment(
+    xy:            np.ndarray,
+    chainages:     np.ndarray,
+    tolerance:     float,
+    min_radius:    float,
+    spiral_length: float,
+    use_spirals:   bool,
+    progress_cb=None,
+) -> list[dict]:
+    """Backwards-compatible wrapper: extract the PI model, return elements."""
+    model = extract_pi_model(
+        xy, chainages, tolerance, min_radius, spiral_length,
+        use_spirals, progress_cb=progress_cb,
+    )
+    return model.elements
 
 
 # ---------------------------------------------------------------------------
