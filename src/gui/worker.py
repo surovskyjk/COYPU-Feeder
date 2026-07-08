@@ -260,6 +260,64 @@ class CandidateWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Station auto-detection worker
+# ---------------------------------------------------------------------------
+
+class StationDetectWorker(QThread):
+    """
+    Fetch passenger stations/halts/stop-positions near the alignment via
+    Overpass, snap them to the fitted element chain, dedupe by name.
+
+    Emits stations_ready(list[Station]) — chainage/dist already computed.
+    """
+    stations_ready = Signal(list)
+    status_update  = Signal(str)
+    failed         = Signal(str)
+
+    def __init__(self, elements: list, tracks: list, work_epsg: int,
+                 max_dist_m: float = 100.0, parent=None):
+        super().__init__(parent)
+        self._elements   = elements
+        self._tracks     = tracks
+        self._work_epsg  = work_epsg
+        self._max_dist_m = max_dist_m
+
+    def run(self):
+        try:
+            from osm.query import fetch_stations_in_bbox
+            from geometry.stationing import Station, snap_stations, dedupe_by_name
+
+            # Bounding box of the selected tracks (WGS84) + small margin
+            lats, lons = [], []
+            for t in self._tracks:
+                for lat, lon in t.nodes:
+                    lats.append(lat); lons.append(lon)
+            if not lats:
+                self.failed.emit("No track nodes available for the search box.")
+                return
+            m = 0.01   # ≈ 1 km margin
+            cb = lambda msg: self.status_update.emit(msg)
+            raw = fetch_stations_in_bbox(
+                min(lats) - m, min(lons) - m, max(lats) + m, max(lons) + m,
+                progress_cb=cb,
+            )
+            self.status_update.emit(f"{len(raw)} candidate nodes — snapping to alignment…")
+
+            stations = [
+                Station(name=r["name"], latlon=(r["lat"], r["lon"]), source="auto")
+                for r in raw
+            ]
+            snap_stations(stations, self._elements, self._work_epsg)
+            near = [s for s in stations if s.dist_m <= self._max_dist_m]
+            unique = dedupe_by_name(near)
+            self.status_update.emit(f"{len(unique)} stations on this alignment.")
+            self.stations_ready.emit(unique)
+        except Exception as exc:
+            import traceback
+            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+
+
+# ---------------------------------------------------------------------------
 # Final export worker (uses pre-fitted elements — no re-fitting)
 # ---------------------------------------------------------------------------
 
@@ -296,7 +354,8 @@ class FinalExportWorker(QThread):
 
     def __init__(self, elements_list, tracks, settings: dict,
                  filepath: str, work_epsg: int, output_epsg: int,
-                 force_positive: bool = False, xy_list=None, parent=None):
+                 force_positive: bool = False, xy_list=None,
+                 stations=None, parent=None):
         super().__init__(parent)
         self._elements_list  = elements_list
         self._tracks         = tracks
@@ -306,6 +365,7 @@ class FinalExportWorker(QThread):
         self._output_epsg    = output_epsg
         self._force_positive = force_positive
         self._xy_list        = xy_list or []
+        self._stations       = stations or []
 
     def run(self):
         try:
@@ -432,6 +492,24 @@ class FinalExportWorker(QThread):
 
         self.stage_changed.emit("Writing file…")
         write_landxml(root, self._filepath)
+
+        # ── Stations CSV (Station,Dwell Time,Name) next to the LandXML ──────
+        if self._stations:
+            import os
+            from geometry.stationing import write_stations_csv, snap_stations
+            base, _ = os.path.splitext(self._filepath)
+            csv_path = base + ".csv"
+            # Re-snap to the exported element chain so the CSV chainages are
+            # exactly consistent with the LandXML internal stationing.
+            try:
+                if self._elements_list and self._elements_list[0]:
+                    snap_stations(self._stations, self._elements_list[0],
+                                  self._work_epsg)
+            except Exception:
+                pass   # keep previously computed chainages
+            n = write_stations_csv(self._stations, csv_path)
+            self.stage_changed.emit(
+                f"Wrote {n} station(s) to {os.path.basename(csv_path)}")
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from .steps.step2_section import Step2Section
 from .steps.step3_configure import Step3Configure
 from .steps.step4_candidates import Step4Candidates
 from .steps.step5_refine        import Step5Refine
+from .steps.step6_stations      import Step6Stations
 from .steps.step6_crosssection  import Step6CrossSection
 from .steps.step7_export        import Step7Export
 
@@ -42,6 +43,7 @@ class App(QMainWindow):
         self._bbox_workers: list    = []
         self._selected_candidate    = None
         self._final_elements: list  = []
+        self._stations: list        = []
         self._xy_list: list         = []
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
@@ -89,16 +91,18 @@ class App(QMainWindow):
         self.step3              = Step3Configure()
         self.step4_candidates   = Step4Candidates()
         self.step5_refine       = Step5Refine()
-        self.step6_crosssec     = Step6CrossSection()
-        self.step7_export       = Step7Export()
+        self.step6_stations     = Step6Stations()
+        self.step6_crosssec     = Step6CrossSection()   # step 7 in the UI
+        self.step7_export       = Step7Export()         # step 8 in the UI
 
         self.stack.addWidget(self.step1)            # 0
         self.stack.addWidget(self.step2)            # 1
         self.stack.addWidget(self.step3)            # 2
         self.stack.addWidget(self.step4_candidates) # 3
         self.stack.addWidget(self.step5_refine)     # 4
-        self.stack.addWidget(self.step6_crosssec)   # 5
-        self.stack.addWidget(self.step7_export)     # 6
+        self.stack.addWidget(self.step6_stations)   # 5
+        self.stack.addWidget(self.step6_crosssec)   # 6
+        self.stack.addWidget(self.step7_export)     # 7
 
         h.addWidget(self.stack)
         self.statusBar().showMessage(
@@ -151,12 +155,20 @@ class App(QMainWindow):
         self.element_table.element_selected.connect(self._on_element_row_selected)
 
         # Step 6 (cross-section) → back / done / map overlay
-        self.step6_crosssec.back_requested.connect(lambda: self._goto_step(4))
+        # Step 6 (stations) → map markers / click mode / navigation
+        self.step6_stations.stations_changed.connect(self._on_stations_changed)
+        self.step6_stations.map_click_mode.connect(
+            self.map_widget.set_station_click_mode)
+        self.step6_stations.stations_done.connect(self._on_stations_done)
+        self.step6_stations.back_requested.connect(lambda: self._goto_step(4))
+        self.map_widget.map_clicked.connect(self.step6_stations.on_map_clicked)
+
+        self.step6_crosssec.back_requested.connect(lambda: self._goto_step(5))
         self.step6_crosssec.analysis_done.connect(self._on_analysis_done)
         self.step6_crosssec.cross_section_ready.connect(self._on_cross_section_ready)
 
         # Step 7 (export) → back
-        self.step7_export.back_requested.connect(lambda: self._goto_step(5))
+        self.step7_export.back_requested.connect(lambda: self._goto_step(6))
 
         # Step 7 (export) → alignment display / fit / export / restart
         self.step7_export.osm_track_ready.connect(self._on_osm_track_ready)
@@ -581,20 +593,46 @@ class App(QMainWindow):
         self._goto_step(3)
 
     # ------------------------------------------------------------------
-    # Refinement done → go to Step 6
+    # Refinement done → go to Step 6 (Stations)
     # ------------------------------------------------------------------
 
     def _on_refinement_done(self, elements: list):
         self._final_elements = elements
         self.map_widget.clear_pi_overlay()   # editing aid — Step 5 only
-        self.step6_crosssec.prepare(elements, self._work_epsg)
+        self.step6_stations.prepare(elements, self._selected_tracks,
+                                    self._work_epsg)
         self.statusBar().showMessage(
-            "Refinement complete. Run cross-section analysis or skip to export."
+            "Refinement complete. Add stations/stops (auto-detect, map click "
+            "or table), then continue."
         )
         self._goto_step(5)
 
     # ------------------------------------------------------------------
-    # Cross-section analysis done → go to Step 7
+    # Stations done → go to Step 7 (Cross-section)
+    # ------------------------------------------------------------------
+
+    def _on_stations_changed(self, stations: list):
+        """Live station markers on the map."""
+        payload = [
+            {"name": s.name, "latlon": [s.latlon[0], s.latlon[1]],
+             "km": s.chainage_m / 1000.0}
+            for s in stations
+            if s.latlon and (s.latlon[0] or s.latlon[1])
+        ]
+        self.map_widget.show_stations(payload)
+
+    def _on_stations_done(self, stations: list):
+        self._stations = stations
+        self.map_widget.set_station_click_mode(False)
+        self.step6_crosssec.prepare(self._final_elements, self._work_epsg)
+        self.statusBar().showMessage(
+            f"{len(stations)} station(s) recorded. Run cross-section "
+            "analysis or skip to export."
+        )
+        self._goto_step(6)
+
+    # ------------------------------------------------------------------
+    # Cross-section analysis done → go to Step 8 (Export)
     # ------------------------------------------------------------------
 
     def _on_analysis_done(self, results: list):
@@ -603,6 +641,7 @@ class App(QMainWindow):
         self.step7_export.prepare(
             elements_list, self._selected_tracks, self._settings,
             self._work_epsg, self._xy_list,
+            stations=getattr(self, "_stations", []),
         )
         n = len(results)
         msg = (
@@ -611,7 +650,7 @@ class App(QMainWindow):
             "Skipped cross-section analysis. Choose a file and export."
         )
         self.statusBar().showMessage(msg)
-        self._goto_step(6)
+        self._goto_step(7)
 
     def _on_cross_section_ready(self, left_pts: list, right_pts: list):
         """Show coloured cross-section overlays on the map."""
@@ -637,10 +676,12 @@ class App(QMainWindow):
         self._settings           = {}
         self._selected_candidate = None
         self._final_elements     = []
+        self._stations           = []
         self._xy_list            = []
         self._chainages_list     = []
         self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
         self.element_table.clear()
+        self.step6_stations.reset()
         self.sidebar.reset()
         self._goto_step(0)
         self.statusBar().showMessage(

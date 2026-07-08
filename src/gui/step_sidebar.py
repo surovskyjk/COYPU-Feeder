@@ -1,5 +1,5 @@
 """
-7-step numbered sidebar, always visible.
+8-step numbered sidebar, always visible.
 Clicking a completed step navigates back.
 """
 
@@ -16,8 +16,9 @@ STEPS = [
     ("3", "Configure"),
     ("4", "Candidates"),
     ("5", "Refine"),
-    ("6", "Cross-Section"),
-    ("7", "Export"),
+    ("6", "Stations"),
+    ("7", "Cross-Section"),
+    ("8", "Export"),
 ]
 
 

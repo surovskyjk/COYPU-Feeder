@@ -594,3 +594,57 @@ out tags;
         "from":     tags.get("from", ""),
         "to":       tags.get("to", ""),
     }
+
+
+# ---------------------------------------------------------------------------
+# Station / stop detection near a track
+# ---------------------------------------------------------------------------
+
+def fetch_stations_in_bbox(
+    south: float, west: float, north: float, east: float,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> list[dict]:
+    """
+    Fetch passenger stations, halts and train stop positions inside a
+    bounding box.
+
+    Returns a list of dicts: {"name": str, "lat": float, "lon": float,
+    "kind": "station"|"halt"|"stop_position"}.
+
+    Freight-only and non-passenger facilities (yards, service stations,
+    junctions, crossovers, sites with passenger=no) are excluded.
+    """
+    bbox = f"({south},{west},{north},{east})"
+    query = f"""
+[out:json][timeout:60];
+(
+  node["railway"="station"]{bbox};
+  node["railway"="halt"]{bbox};
+  node["public_transport"="stop_position"]["train"="yes"]{bbox};
+);
+out body;
+"""
+    data = _run_query(query, progress_cb=progress_cb)
+    results: list[dict] = []
+    seen_ids: set = set()
+    for el in data.get("elements", []):
+        if el.get("type") != "node" or el.get("id") in seen_ids:
+            continue
+        seen_ids.add(el.get("id"))
+        tags = el.get("tags", {})
+        # Passenger-relevant only
+        if tags.get("passenger") == "no":
+            continue
+        if tags.get("railway") in ("yard", "service_station", "junction",
+                                   "crossover", "site"):
+            continue
+        if tags.get("usage") in ("industrial", "military", "freight"):
+            continue
+        kind = tags.get("railway") or "stop_position"
+        results.append({
+            "name": tags.get("name", ""),
+            "lat":  float(el.get("lat", 0.0)),
+            "lon":  float(el.get("lon", 0.0)),
+            "kind": kind,
+        })
+    return results

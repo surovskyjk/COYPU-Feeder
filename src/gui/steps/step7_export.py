@@ -46,6 +46,7 @@ class Step7Export(QWidget):
         self._elements_list: list[list[dict]] = []
         self._work_epsg: int = 32633   # internal auto-UTM
         self._xy_list: list  = []
+        self._stations: list = []
         self._worker: FinalExportWorker | None = None
         self._build()
 
@@ -171,9 +172,9 @@ class Step7Export(QWidget):
     # ------------------------------------------------------------------
 
     def prepare(self, elements_list: list, tracks, settings: dict,
-                work_epsg: int, xy_list: list):
+                work_epsg: int, xy_list: list, stations: list | None = None):
         """
-        Called by App after Step 5 refinement_done.
+        Called by App after the Stations step.
 
         Parameters
         ----------
@@ -182,12 +183,15 @@ class Step7Export(QWidget):
         settings      : dict from Step3Configure (no epsg/force_positive here)
         work_epsg     : internal auto-UTM EPSG used during candidate fitting
         xy_list       : projected coordinates per track in work_epsg (for display)
+        stations      : list[stationing.Station] — written as a CSV next to
+                        the LandXML file (Station,Dwell Time,Name)
         """
         self._elements_list = elements_list
         self._tracks        = tracks
         self._settings      = settings
         self._work_epsg     = work_epsg
         self._xy_list       = xy_list
+        self._stations      = stations or []
         self._progress.setValue(0)
         self._stage_lbl.setText("Ready.")
         self._station_lbl.setText("")
@@ -253,6 +257,7 @@ class Step7Export(QWidget):
             output_epsg=output_epsg,
             force_positive=force_positive,
             xy_list=self._xy_list,
+            stations=self._stations,
             parent=self,
         )
         self._worker.stage_changed.connect(self._on_stage)
