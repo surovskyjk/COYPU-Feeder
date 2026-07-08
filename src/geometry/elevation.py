@@ -14,6 +14,12 @@ OPENTOPODATA_BASE = "https://api.opentopodata.org/v1/{dataset}"
 BATCH_SIZE = 100  # API limit per request
 REQUEST_TIMEOUT = 30
 
+# Identifying User-Agent (usage-policy friendly; some hosts reject the
+# default python-requests agent).
+_HTTP_HEADERS = {
+    "User-Agent": "COYPU-Feeder/1.0 (+https://github.com/surovskyjk/COYPU-Feeder)"
+}
+
 
 # ---------------------------------------------------------------------------
 # DEM querying
@@ -41,10 +47,10 @@ def _query_batch(locations: str, n: int) -> list[Optional[float]]:
     for dataset in OPENTOPODATA_DATASETS:
         url = OPENTOPODATA_BASE.format(dataset=dataset)
         try:
-            resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=_HTTP_HEADERS)
             if resp.status_code == 429:
                 import time; time.sleep(2)
-                resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT)
+                resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=_HTTP_HEADERS)
             resp.raise_for_status()
             results = resp.json().get("results", [])
             elevs = [r.get("elevation") for r in results]

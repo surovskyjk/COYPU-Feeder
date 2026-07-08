@@ -331,7 +331,7 @@ class MapWidget(QWidget):
         payload = [{"nodes": nodes} for nodes in alignments]
         self._run_js(f"showAlignment({json.dumps(payload)})")
 
-    def show_alignment_segmented(self, segments: list):
+    def show_alignment_segmented(self, segments: list, fit_view: bool = True):
         """
         Draw the alignment as a sequence of per-element coloured polylines.
 
@@ -341,12 +341,15 @@ class MapWidget(QWidget):
             {"type":   "Line" | "Arc" | "Spiral",
              "params": {length: …, sta_start: …, radius: …, ...},
              "points": [[lat, lon], [lat, lon], ...]}
+        fit_view : fly the map to the alignment bounds. Pass False for
+            edit-driven rebuilds so the user's current zoom/pan is kept.
 
         The JS side picks a colour by element type (Line=blue, Arc=red,
         Spiral=green) and binds a sticky tooltip listing the element's
         parameters.
         """
-        self._run_js(f"showAlignmentSegmented({json.dumps(segments)})")
+        fit = "true" if fit_view else "false"
+        self._run_js(f"showAlignmentSegmented({json.dumps(segments)}, {fit})")
 
     def fly_to_alignment(self):
         self._run_js("flyToAlignment()")

@@ -85,6 +85,19 @@ class ElementTableDock(QWidget):
         )
         self._hint_lbl.setStyleSheet("color: #777; font-size: 9px;")
         header.addWidget(self._hint_lbl)
+
+        self._range_btn = QPushButton("Merge PI range → single curve")
+        self._range_btn.setStyleSheet(
+            "font-size: 9px; padding: 2px 8px; color: #ffd54f;")
+        self._range_btn.setToolTip(
+            "Select the rows spanning two or more curves (e.g. the first and\n"
+            "last tangent of the section, or the curves themselves). All PIs\n"
+            "in between are replaced by ONE Spiral–Arc–Spiral: the outer\n"
+            "tangents are kept, the new PI is their intersection."
+        )
+        self._range_btn.setEnabled(False)
+        self._range_btn.clicked.connect(self._on_merge_range)
+        header.addWidget(self._range_btn)
         v.addLayout(header)
 
         self._table = QTableWidget(0, len(COLS))
@@ -92,7 +105,7 @@ class ElementTableDock(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_ACT, QHeaderView.ResizeMode.Stretch)
@@ -410,8 +423,57 @@ class ElementTableDock(QWidget):
     # Selection → map highlight
     # ------------------------------------------------------------------
 
+    def _selected_pi_range(self) -> tuple[int, int] | None:
+        """
+        Derive the PI range from the current row selection.
+
+        Any selection spanning ≥ 2 distinct PIs works: curve rows contribute
+        their own PI; selecting the first and last tangent Lines of a section
+        contributes every PI of the elements between them.
+        """
+        rows = sorted(r.row() for r in self._table.selectionModel().selectedRows())
+        if len(rows) < 2:
+            return None
+        # Element indices of the selected rows (skip omitted-PI pseudo rows)
+        idxs = []
+        for r in rows:
+            it = self._table.item(r, COL_ID)
+            meta = (it.data(Qt.ItemDataRole.UserRole) or {}) if it else {}
+            if meta.get("etype") in (None, "omitted"):
+                continue
+            idxs.append(meta.get("elem_index", -1))
+        idxs = [i for i in idxs if i >= 0]
+        if len(idxs) < 2:
+            return None
+        lo, hi = min(idxs), max(idxs)
+        pis = sorted({e.get("_pi") for e in self._elements[lo:hi + 1]
+                      if e.get("_pi") is not None})
+        if len(pis) < 2:
+            return None
+        return pis[0], pis[-1]
+
+    def _on_merge_range(self):
+        from geometry.candidates import merge_pi_range
+        from PySide6.QtWidgets import QMessageBox
+        if self._model is None:
+            return
+        rng = self._selected_pi_range()
+        if rng is None:
+            QMessageBox.information(
+                self, "Merge PI range",
+                "Select rows spanning at least two curves first "
+                "(e.g. the first and last tangent of the section).")
+            return
+        ok, msg = merge_pi_range(self._model, rng[0], rng[1])
+        if not ok:
+            QMessageBox.warning(self, "Cannot merge PI range", msg)
+            return
+        self._rebuild()
+
     def _on_selection(self):
         rows = self._table.selectionModel().selectedRows()
+        self._range_btn.setEnabled(
+            self._model is not None and self._selected_pi_range() is not None)
         if not rows:
             return
         it = self._table.item(rows[0].row(), COL_ID)

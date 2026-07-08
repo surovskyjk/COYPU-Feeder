@@ -89,6 +89,14 @@ class Step6Stations(QWidget):
         self._add_btn = QPushButton("＋ Add row")
         self._add_btn.clicked.connect(self._on_add_row)
         btn_row.addWidget(self._add_btn)
+
+        self._csv_btn = QPushButton("💾 Export CSV…")
+        self._csv_btn.setToolTip(
+            "Save the station list as a CSV file now\n"
+            "(it is also written automatically next to the LandXML in Step 8)."
+        )
+        self._csv_btn.clicked.connect(self._on_export_csv)
+        btn_row.addWidget(self._csv_btn)
         outer.addLayout(btn_row)
 
         self._status_lbl = QLabel("")
@@ -221,18 +229,43 @@ class Step6Stations(QWidget):
             "Click the map to place a station…" if on else "")
 
     def _on_add_row(self):
-        from geometry.stationing import Station
+        from geometry.stationing import Station, latlon_at_chainage
         name, ok = QInputDialog.getText(self, "New station", "Station / stop name:")
         if not ok or not name.strip():
             return
         if not self._unique_name(name.strip()):
             return
+        km, ok = QInputDialog.getDouble(
+            self, "New station", "Station chainage [km]:",
+            0.0, 0.0, 10_000.0, 3)
+        if not ok:
+            return
         st = Station(name=name.strip(), latlon=(0.0, 0.0),
-                     chainage_m=0.0, source="manual")
+                     chainage_m=km * 1000.0, source="manual")
+        ll = latlon_at_chainage(st.chainage_m, self._elements, self._work_epsg)
+        if ll:
+            st.latlon = ll
         self._stations.append(st)
         self._sort_and_refresh()
         self._status_lbl.setText(
-            f"'{name.strip()}' added — edit its Station [km] value in the table.")
+            f"'{name.strip()}' added at km {km:.3f} — the km value can be "
+            "edited in the table.")
+
+    def _on_export_csv(self):
+        from PySide6.QtWidgets import QFileDialog
+        from geometry.stationing import write_stations_csv
+        if not self._stations:
+            self._status_lbl.setText("No stations to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export stations CSV", "stations.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            n = write_stations_csv(self._stations, path)
+            self._status_lbl.setText(f"✓ {n} station(s) written to {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
 
     def _unique_name(self, name: str) -> bool:
         if any(s.name == name for s in self._stations):
@@ -287,6 +320,12 @@ class Step6Stations(QWidget):
         if col == COL_KM:
             try:
                 s.chainage_m = max(0.0, float(text.replace(",", ".")) * 1000.0)
+                # Keep the map marker on the alignment at the edited km
+                from geometry.stationing import latlon_at_chainage
+                ll = latlon_at_chainage(s.chainage_m, self._elements,
+                                        self._work_epsg)
+                if ll:
+                    s.latlon = ll
             except ValueError:
                 pass
             self._sort_and_refresh()

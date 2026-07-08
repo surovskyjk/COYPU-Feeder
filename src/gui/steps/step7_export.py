@@ -156,6 +156,17 @@ class Step7Export(QWidget):
         layout.addWidget(self._back_btn)
 
         # ── Start button ──────────────────────────────────────────────
+        self._preview_btn = QPushButton("👁 Preview LandXML")
+        self._preview_btn.setMinimumHeight(32)
+        self._preview_btn.setToolTip(
+            "Show the LandXML that will be exported (horizontal geometry and\n"
+            "Cant block in the chosen output CRS). The vertical profile is\n"
+            "computed from DEM data during the actual export and is therefore\n"
+            "not part of the preview."
+        )
+        self._preview_btn.clicked.connect(self._show_preview)
+        layout.addWidget(self._preview_btn)
+
         self._start_btn = QPushButton("▶  Start Export")
         self._start_btn.setMinimumHeight(44)
         self._start_btn.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
@@ -226,6 +237,74 @@ class Step7Export(QWidget):
         )
         if path:
             self._path_edit.setText(path)
+
+    def _show_preview(self):
+        """
+        Build the LandXML in-memory (horizontal geometry + Cant, output CRS
+        applied) and show it in a read-only dialog. The vertical profile is
+        produced during the real export (DEM queries) and is omitted here.
+        """
+        if not self._elements_list or not self._elements_list[0]:
+            QMessageBox.warning(self, "No data", "No alignment to preview.")
+            return
+        output_epsg = self._resolve_output_epsg()
+        if output_epsg is None:
+            return
+        try:
+            from lxml import etree
+            from geometry.projection import transform_elements
+            from landxml.builder import build_landxml
+
+            force_positive = self._force_pos_chk.isChecked()
+            project_name   = self._settings.get("project_name", "Railway Alignment")
+
+            alignments = []
+            for i, els in enumerate(self._elements_list):
+                if not els:
+                    continue
+                els_out = transform_elements(
+                    els, from_epsg=self._work_epsg, to_epsg=output_epsg,
+                    force_positive=force_positive,
+                )
+                name = (self._tracks[i].name
+                        if i < len(self._tracks) else f"Alignment {i + 1}")
+                alignments.append({
+                    "name": name, "elements": els_out,
+                    "vertical": [], "sta_start": 0.0,
+                })
+            root = build_landxml(
+                alignments, output_epsg=output_epsg,
+                project_name=project_name, force_positive=force_positive,
+            )
+            xml_text = etree.tostring(
+                root, xml_declaration=True, encoding="UTF-8",
+                pretty_print=True,
+            ).decode("utf-8")
+        except Exception as exc:
+            QMessageBox.warning(self, "Preview failed", str(exc))
+            return
+
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPlainTextEdit, QLabel
+        from PySide6.QtGui import QFontDatabase
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"LandXML preview — EPSG:{output_epsg}")
+        dlg.resize(860, 640)
+        lay = QVBoxLayout(dlg)
+        note = QLabel(
+            "Preview: horizontal geometry + Cant block in the output CRS. "
+            "The vertical <Profile> is computed from DEM data during the "
+            "actual export and is not shown here."
+        )
+        note.setStyleSheet("color: #999; font-size: 10px;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        txt = QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        txt.setPlainText(xml_text)
+        txt.setStyleSheet("font-size: 10px;")
+        lay.addWidget(txt)
+        dlg.exec()
 
     def _start_export(self):
         filepath = self._path_edit.text().strip()

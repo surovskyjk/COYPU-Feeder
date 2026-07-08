@@ -492,8 +492,11 @@ class App(QMainWindow):
         self.map_widget.clear_osm_reference()
         self._goto_step(2)
 
-    def _render_elements_on_map(self, elements: list):
-        """Render an element chain as the segmented alignment overlay."""
+    def _render_elements_on_map(self, elements: list, fit_view: bool = False):
+        """Render an element chain as the segmented alignment overlay.
+
+        fit_view=False (default) keeps the user's current zoom/pan — used
+        for edit-driven rebuilds from the element table."""
         from geometry.alignment import (
             reconstruct_alignment_projected,
             reconstruct_alignment_per_element,
@@ -520,7 +523,7 @@ class App(QMainWindow):
                 segments_payload = []
 
             if segments_payload:
-                self.map_widget.show_alignment_segmented(segments_payload)
+                self.map_widget.show_alignment_segmented(segments_payload, fit_view)
             else:
                 geo_xy     = reconstruct_alignment_projected(elements, sample_interval=5.0)
                 geo_latlon = projected_to_wgs84(geo_xy, self._work_epsg)

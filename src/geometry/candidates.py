@@ -3744,6 +3744,92 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
     return True, f"Merged: spirals prolonged to {L_a_new:.1f} m / {L_b_new:.1f} m."
 
 
+def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int
+                   ) -> tuple[bool, str]:
+    """
+    Replace ALL PIs in the vertex range [k_from … k_to] with a single PI —
+    the intersection of the outer tangents. The tangent before the first PI
+    and the tangent after the last PI are kept; everything between becomes
+    one Spiral–Arc–Spiral (Level 3) or one Arc (Level 2), with the radius
+    auto-estimated from the OSM points of the whole range.
+
+    Edits on PIs outside the range are preserved (indices remapped).
+    Returns (ok, message); on failure the model is unchanged.
+    """
+    m = len(model.V)
+    if not (1 <= k_from <= k_to <= m - 2):
+        return False, "PI range out of bounds."
+    if k_from == k_to:
+        return False, "Select a range spanning at least two PIs."
+
+    A  = model.V[k_from - 1]   # start of incoming tangent
+    P1 = model.V[k_from]       # first PI
+    P2 = model.V[k_to]         # last PI
+    B  = model.V[k_to + 1]     # end of outgoing tangent
+
+    phi_in  = math.atan2(P1[1] - A[1],  P1[0] - A[0])
+    phi_out = math.atan2(B[1] - P2[1],  B[0] - P2[0])
+    delta   = _wrap_pi(phi_out - phi_in)
+    sin_d   = math.sin(delta)
+    if abs(sin_d) < 1e-9:
+        return False, ("The outer tangents are parallel — no single curve "
+                       "can connect them.")
+
+    # Intersection: P1 + t·û_in = P2 − s·û_out  (t ahead of P1, s behind P2)
+    dx = float(P2[0] - P1[0]); dy = float(P2[1] - P1[1])
+    t  = (dx * math.sin(phi_out) - dy * math.cos(phi_out)) / sin_d
+    s  = (dy * math.cos(phi_in)  - dx * math.sin(phi_in))  / sin_d
+    if t <= 0 or s <= 0:
+        return False, ("The tangents do not intersect ahead of the selected "
+                       "range — these PIs cannot be replaced by one curve "
+                       "(check the total deflection).")
+    PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
+
+    if abs(delta) > math.radians(150.0):
+        return False, (f"Total deflection {math.degrees(abs(delta)):.0f}° is "
+                       "too large for a single curve.")
+
+    # Snapshot for rollback (indices get remapped in place below)
+    old_V, old_idx = model.V.copy(), list(model.idx)
+    old_pis = model.pis
+    old_indices = [p.index for p in old_pis]
+
+    removed = k_to - k_from          # vertices removed (range collapses to 1)
+    model.V   = np.vstack([model.V[:k_from], PI_new[None, :],
+                           model.V[k_to + 1:]])
+    model.idx = (model.idx[:k_from]
+                 + [(model.idx[k_from] + model.idx[k_to]) // 2]
+                 + model.idx[k_to + 1:])
+
+    # Rebuild the PIData list: keep edits outside the range, fresh auto PI
+    # inside, and remap indices after the range.
+    new_pis: list = []
+    for p in old_pis:
+        if p.index < k_from:
+            new_pis.append(p)
+        elif p.index > k_to:
+            p.index -= removed
+            new_pis.append(p)
+        # PIs inside the range are dropped
+    merged_pi = PIData(index=k_from,
+                       xy=(float(PI_new[0]), float(PI_new[1])),
+                       deflection=delta)
+    new_pis.insert(k_from - 1, merged_pi)
+    model.pis = new_pis
+
+    elements = rebuild_from_pi_model(model)
+    # Sanity: the merged curve must actually have been constructed
+    if not any(e.get("_pi") == k_from and e["type"] == "Arc" for e in elements):
+        model.V, model.idx, model.pis = old_V, old_idx, old_pis
+        for p, i in zip(model.pis, old_indices):
+            p.index = i
+        rebuild_from_pi_model(model)
+        return False, ("The merged curve could not be constructed (no room "
+                       "for a tangent-fitting radius) — rolled back.")
+    return True, (f"PIs {k_from}–{k_to} replaced by a single curve "
+                  f"(δ={math.degrees(delta):+.1f}°).")
+
+
 def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
     """Restore the pre-merge spiral lengths of the pair merged at pi_a."""
     pids = {p.index: p for p in model.pis}

@@ -242,7 +242,8 @@ function _clearHover() {
   if (_hoverPopup) { try { map.closePopup(_hoverPopup); } catch(e){} _hoverPopup = null; }
 }
 
-function showAlignmentSegmented(segments) {
+function showAlignmentSegmented(segments, fitView) {
+  if (fitView === undefined) fitView = true;
   clearAlignment();
   segIndex = {};
   var all = [];
@@ -285,7 +286,7 @@ function showAlignmentSegmented(segments) {
       _clearHover();
     });
   });
-  if (all.length)
+  if (all.length && fitView)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
 }
 

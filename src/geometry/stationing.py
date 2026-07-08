@@ -83,6 +83,27 @@ def project_to_chainage(
     return float(chain[i]), float(d[i])
 
 
+def latlon_at_chainage(
+    chainage_m: float,
+    elements:   list[dict],
+    work_epsg:  int,
+) -> tuple | None:
+    """
+    Inverse of `project_to_chainage`: the WGS84 position of the alignment
+    point at the given chainage. Used to place a map marker for stations
+    entered manually by their km value.
+    """
+    from geometry.projection import projected_to_wgs84
+    if not elements:
+        return None
+    pts, chain = _alignment_samples(elements)
+    if len(pts) == 0:
+        return None
+    i = int(np.argmin(np.abs(chain - chainage_m)))
+    lat, lon = projected_to_wgs84([tuple(pts[i])], work_epsg)[0]
+    return (lat, lon)
+
+
 def snap_stations(
     stations:  list[Station],
     elements:  list[dict],

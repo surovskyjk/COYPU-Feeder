@@ -38,6 +38,12 @@ TIMEOUT = 15
 OSM_API_BASE = "https://api.openstreetmap.org/api/0.6"
 OSM_API_TIMEOUT = 45   # single endpoint, generous
 
+# Identifying User-Agent — required by the OSM/Overpass usage policy.
+# overpass-api.de rejects the default python-requests agent with HTTP 406.
+HTTP_HEADERS = {
+    "User-Agent": "COYPU-Feeder/1.0 (+https://github.com/surovskyjk/COYPU-Feeder)"
+}
+
 # ---------------------------------------------------------------------------
 # Disk cache
 # ---------------------------------------------------------------------------
@@ -111,7 +117,8 @@ def _run_query(
             progress_cb(f"Trying Overpass server {i + 1}/{n}…")
         try:
             response = requests.post(
-                url, data={"data": query}, timeout=TIMEOUT
+                url, data={"data": query}, timeout=TIMEOUT,
+                headers=HTTP_HEADERS,
             )
             code = response.status_code
             if code == 429:
@@ -200,7 +207,7 @@ def _fetch_relation_via_osm_api(
     url = f"{OSM_API_BASE}/relation/{relation_id}/full"
     if progress_cb:
         progress_cb("Trying OSM API directly…")
-    response = requests.get(url, timeout=OSM_API_TIMEOUT)
+    response = requests.get(url, timeout=OSM_API_TIMEOUT, headers=HTTP_HEADERS)
     response.raise_for_status()
     data = _parse_osm_xml(response.text)
     # Cache under the same key as the Overpass query would use
@@ -229,7 +236,7 @@ def _fetch_relation_members_via_osm_api(
     # Step 1 — get the list of member IDs
     _p("OSM API: fetching parent relation…")
     url = f"{OSM_API_BASE}/relation/{parent_relation_id}"
-    resp = requests.get(url, timeout=OSM_API_TIMEOUT)
+    resp = requests.get(url, timeout=OSM_API_TIMEOUT, headers=HTTP_HEADERS)
     resp.raise_for_status()
 
     root = ET.fromstring(resp.text)
@@ -253,7 +260,7 @@ def _fetch_relation_members_via_osm_api(
         ids_str = ",".join(str(x) for x in batch)
         _p(f"OSM API: fetching tags for {len(batch)} relations…")
         url2 = f"{OSM_API_BASE}/relations?relations={ids_str}"
-        resp2 = requests.get(url2, timeout=OSM_API_TIMEOUT)
+        resp2 = requests.get(url2, timeout=OSM_API_TIMEOUT, headers=HTTP_HEADERS)
         resp2.raise_for_status()
         root2 = ET.fromstring(resp2.text)
         for rel_el in root2.findall("relation"):
@@ -291,7 +298,7 @@ def _fetch_relation_metadata_via_osm_api(
     if progress_cb:
         progress_cb("OSM API: fetching relation metadata…")
     url  = f"{OSM_API_BASE}/relation/{relation_id}"
-    resp = requests.get(url, timeout=OSM_API_TIMEOUT)
+    resp = requests.get(url, timeout=OSM_API_TIMEOUT, headers=HTTP_HEADERS)
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
     for rel_el in root.findall("relation"):
