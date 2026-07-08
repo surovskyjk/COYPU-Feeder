@@ -32,12 +32,14 @@ No Python installation required.
 - **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
-- **Clothoid transition curves** — entry/exit spirals at every arc, with shift-compensated arc radius
+- **Clothoid transition curves** — entry/exit spirals at every arc, exact Fresnel-based tangent placement
+- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore PIs, merge short straights between curves into prolonged symmetric spirals
+- **PI display** — Points of Intersection as markers, virtual tangent extensions dashed light-grey
+- **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
+- **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
 - **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
-- **Refinement step** — manually trim the alignment ends before export
 - **Elevation sampling** — DEM-based vertical profile at a configurable chainage interval, fitted with parabolic vertical curves
-- **LandXML 1.2 export** — complete `<Alignment>` with horizontal and vertical geometry, CRS metadata, and station equations
-- **Exported alignment drawn on map** — bright red overlay with zoom-to-fit
+- **LandXML 1.2 export** — COYPU-compatible structure with horizontal + vertical geometry, Cant block (0 mm placeholders) and CRS metadata
 - **Dark / light mode** — automatically follows the OS system theme
 
 ---
@@ -52,9 +54,10 @@ No Python installation required.
 │ [2] Select        │  (tile provider selector + railway     │  panel  │
 │ [3] Configure     │   overlay toggle)                      │ 340 px  │
 │ [4] Candidates    │                                        │         │
-│ [5] Refine        │                                        │         │
-│ [6] Cross-section │                                        │         │
-│ [7] Export        │                                        │         │
+│ [5] Refine        ├─────────────────────────────────────────┤        │
+│ [6] Stations      │  Element table (Step 5): ID · type ·   │         │
+│ [7] Cross-section │  station · length · radius · A · defl  │         │
+│ [8] Export        │  · spiral L · actions                  │         │
 │   200 px sidebar  │                                        │         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -129,13 +132,36 @@ Each result card shows the element count, maximum deviation, RMSE, and the worst
 
 ### Step 5 — Refine
 
-Trim the alignment ends by adjusting the start and end chainage. The live map preview updates as you move the sliders. Use this step to remove poorly-fitted sections at the very beginning or end of the alignment.
+The full **element table** appears under the map: every Line, Arc and Spiral with its ID, station [km], length, radius, clothoid A and deflection.
 
-Click **Next →** to accept the trimmed alignment.
+- **Edit** an arc *Radius* or a *Spiral L* value — the alignment rebuilds and the map updates automatically (values are clamped to what the tangent geometry allows; C1 continuity is preserved by construction).
+- **Omit PI** removes a curve; the neighbouring curves absorb its deflection. Omitted PIs stay listed (struck through) and can be restored.
+- **Merge spirals ↔** appears on short straights (< 30 m) sandwiched between two transition curves: the straight is removed by prolonging the adjacent spirals, and the spirals on the far side of each circular curve prolong identically so both curves stay **symmetrical**. *Undo merge* restores the previous state.
+- The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element; hover an element for 3 s to see its ID and deviation statistics.
+
+Click **Accept →** when the geometry is final.
 
 ---
 
-### Step 6 — Cross-Section
+### Step 6 — Stations
+
+Build the station/stop list whose chainages are measured along the fitted alignment (identical to the LandXML stationing):
+
+- **⚡ Auto-detect** — queries OpenStreetMap for `railway=station`, `railway=halt` and train `stop_position` nodes within 100 m of the alignment (passenger facilities only; yards, service stations and freight-only sites are excluded). Each name appears once — the closest occurrence wins.
+- **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
+- **＋ Add row** — manual entry; edit the km value directly in the table.
+
+Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 8 as a CSV next to the LandXML file:
+
+```csv
+Station,Dwell Time,Name
+1.234,30,Praha hl.n.
+5.678,30,Řevnice
+```
+
+---
+
+### Step 7 — Cross-Section
 
 The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export.
 
@@ -143,11 +169,11 @@ Click **Next → Export** to proceed.
 
 ---
 
-### Step 7 — Export
+### Step 8 — Export
 
 1. Choose an output CRS from the preset list or enter a custom EPSG code
 2. Click **Browse…** and choose an output `.xml` file path
-3. Click **▶ Start Export**
+3. Click **▶ Start Export** — the LandXML and the stations CSV (`same-name.csv`) are written together
 
 **Available CRS presets:**
 
@@ -282,24 +308,27 @@ COYPU-Feeder/
     ├── gui/
     │   ├── app.py                # QMainWindow, signal wiring
     │   ├── map_widget.py         # Leaflet map via QWebEngineView + local HTTP server
+    │   ├── element_table.py      # Editable element table (bottom dock, Step 5)
     │   ├── step_sidebar.py       # Numbered step sidebar
     │   ├── theme.py              # Dark/light Fusion palette + stylesheet
-    │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Export)
+    │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Stations, Export)
     │   ├── static/               # Leaflet 1.9.4 JS + CSS (served locally)
     │   └── steps/
     │       ├── step1_find.py     # Search / In View / Czech Railways tabs
     │       ├── step2_section.py  # Track selection
     │       ├── step3_configure.py# Geometry parameters
-    │       ├── step4_candidates.py  # 5-algorithm candidate comparison
-    │       ├── step5_refine.py   # End trimming
-    │       ├── step6_crosssection.py  # Deviation profile
-    │       └── step7_export.py   # CRS selection + LandXML export
+    │       ├── step4_candidates.py  # Level 1/2/3 comparison
+    │       ├── step5_refine.py   # Interactive editing (with element table)
+    │       ├── step6_stations.py # Stations & stops → chainage CSV
+    │       ├── step6_crosssection.py  # Deviation profile (step 7 in the UI)
+    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 8)
     ├── osm/
-    │   ├── query.py              # Overpass API queries
+    │   ├── query.py              # Overpass API queries (incl. station detection)
     │   └── parser.py             # OSM way → Track objects
     ├── geometry/
     │   ├── alignment.py          # Element fitting + continuity enforcement
-    │   ├── candidates.py         # Level 1/2/3 alignment construction (PI-based)
+    │   ├── candidates.py         # Level 1/2/3 PI-model construction + editing
+    │   ├── stationing.py         # Station chainage projection + CSV writer
     │   ├── curvature.py          # Curvature computation and segmentation
     │   ├── elevation.py          # DEM sampling and vertical geometry
     │   └── projection.py         # CRS transformations (pyproj)
