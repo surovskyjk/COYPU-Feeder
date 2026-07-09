@@ -265,9 +265,10 @@ function showAlignmentSegmented(segments, fitView) {
     alignmentLayers.push(pl);
 
     var eid = (seg.params || {}).element_id;
-    if (eid) segIndex[eid] = {main: pl, glow: glow};
+    if (eid) segIndex[eid] = {main: pl, glow: glow, selected: false};
 
-    /* Hover: immediate glow; after 3 s an ID + statistics popup */
+    /* Hover: immediate glow; after 3 s an ID + statistics popup.
+       Selected elements keep their emphasized style on mouseout. */
     pl.on('mouseover', function(ev) {
       pl.setStyle({weight: 7, opacity: 1.0});
       glow.setStyle({opacity: 0.45});
@@ -281,32 +282,64 @@ function showAlignmentSegmented(segments, fitView) {
       }, 3000);
     });
     pl.on('mouseout', function() {
-      pl.setStyle({weight: 4, opacity: 0.95});
-      glow.setStyle({opacity: 0.0});
+      var isSel = eid && segIndex[eid] && segIndex[eid].selected;
+      pl.setStyle(isSel ? {weight: 8, opacity: 1.0} : {weight: 4, opacity: 0.95});
+      glow.setStyle({opacity: isSel ? 0.55 : 0.0});
       _clearHover();
+    });
+
+    /* Click: select this element in the table below.
+       Ctrl+click toggles it into a multi-selection (for PI-range merge). */
+    pl.on('click', function(ev) {
+      L.DomEvent.stopPropagation(ev);
+      if (_stationClickMode) {
+        /* Station placement takes priority: forward the click instead */
+        if (backend && backend.on_map_clicked)
+          backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
+        return;
+      }
+      if (!eid) return;
+      var ctrl = !!(ev.originalEvent &&
+                    (ev.originalEvent.ctrlKey || ev.originalEvent.metaKey));
+      if (backend && backend.on_element_clicked)
+        backend.on_element_clicked(eid, ctrl);
     });
   });
   if (all.length && fitView)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
 }
 
-/* Highlight one element from the table (row click) */
-function highlightElement(elementId) {
+/* Emphasize the selected elements (called from Python on every table
+   selection change). Accepts an array of ids or a single id string. */
+function highlightElements(elementIds) {
+  if (typeof elementIds === 'string') elementIds = [elementIds];
+  var wanted = {};
+  (elementIds || []).forEach(function(id) { wanted[id] = true; });
+  var firstSel = null;
   Object.keys(segIndex).forEach(function(k) {
     var e = segIndex[k];
-    e.main.setStyle({weight: 4, opacity: 0.95});
-    e.glow.setStyle({opacity: 0.0});
+    e.selected = !!wanted[k];
+    if (e.selected) {
+      e.main.setStyle({weight: 8, opacity: 1.0});
+      e.glow.setStyle({opacity: 0.55});
+      e.main.bringToFront();
+      if (!firstSel) firstSel = e;
+    } else {
+      e.main.setStyle({weight: 4, opacity: 0.95});
+      e.glow.setStyle({opacity: 0.0});
+    }
   });
-  var sel = segIndex[elementId];
-  if (sel) {
-    sel.main.setStyle({weight: 8, opacity: 1.0});
-    sel.glow.setStyle({opacity: 0.55});
-    sel.main.bringToFront();
+  if (firstSel) {
     try {
-      var b = sel.main.getBounds();
+      var b = firstSel.main.getBounds();
       if (!map.getBounds().contains(b)) map.panTo(b.getCenter());
     } catch(e){}
   }
+}
+
+/* Backwards-compatible single-element variant */
+function highlightElement(elementId) {
+  highlightElements(elementId ? [elementId] : []);
 }
 
 /* ── PI overlay: markers + dashed virtual tangent extensions ───── */

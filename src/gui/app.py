@@ -152,7 +152,9 @@ class App(QMainWindow):
 
         # Element table (bottom dock) → rebuilds + row selection
         self.element_table.rebuilt.connect(self._on_elements_rebuilt)
-        self.element_table.element_selected.connect(self._on_element_row_selected)
+        self.element_table.elements_selected.connect(self._on_element_rows_selected)
+        # Map element click (Ctrl = toggle into multiselect) → table selection
+        self.map_widget.element_clicked.connect(self.element_table.select_element)
 
         # Step 6 (cross-section) → back / done / map overlay
         # Step 6 (stations) → map markers / click mode / navigation
@@ -575,8 +577,8 @@ class App(QMainWindow):
             f"max dev {metrics.get('max_deviation', 0.0):.2f} m."
         )
 
-    def _on_element_row_selected(self, element_id: str):
-        self.map_widget.highlight_element(element_id)
+    def _on_element_rows_selected(self, element_ids: list):
+        self.map_widget.highlight_elements(element_ids)
 
     def _on_refine_back(self):
         """Go back from Refine to Candidates — restore all candidate overlays."""

@@ -135,9 +135,10 @@ class DebugPage(QWebEnginePage):
 # ---------------------------------------------------------------------------
 
 class MapBridge(QObject):
-    bounds_ready = Signal(float, float, float, float)
-    ready        = Signal()
-    map_clicked  = Signal(float, float)   # lat, lon (station-placement mode)
+    bounds_ready    = Signal(float, float, float, float)
+    ready           = Signal()
+    map_clicked     = Signal(float, float)   # lat, lon (station-placement mode)
+    element_clicked = Signal(str, bool)      # element_id, ctrl held (multiselect)
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -151,15 +152,20 @@ class MapBridge(QObject):
     def on_map_clicked(self, lat, lon):
         self.map_clicked.emit(lat, lon)
 
+    @Slot(str, bool)
+    def on_element_clicked(self, element_id, ctrl):
+        self.element_clicked.emit(element_id, ctrl)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
 # ---------------------------------------------------------------------------
 
 class MapWidget(QWidget):
-    bounds_ready = Signal(float, float, float, float)
-    js_error     = Signal(str)
-    map_clicked  = Signal(float, float)   # lat, lon (station-placement mode)
+    bounds_ready    = Signal(float, float, float, float)
+    js_error        = Signal(str)
+    map_clicked     = Signal(float, float)   # lat, lon (station-placement mode)
+    element_clicked = Signal(str, bool)      # element_id, ctrl held (multiselect)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -220,6 +226,7 @@ class MapWidget(QWidget):
         self._bridge.ready.connect(self._on_map_ready)
         self._bridge.bounds_ready.connect(self.bounds_ready)
         self._bridge.map_clicked.connect(self.map_clicked)
+        self._bridge.element_clicked.connect(self.element_clicked)
 
         # Serve gui/static/ (which contains map.html) over a local HTTP
         # server. Using http://127.0.0.1 as origin removes ALL cross-origin
@@ -389,6 +396,10 @@ class MapWidget(QWidget):
     def highlight_element(self, element_id: str):
         """Emphasize (glow) one alignment element by its stable id."""
         self._run_js(f"highlightElement({json.dumps(element_id)})")
+
+    def highlight_elements(self, element_ids: list):
+        """Emphasize (glow) several alignment elements (table multiselect)."""
+        self._run_js(f"highlightElements({json.dumps(list(element_ids))})")
 
     def emphasize_candidate(self, algo_id: str):
         """Thicken one Step-4 candidate polyline (empty string resets)."""

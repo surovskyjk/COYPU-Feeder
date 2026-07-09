@@ -43,8 +43,8 @@ MERGE_LINE_THRESHOLD = 30.0
 
 
 class ElementTableDock(QWidget):
-    rebuilt          = Signal(list, dict)   # (elements, metrics) after model rebuild
-    element_selected = Signal(str)          # element_id (row clicked)
+    rebuilt           = Signal(list, dict)  # (elements, metrics) after model rebuild
+    elements_selected = Signal(list)        # selected element_ids (map highlight)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -474,11 +474,38 @@ class ElementTableDock(QWidget):
         rows = self._table.selectionModel().selectedRows()
         self._range_btn.setEnabled(
             self._model is not None and self._selected_pi_range() is not None)
-        if not rows:
+        ids = []
+        for r in sorted(x.row() for x in rows):
+            it = self._table.item(r, COL_ID)
+            if it is None:
+                continue
+            meta = it.data(Qt.ItemDataRole.UserRole) or {}
+            if meta.get("etype") not in (None, "omitted"):
+                ids.append(it.text())
+        self.elements_selected.emit(ids)
+
+    # ------------------------------------------------------------------
+    # Map click → table selection (Ctrl toggles into a multi-selection)
+    # ------------------------------------------------------------------
+
+    def select_element(self, element_id: str, ctrl: bool = False):
+        """
+        Select the row of `element_id` (clicked on the map). With ctrl=True
+        the row is toggled into the existing selection so a PI range for
+        the merge function can be picked directly on the map.
+        """
+        from PySide6.QtCore import QItemSelectionModel
+        row = None
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, COL_ID)
+            if it is not None and it.text() == element_id:
+                row = r
+                break
+        if row is None:
             return
-        it = self._table.item(rows[0].row(), COL_ID)
-        if it is None:
-            return
-        meta = it.data(Qt.ItemDataRole.UserRole) or {}
-        if meta.get("etype") not in (None, "omitted"):
-            self.element_selected.emit(it.text())
+        sel_model = self._table.selectionModel()
+        idx = self._table.model().index(row, 0)
+        flag = (QItemSelectionModel.SelectionFlag.Toggle if ctrl
+                else QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        sel_model.select(idx, flag | QItemSelectionModel.SelectionFlag.Rows)
+        self._table.scrollTo(idx)

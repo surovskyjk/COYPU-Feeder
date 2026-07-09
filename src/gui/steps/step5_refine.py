@@ -56,8 +56,11 @@ class Step5Refine(QWidget):
             "  omitted PIs can be restored at the bottom of the table.\n"
             "• Short straights between two curves offer 'Merge spirals' —\n"
             "  the straight is replaced by prolonged, symmetric spirals.\n"
-            "• Click a table row to highlight that element on the map;\n"
-            "  hover an element for 3 s to see its statistics.\n\n"
+            "• Click a table row to highlight that element on the map, or\n"
+            "  click an element directly on the map to select its row;\n"
+            "  Ctrl+click on the map multi-selects (e.g. pick the first and\n"
+            "  last tangent for 'Merge PI range'). Hover an element for 3 s\n"
+            "  to see its statistics.\n\n"
             "Points of Intersection are shown as markers; the dashed grey\n"
             "stubs are the virtual tangent extensions toward each PI."
         )
