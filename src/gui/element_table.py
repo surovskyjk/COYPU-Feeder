@@ -43,8 +43,10 @@ MERGE_LINE_THRESHOLD = 30.0
 
 
 class ElementTableDock(QWidget):
-    rebuilt           = Signal(list, dict)  # (elements, metrics) after model rebuild
-    elements_selected = Signal(list)        # selected element_ids (map highlight)
+    rebuilt                  = Signal(list, dict)  # (elements, metrics) after rebuild
+    elements_selected        = Signal(list)        # selected element_ids (map highlight)
+    log_message              = Signal(str, str)    # (text, level) → log panel
+    show_alignment_requested = Signal()            # re-draw alignment on the map
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,14 +88,31 @@ class ElementTableDock(QWidget):
         self._hint_lbl.setStyleSheet("color: #777; font-size: 9px;")
         header.addWidget(self._hint_lbl)
 
+        self._show_btn = QPushButton("🗺 Show alignment")
+        self._show_btn.setStyleSheet(
+            "QPushButton { font-size: 10px; padding: 3px 10px; "
+            "background: #2a82da; color: #ffffff; border-radius: 3px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background: #3b93eb; }")
+        self._show_btn.setToolTip(
+            "Re-draw the edited alignment and the PI overlay on the map\n"
+            "(useful after the map was reloaded and the overlays vanished)."
+        )
+        self._show_btn.clicked.connect(self.show_alignment_requested.emit)
+        header.addWidget(self._show_btn)
+
         self._range_btn = QPushButton("Merge PI range → single curve")
         self._range_btn.setStyleSheet(
-            "font-size: 9px; padding: 2px 8px; color: #ffd54f;")
+            "QPushButton { font-size: 10px; padding: 3px 10px; "
+            "background: #ffb300; color: #212121; border-radius: 3px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background: #ffc633; }"
+            "QPushButton:disabled { background: #4a4a4e; color: #8a8a8e; }")
         self._range_btn.setToolTip(
             "Select the rows spanning two or more curves (e.g. the first and\n"
-            "last tangent of the section, or the curves themselves). All PIs\n"
-            "in between are replaced by ONE Spiral–Arc–Spiral: the outer\n"
-            "tangents are kept, the new PI is their intersection."
+            "last tangent of the section, or Ctrl+click them on the map).\n"
+            "All PIs in between are replaced by ONE Spiral–Arc–Spiral: the\n"
+            "outer tangents are kept, the new PI is their intersection."
         )
         self._range_btn.setEnabled(False)
         self._range_btn.clicked.connect(self._on_merge_range)
@@ -109,7 +128,13 @@ class ElementTableDock(QWidget):
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_ACT, QHeaderView.ResizeMode.Stretch)
-        self._table.setStyleSheet("font-size: 10px;")
+        # Taller, easier-to-hit rows; slightly larger font
+        self._table.verticalHeader().setDefaultSectionSize(34)
+        self._table.setStyleSheet(
+            "QTableWidget { font-size: 11px; }"
+            "QTableWidget::item { padding: 4px 6px; }"
+            "QTableWidget::item:selected { background: #2a82da; color: #ffffff; }"
+        )
         self._table.cellChanged.connect(self._on_cell_changed)
         self._table.itemSelectionChanged.connect(self._on_selection)
         v.addWidget(self._table)
@@ -160,6 +185,16 @@ class ElementTableDock(QWidget):
         return it
 
     def _populate(self):
+        # Preserve the current selection (blue rows) across the repopulation
+        # that follows every value edit / rebuild.
+        prev_sel: set = set()
+        sm = self._table.selectionModel()
+        if sm is not None:
+            for r in (x.row() for x in sm.selectedRows()):
+                it = self._table.item(r, COL_ID)
+                if it is not None:
+                    prev_sel.add(it.text())
+
         self._populating = True
         try:
             self._table.setRowCount(0)
@@ -228,11 +263,27 @@ class ElementTableDock(QWidget):
                     self._table.item(row, COL_ID).setData(
                         Qt.ItemDataRole.UserRole, {"pi": pid.index, "etype": "omitted"})
                     btn = QPushButton("Restore PI")
-                    btn.setStyleSheet("font-size: 9px; padding: 1px 6px;")
+                    btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
                     btn.clicked.connect(lambda _=False, k=pid.index: self._restore_pi(k))
                     self._table.setCellWidget(row, COL_ACT, self._wrap_buttons([btn]))
         finally:
             self._populating = False
+
+        # Restore the previous selection so edited rows stay highlighted
+        if prev_sel:
+            from PySide6.QtCore import QItemSelectionModel
+            sm = self._table.selectionModel()
+            self._table.blockSignals(True)
+            try:
+                for r in range(self._table.rowCount()):
+                    it = self._table.item(r, COL_ID)
+                    if it is not None and it.text() in prev_sel:
+                        sm.select(self._table.model().index(r, 0),
+                                  QItemSelectionModel.SelectionFlag.Select
+                                  | QItemSelectionModel.SelectionFlag.Rows)
+            finally:
+                self._table.blockSignals(False)
+            self._on_selection()   # single re-emit → map glow restored
 
     def _type_label(self, el: dict) -> str:
         et = el.get("type", "?")
@@ -267,13 +318,13 @@ class ElementTableDock(QWidget):
 
         if et == "Arc" and pi is not None:
             omit = QPushButton("Omit PI")
-            omit.setStyleSheet("font-size: 9px; padding: 1px 6px;")
+            omit.setStyleSheet("font-size: 10px; padding: 2px 8px;")
             omit.setToolTip("Remove this curve; neighbouring curves absorb its deflection.")
             omit.clicked.connect(lambda _=False, k=pi: self._omit_pi(k))
             buttons.append(omit)
 
             reset = QPushButton("Reset")
-            reset.setStyleSheet("font-size: 9px; padding: 1px 6px;")
+            reset.setStyleSheet("font-size: 10px; padding: 2px 8px;")
             reset.setToolTip("Reset radius and spiral length to their auto-estimated values.")
             reset.clicked.connect(lambda _=False, k=pi: self._reset_pi(k))
             buttons.append(reset)
@@ -281,7 +332,11 @@ class ElementTableDock(QWidget):
             pid = next((p for p in self._model.pis if p.index == pi), None)
             if pid is not None and pid.merged_with_next:
                 undo = QPushButton("Undo merge")
-                undo.setStyleSheet("font-size: 9px; padding: 1px 6px; color: #ffd54f;")
+                undo.setStyleSheet(
+                    "QPushButton { font-size: 10px; padding: 2px 8px; "
+                    "background: #ffb300; color: #212121; border-radius: 3px; "
+                    "font-weight: bold; }"
+                    "QPushButton:hover { background: #ffc633; }")
                 undo.clicked.connect(lambda _=False, k=pi: self._undo_merge(k))
                 buttons.append(undo)
 
@@ -299,7 +354,10 @@ class ElementTableDock(QWidget):
                         and next_el.get("_pi") is not None):
                     merge = QPushButton("Merge spirals ↔")
                     merge.setStyleSheet(
-                        "font-size: 9px; padding: 1px 6px; color: #ffd54f;")
+                        "QPushButton { font-size: 10px; padding: 2px 8px; "
+                        "background: #ffb300; color: #212121; border-radius: 3px; "
+                        "font-weight: bold; }"
+                        "QPushButton:hover { background: #ffc633; }")
                     merge.setToolTip(
                         "Remove this short straight by prolonging the adjacent\n"
                         "transition spirals (kept symmetrical on both curves).")
@@ -343,12 +401,16 @@ class ElementTableDock(QWidget):
         if self._model is None or not self._pending:
             return
         by_index = {p.index: p for p in self._model.pis}
+        labels = {"radius": "radius", "spiral_len": "spiral length"}
         for pi_idx, changes in self._pending.items():
             pid = by_index.get(pi_idx)
             if pid is None:
                 continue
             for field_name, value in changes.items():
                 setattr(pid, field_name, value)
+                self.log_message.emit(
+                    f"PI {pi_idx}: {labels.get(field_name, field_name)} → "
+                    f"{value:.1f} m requested…", "info")
         self._pending.clear()
         self._rebuild()
 
@@ -383,8 +445,10 @@ class ElementTableDock(QWidget):
             return
         ok, msg = merge_intermediate_line(self._model, pi_a, pi_b)
         if not ok:
+            self.log_message.emit(f"Merge spirals PI {pi_a}+{pi_b}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot merge spirals", msg)
             return
+        self.log_message.emit(f"Merge spirals PI {pi_a}+{pi_b}: {msg}", "ok")
         self._rebuild()
 
     def _undo_merge(self, pi_a: int):
@@ -392,6 +456,7 @@ class ElementTableDock(QWidget):
         if self._model is None:
             return
         undo_merge(self._model, pi_a)
+        self.log_message.emit(f"Merge at PI {pi_a} undone.", "info")
         self._rebuild()
 
     # ------------------------------------------------------------------
@@ -466,8 +531,10 @@ class ElementTableDock(QWidget):
             return
         ok, msg = merge_pi_range(self._model, rng[0], rng[1])
         if not ok:
+            self.log_message.emit(f"Merge PI range {rng[0]}–{rng[1]}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot merge PI range", msg)
             return
+        self.log_message.emit(msg, "ok")
         self._rebuild()
 
     def _on_selection(self):

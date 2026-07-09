@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .map_widget import MapWidget
 from .element_table import ElementTableDock
+from .log_panel import LogPanel
 from .step_sidebar import StepSidebar
 from .steps.step1_find import Step1Find
 from .steps.step2_section import Step2Section
@@ -72,15 +73,26 @@ class App(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
-        # Map above, element table below (table shown in Step 5 only)
+        # Map above; bottom half = log (left) + element table (right).
+        # The log is always visible; the table appears in Step 5 only.
         self.element_table = ElementTableDock()
         self.element_table.setVisible(False)
+        self.log_panel = LogPanel()
+
+        self._bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._bottom_splitter.addWidget(self.log_panel)
+        self._bottom_splitter.addWidget(self.element_table)
+        self._bottom_splitter.setStretchFactor(0, 1)
+        self._bottom_splitter.setStretchFactor(1, 3)
+        self._bottom_splitter.setSizes([260, 780])
+
         self._map_splitter = QSplitter(Qt.Orientation.Vertical)
         self._map_splitter.addWidget(self.map_widget)
-        self._map_splitter.addWidget(self.element_table)
-        self._map_splitter.setStretchFactor(0, 3)
-        self._map_splitter.setStretchFactor(1, 1)
+        self._map_splitter.addWidget(self._bottom_splitter)
+        self._map_splitter.setStretchFactor(0, 5)
+        self._map_splitter.setStretchFactor(1, 4)
         self._map_splitter.setCollapsible(0, False)
+        self._map_splitter.setSizes([460, 300])
         h.addWidget(self._map_splitter, stretch=1)
 
         self.stack = QStackedWidget()
@@ -150,9 +162,12 @@ class App(QMainWindow):
         self.step5_refine.refinement_done.connect(self._on_refinement_done)
         self.step5_refine.back_requested.connect(self._on_refine_back)
 
-        # Element table (bottom dock) → rebuilds + row selection
+        # Element table (bottom dock) → rebuilds + row selection + log
         self.element_table.rebuilt.connect(self._on_elements_rebuilt)
         self.element_table.elements_selected.connect(self._on_element_rows_selected)
+        self.element_table.log_message.connect(self.log_panel.log)
+        self.element_table.show_alignment_requested.connect(
+            self._on_show_alignment_clicked)
         # Map element click (Ctrl = toggle into multiselect) → table selection
         self.map_widget.element_clicked.connect(self.element_table.select_element)
 
@@ -202,11 +217,50 @@ class App(QMainWindow):
     # Step transitions
     # ------------------------------------------------------------------
 
+    _STEP_TIPS = {
+        0: ("Step 1 — Find Railway", [
+            "Search by line number, name or OSM relation ID,",
+            "or zoom the map and use 'Lines in View'.",
+        ]),
+        1: ("Step 2 — Select Section", [
+            "Tick the tracks that belong to your section;",
+            "click a row to highlight it on the map.",
+        ]),
+        2: ("Step 3 — Configure", [
+            "Max deviation = PI extraction tolerance;",
+            "spiral length applies to Level 3.",
+        ]),
+        3: ("Step 4 — Candidates", [
+            "Three levels are computed; hover a card to emphasise",
+            "its line on the map, then Select one.",
+        ]),
+        4: ("Step 5 — Refine", [
+            "Edit Radius / Spiral L in the table; the map updates live.",
+            "Click elements on the map to select rows; Ctrl+click multi-selects.",
+            "Select first & last tangent → 'Merge PI range → single curve'.",
+            "Short straights between curves offer 'Merge spirals'.",
+            "🗺 'Show alignment' re-draws everything after a map reload.",
+        ]),
+        5: ("Step 6 — Stations", [
+            "⚡ Auto-detect stations from OSM, 📍 place on map, or add rows.",
+            "The CSV (Station,Dwell Time,Name) is written next to the LandXML.",
+        ]),
+        6: ("Step 7 — Cross-Section", [
+            "Optional deviation profile of the fitted alignment vs OSM.",
+        ]),
+        7: ("Step 8 — Export", [
+            "Pick the output CRS and file; 👁 Preview shows the LandXML first.",
+        ]),
+    }
+
     def _goto_step(self, idx: int):
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
         # Element table dock is a Step-5 (Refine) feature
         self.element_table.setVisible(idx == 4)
+        tip = self._STEP_TIPS.get(idx)
+        if tip:
+            self.log_panel.log_step(tip[0], tip[1])
 
     # ------------------------------------------------------------------
     # Step 2 map interactions
@@ -566,19 +620,38 @@ class App(QMainWindow):
             self.statusBar().showMessage(f"⚠ PI overlay failed: {exc}")
 
     def _on_elements_rebuilt(self, elements: list, metrics: dict):
-        """Element table edited → refresh Step 5, map and PI overlay."""
+        """Element table edited → refresh Step 5, map, PI overlay and log."""
         self.step5_refine.set_elements(elements, metrics)
         self._render_elements_on_map(elements)
         self._show_pi_overlay(self.element_table._model)
         n_spirals = sum(1 for e in elements if e.get("type") == "Spiral")
-        self.statusBar().showMessage(
-            f"Alignment rebuilt — {len(elements)} elements "
-            f"({n_spirals} spiral{'s' if n_spirals != 1 else ''}), "
-            f"max dev {metrics.get('max_deviation', 0.0):.2f} m."
-        )
+        msg = (f"Alignment rebuilt — {len(elements)} elements "
+               f"({n_spirals} spiral{'s' if n_spirals != 1 else ''}), "
+               f"max dev {metrics.get('max_deviation', 0.0):.2f} m, "
+               f"C1 {metrics.get('max_heading_jump_deg', 0.0):.3f}°")
+        self.statusBar().showMessage(msg)
+        self.log_panel.log(msg, "ok")
+        # Geometry notes from the rebuild (radius clamps, skipped curves, …)
+        model = self.element_table._model
+        for note in (getattr(model, "log", None) or []):
+            self.log_panel.log(note, "warn" if note.startswith("⚠") else "info")
 
     def _on_element_rows_selected(self, element_ids: list):
         self.map_widget.highlight_elements(element_ids)
+
+    def _on_show_alignment_clicked(self):
+        """Re-draw the edited alignment + PI overlay (e.g. after map reload)."""
+        elements = self.element_table.current_elements()
+        if not elements and self._selected_candidate is not None:
+            elements = getattr(self._selected_candidate, "elements", [])
+        if not elements:
+            elements = self._final_elements
+        if not elements:
+            self.log_panel.log("No alignment to show yet.", "warn")
+            return
+        self._render_elements_on_map(elements, fit_view=True)
+        self._show_pi_overlay(self.element_table._model)
+        self.log_panel.log("Alignment re-drawn on the map.", "ok")
 
     def _on_refine_back(self):
         """Go back from Refine to Candidates — restore all candidate overlays."""

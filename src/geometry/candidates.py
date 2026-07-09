@@ -102,6 +102,9 @@ class PIAlignment:
     # Per-PI virtual tangent stubs for map display:
     # {"pi": k, "pi_xy": [x, y], "tc": [x, y], "ct": [x, y]}
     tangent_stubs:  list = field(default_factory=list)
+    # Human-readable notes from the last rebuild (radius clamps, skips, …),
+    # surfaced in the GUI log panel.
+    log:            list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -3115,6 +3118,38 @@ def _fresh_pis(V: np.ndarray) -> list:
     ]
 
 
+def _required_tangent(R: float, half_tan: float, L: float) -> float:
+    """Tangent length from the PI to TC for radius R and spiral length L."""
+    from geometry.alignment import _compute_clothoid_shift
+    if L >= _PI_L_MIN and R > 0:
+        x_sp, y_sp = _compute_clothoid_shift(L, R)
+        theta_s = L / (2.0 * R)
+        p_sh = y_sp - R * (1.0 - math.cos(theta_s))
+        k_ab = x_sp - R * math.sin(theta_s)
+        return (R + p_sh) * half_tan + k_ab
+    return R * half_tan
+
+
+def _max_radius_for_tangent(T_allow: float, half_tan: float, L: float) -> float:
+    """
+    Largest radius whose tangent length fits within T_allow (monotonic in R;
+    binary search). L is the intended spiral length (0 = plain arc).
+    """
+    if half_tan < 1e-9 or T_allow <= 0:
+        return 1.0
+    hi = T_allow / half_tan          # plain-arc upper bound (spiral only adds)
+    lo = 1.0
+    if _required_tangent(hi, half_tan, L) <= T_allow:
+        return hi
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if _required_tangent(mid, half_tan, L) <= T_allow:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
 def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
     """
     (Re)construct the C1-continuous element chain from the PI model,
@@ -3157,6 +3192,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
     m = len(V)
 
     model.tangent_stubs = []
+    model.log = []
 
     if m < 2:
         model.elements = []
@@ -3244,8 +3280,41 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
                 R_fit_max = max(1.0, (T_max * 0.98) / half_tan)
 
         if pi_data.radius > 0:
-            # User/applied override: guard only against geometric impossibility
-            R = min(float(pi_data.radius), R_fit_max)
+            R_req = float(pi_data.radius)
+            if is_merged:
+                # Merged pairs manage their own solved lengths.
+                R = min(R_req, R_fit_max)
+                if R_req > R + 1.0:
+                    model.log.append(
+                        f"⚠ PI {k}: radius {R_req:.0f} m clamped to {R:.0f} m "
+                        f"(merged-curve tangent limit).")
+            else:
+                # Honour an explicit override generously: reserve only a small
+                # part of the OUTGOING straight for the following curve (not the
+                # fair half-share used for auto radii), so larger radii that are
+                # still geometrically valid are accepted. Relax T_max to match
+                # so the downstream spiral guard does not shrink R back.
+                if k < m - 2:
+                    reserve  = min(0.30 * d_seg_out, 60.0)
+                    d_out_ov = max(0.5, d_seg_out - reserve)
+                else:
+                    d_out_ov = d_seg_out - 0.1
+                T_allow = max(0.5, min(d_in_eff, d_out_ov))
+                R_cap   = _max_radius_for_tangent(T_allow, half_tan, L_res)
+                if R_req <= R_cap + 1e-6:
+                    R = R_req
+                    T_max = max(T_max, T_allow)   # let downstream honour it
+                    if R_req > R_fit_max + 1.0:
+                        model.log.append(
+                            f"PI {k}: radius {R_req:.0f} m applied (uses more "
+                            f"than half of the adjacent straight).")
+                else:
+                    R = R_cap
+                    T_max = max(T_max, T_allow)
+                    model.log.append(
+                        f"⚠ PI {k}: radius {R_req:.0f} m does not fit — the "
+                        f"tangent point would overrun the neighbouring curve. "
+                        f"Largest that fits here is {R_cap:.0f} m; applied that.")
         else:
             # Auto: Kasa circle fit restricted to the *curved* points only —
             # points close to either tangent line belong to the straights and
@@ -3408,9 +3477,16 @@ def annotate_element_deviations(elements: list[dict], xy: np.ndarray) -> None:
     Attach per-element deviation statistics (_max_dev / _mean_dev, metres)
     by assigning every OSM point to its nearest element. Used by the map
     hover popup.
+
+    For very large alignments the OSM points are stride-subsampled so each
+    interactive rebuild stays fast (stats are indicative, not exhaustive).
     """
     if not elements or xy is None or len(xy) == 0:
         return
+    budget = 200_000                       # ~ point-element distance checks
+    stride = max(1, (len(xy) * len(elements)) // budget)
+    if stride > 1:
+        xy = xy[::stride]
     n = len(elements)
     sums   = [0.0] * n
     counts = [0]   * n
