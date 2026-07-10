@@ -16,9 +16,7 @@ from PySide6.QtGui import (
     QFont, QLinearGradient,
 )
 
-APP_NAME    = "COYPU Feeder"
-APP_TAGLINE = "OSM railways → LandXML alignments"
-APP_VERSION = "1.0.0"
+from app_meta import APP_NAME, APP_VERSION, APP_TAGLINE  # noqa: F401
 
 _BLUE   = QColor("#42a5f5")   # tangents
 _GREEN  = QColor("#66bb6a")   # transition spirals

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt, QSettings
+from PySide6.QtGui import QGuiApplication, QAction, QActionGroup
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
     QSizePolicy, QMessageBox, QApplication, QSplitter,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from .map_widget import MapWidget
 from .element_table import ElementTableDock
 from .log_panel import LogPanel
+from .dialogs import AboutDialog, SettingsDialog
 from .step_sidebar import StepSidebar
 from .steps.step1_find import Step1Find
 from .steps.step2_section import Step2Section
@@ -34,7 +35,7 @@ _MAX_VIEW_KM = 20.0
 class App(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Coypu-Feeder — OSM Railway to LandXML")
+        self.setWindowTitle("COYPU Feeder — OSM Railway to LandXML")
         self.resize(1340, 820)
         self.setMinimumSize(1050, 680)
 
@@ -49,13 +50,132 @@ class App(QMainWindow):
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
 
+        self._qsettings = QSettings("COYPU", "COYPU-Feeder")
+        self._prefs = self._load_prefs()
+
         self._build_layout()
+        self._build_menu()
         self._wire_signals()
         self._connect_scheme_changes()
+        self._apply_prefs()
+
+    # ------------------------------------------------------------------
+    # Preferences (persisted via QSettings)
+    # ------------------------------------------------------------------
+
+    def _load_prefs(self) -> dict:
+        s = self._qsettings
+        return {
+            "theme_mode": s.value("theme_mode", "auto", str),
+            "font_pt":    int(s.value("font_pt", 9, int)),
+            "show_log":   s.value("show_log", True, bool),
+            "confirm_start_over": s.value("confirm_start_over", True, bool),
+        }
+
+    def _save_prefs(self):
+        s = self._qsettings
+        for k, val in self._prefs.items():
+            s.setValue(k, val)
+        s.sync()
+
+    def _apply_prefs(self):
+        from gui.theme import apply_theme, apply_font_size, resolve_dark
+        app = QApplication.instance()
+        dark = resolve_dark(self._prefs["theme_mode"])
+        apply_theme(app, dark)
+        apply_font_size(app, self._prefs["font_pt"])
+        self.map_widget.set_theme(dark)
+        self.log_panel.setVisible(self._prefs["show_log"])
 
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Menu bar
+    # ------------------------------------------------------------------
+
+    def _build_menu(self):
+        mb = self.menuBar()
+
+        view_menu = mb.addMenu("&View")
+        self._act_show_log = QAction("Show log panel", self, checkable=True)
+        self._act_show_log.setChecked(self._prefs["show_log"])
+        self._act_show_log.toggled.connect(self._on_toggle_log)
+        view_menu.addAction(self._act_show_log)
+        view_menu.addSeparator()
+        reset_act = QAction("Reset panel layout", self)
+        reset_act.triggered.connect(self._reset_layout)
+        view_menu.addAction(reset_act)
+
+        settings_menu = mb.addMenu("&Settings")
+        prefs_act = QAction("Preferences…", self)
+        prefs_act.triggered.connect(self._open_settings)
+        settings_menu.addAction(prefs_act)
+
+        theme_menu = settings_menu.addMenu("Theme")
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        for label, mode in (("Automatic (system)", "auto"),
+                            ("Dark", "dark"), ("Light", "light")):
+            a = QAction(label, self, checkable=True)
+            a.setData(mode)
+            a.setChecked(self._prefs["theme_mode"] == mode)
+            a.triggered.connect(lambda _=False, m=mode: self._set_theme_mode(m))
+            self._theme_group.addAction(a)
+            theme_menu.addAction(a)
+
+        help_menu = mb.addMenu("&Help")
+        about_act = QAction("About COYPU Feeder…", self)
+        about_act.triggered.connect(self._open_about)
+        help_menu.addAction(about_act)
+        readme_act = QAction("Open README", self)
+        readme_act.triggered.connect(self._open_readme)
+        help_menu.addAction(readme_act)
+        rel_act = QAction("Check for updates (Releases)…", self)
+        rel_act.triggered.connect(self._open_releases)
+        help_menu.addAction(rel_act)
+
+    def _on_toggle_log(self, on: bool):
+        self._prefs["show_log"] = bool(on)
+        self.log_panel.setVisible(on)
+        self._save_prefs()
+
+    def _reset_layout(self):
+        self._map_splitter.setSizes([460, 300])
+        self._bottom_splitter.setSizes([280, 800])
+        if not self.log_panel.isVisible():
+            self._act_show_log.setChecked(True)
+        self.log_panel.log("Panel layout reset.", "info")
+
+    def _set_theme_mode(self, mode: str):
+        self._prefs["theme_mode"] = mode
+        self._save_prefs()
+        self._apply_prefs()
+        self.log_panel.log(f"Theme set to '{mode}'.", "info")
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self._prefs, self)
+        if dlg.exec():
+            self._prefs.update(dlg.values())
+            self._save_prefs()
+            self._apply_prefs()
+            # keep the menu toggles in sync
+            self._act_show_log.setChecked(self._prefs["show_log"])
+            for a in self._theme_group.actions():
+                a.setChecked(a.data() == self._prefs["theme_mode"])
+            self.log_panel.log("Preferences updated.", "info")
+
+    def _open_about(self):
+        AboutDialog(self).exec()
+
+    def _open_readme(self):
+        AboutDialog(self)._open_readme()
+
+    def _open_releases(self):
+        import webbrowser
+        import app_meta as meta
+        webbrowser.open(meta.RELEASES_URL)
 
     def _build_layout(self):
         central = QWidget()
@@ -77,21 +197,28 @@ class App(QMainWindow):
         # The log is always visible; the table appears in Step 5 only.
         self.element_table = ElementTableDock()
         self.element_table.setVisible(False)
+        self.element_table.setMinimumWidth(460)
         self.log_panel = LogPanel()
+        self.log_panel.setMinimumWidth(220)
 
         self._bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._bottom_splitter.addWidget(self.log_panel)
         self._bottom_splitter.addWidget(self.element_table)
         self._bottom_splitter.setStretchFactor(0, 1)
         self._bottom_splitter.setStretchFactor(1, 3)
-        self._bottom_splitter.setSizes([260, 780])
+        self._bottom_splitter.setSizes([280, 800])
+        # Never let a drag collapse either panel to zero (unrecoverable).
+        self._bottom_splitter.setChildrenCollapsible(False)
+
+        self.map_widget.setMinimumHeight(200)
+        self._bottom_splitter.setMinimumHeight(90)
 
         self._map_splitter = QSplitter(Qt.Orientation.Vertical)
         self._map_splitter.addWidget(self.map_widget)
         self._map_splitter.addWidget(self._bottom_splitter)
         self._map_splitter.setStretchFactor(0, 5)
         self._map_splitter.setStretchFactor(1, 4)
-        self._map_splitter.setCollapsible(0, False)
+        self._map_splitter.setChildrenCollapsible(False)
         self._map_splitter.setSizes([460, 300])
         h.addWidget(self._map_splitter, stretch=1)
 
@@ -208,9 +335,13 @@ class App(QMainWindow):
             pass  # Qt < 6.5 — no signal, static theme is fine
 
     def _on_color_scheme_changed(self, scheme):
-        from gui.theme import apply_theme
+        # Only auto-follow the OS when the user left the theme on "Automatic".
+        if self._prefs.get("theme_mode", "auto") != "auto":
+            return
+        from gui.theme import apply_theme, apply_font_size
         dark = (scheme == Qt.ColorScheme.Dark)
         apply_theme(QApplication.instance(), dark)
+        apply_font_size(QApplication.instance(), self._prefs["font_pt"])
         self.map_widget.set_theme(dark)
 
     # ------------------------------------------------------------------

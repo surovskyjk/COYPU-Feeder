@@ -60,6 +60,22 @@ def apply_dark_theme(app: QApplication) -> None:
     apply_theme(app, is_dark_mode())
 
 
+def apply_font_size(app: QApplication, point_size: int) -> None:
+    """Set the base application font size (points). Widgets inherit it."""
+    f = app.font()
+    f.setPointSize(int(point_size))
+    app.setFont(f)
+
+
+def resolve_dark(mode: str) -> bool:
+    """Map a theme-mode preference ('auto'|'dark'|'light') to dark=bool."""
+    if mode == "dark":
+        return True
+    if mode == "light":
+        return False
+    return is_dark_mode()   # "auto"
+
+
 # ---------------------------------------------------------------------------
 # Palettes
 # ---------------------------------------------------------------------------
