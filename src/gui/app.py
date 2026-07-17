@@ -696,15 +696,28 @@ class App(QMainWindow):
             segments_payload = []
             try:
                 from gui.worker import _serialise_element_params
-                per_el = reconstruct_alignment_per_element(elements, sample_interval=2.0)
+                # Sample density scales with length: 2 m on short sections,
+                # up to 20 m on very long ones — keeps the JSON payload and
+                # the Leaflet layer work bounded on 50 km+ alignments.
+                total_len = sum(float(e.get("length", 0.0)) for e in elements)
+                interval = min(20.0, max(2.0, total_len / 4000.0))
+                per_el = reconstruct_alignment_per_element(
+                    elements, sample_interval=interval)
+                # One batched projection for ALL samples (was one call per
+                # element → hundreds of transformer builds per refresh).
+                flat: list = []
+                spans: list = []
                 for el, pts in per_el:
-                    if not pts:
+                    spans.append((el, len(flat), len(pts)))
+                    flat.extend(pts)
+                wgs_all = projected_to_wgs84(flat, self._work_epsg) if flat else []
+                for el, off, n in spans:
+                    if not n:
                         continue
-                    wgs = projected_to_wgs84(pts, self._work_epsg)
                     segments_payload.append({
                         "type":   el.get("type", "Line"),
                         "params": _serialise_element_params(el),
-                        "points": [list(p) for p in wgs],
+                        "points": [list(p) for p in wgs_all[off:off + n]],
                     })
             except Exception:
                 segments_payload = []
@@ -728,24 +741,29 @@ class App(QMainWindow):
             import math as _m
             omitted = {p.index for p in pi_model.pis if p.omitted}
             defl    = {p.index: p.deflection for p in pi_model.pis}
-            pi_pts  = []
-            for k in range(1, len(pi_model.V) - 1):
-                lat, lon = projected_to_wgs84(
-                    [(float(pi_model.V[k, 0]), float(pi_model.V[k, 1]))],
-                    self._work_epsg)[0]
-                pi_pts.append({
-                    "id": k, "latlon": [lat, lon],
-                    "omitted": k in omitted,
-                    "defl_deg": _m.degrees(defl.get(k, 0.0)),
-                })
-            tangents = []
-            for stub in getattr(pi_model, "tangent_stubs", []):
+            stubs   = list(getattr(pi_model, "tangent_stubs", []))
+
+            # Collect every point first, then project ALL of them in one call
+            # (was one call per PI *and* one per stub).
+            ks   = list(range(1, len(pi_model.V) - 1))
+            flat = [(float(pi_model.V[k, 0]), float(pi_model.V[k, 1])) for k in ks]
+            for stub in stubs:
                 tc, pixy, ct = stub["tc"], stub["pi_xy"], stub["ct"]
-                wgs = projected_to_wgs84(
-                    [(tc[0], tc[1]), (pixy[0], pixy[1]), (ct[0], ct[1])],
-                    self._work_epsg)
-                tangents.append({"from": list(wgs[0]), "to": list(wgs[1])})
-                tangents.append({"from": list(wgs[1]), "to": list(wgs[2])})
+                flat.extend([(tc[0], tc[1]), (pixy[0], pixy[1]), (ct[0], ct[1])])
+            wgs = projected_to_wgs84(flat, self._work_epsg) if flat else []
+
+            pi_pts = [
+                {"id": k, "latlon": [wgs[i][0], wgs[i][1]],
+                 "omitted": k in omitted,
+                 "defl_deg": _m.degrees(defl.get(k, 0.0))}
+                for i, k in enumerate(ks)
+            ]
+            tangents = []
+            base = len(ks)
+            for j in range(len(stubs)):
+                a, b, c = wgs[base + 3 * j], wgs[base + 3 * j + 1], wgs[base + 3 * j + 2]
+                tangents.append({"from": list(a), "to": list(b)})
+                tangents.append({"from": list(b), "to": list(c)})
             self.map_widget.show_pi_overlay({"pis": pi_pts, "tangents": tangents})
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ PI overlay failed: {exc}")

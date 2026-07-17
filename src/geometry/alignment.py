@@ -31,7 +31,11 @@ Spirals that still have BOTH radii = INF after this pass are degenerate
 from __future__ import annotations
 
 import math
+from functools import lru_cache
+
 import numpy as np
+from scipy.special import fresnel
+
 from .curvature import (
     compute_curvature,
     smooth_curvature,
@@ -990,6 +994,7 @@ def _sample_spiral_heading(
 # Phase B — Geometry core
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=8192)
 def _compute_clothoid_shift(L: float, R: float) -> tuple[float, float]:
     """
     Compute clothoid spiral endpoint in local frame (tangent along +x at s=0).
@@ -997,6 +1002,9 @@ def _compute_clothoid_shift(L: float, R: float) -> tuple[float, float]:
     The clothoid has κ(s) = s/A² where A² = R*L. The endpoint is:
         x_end = integral_0^L cos(s²/(2A²)) ds    [Fresnel C integral]
         y_end = integral_0^L sin(s²/(2A²)) ds    [Fresnel S integral]
+
+    Pure function of (L, R) → cached: the PI constructor, the tangent-length
+    solvers and the merge Newton loop all hammer it with repeating arguments.
 
     Parameters
     ----------
@@ -1007,8 +1015,6 @@ def _compute_clothoid_shift(L: float, R: float) -> tuple[float, float]:
     -------
     (x_end, y_end) : clothoid endpoint in local frame
     """
-    from scipy.special import fresnel
-
     A2 = R * L
     A  = math.sqrt(A2)
 
@@ -1028,7 +1034,7 @@ def _compute_zone_geometry(
     R: float,
     L_entry: float,
     L_exit: float,
-    n_pts: int = 40,
+    n_pts: int = 0,
 ) -> dict | None:
     """
     Compute the full L-S-A-S-L geometry for one arc zone analytically.
@@ -1043,7 +1049,13 @@ def _compute_zone_geometry(
     R       : circular arc radius (metres)
     L_entry : entry spiral arc-length (metres, 0 = no spiral)
     L_exit  : exit spiral arc-length (metres, 0 = no spiral)
-    n_pts   : number of sample points on each spiral
+    n_pts   : number of sample points on each spiral. **0 (default) skips the
+              sampling entirely** and returns 2-point endpoint arrays — the PI
+              constructor only reads the key points (arc_start / arc_center /
+              arc_end / CT / arc_len / arc_angle) and discarded the samples,
+              at a cost of ~82 Fresnel evaluations per spiral zone. Pass a
+              positive value when the sampled polylines are actually needed
+              (see `_zone_objective`).
 
     Returns
     -------
@@ -1069,15 +1081,18 @@ def _compute_zone_geometry(
         sp_y = float(TC[1]) + sin_d * x_sp + sign * cos_d * y_sp
         arc_start = np.array([sp_x, sp_y])
         dir_arc_start = dir_in + sign * theta_entry
-        # Sample spiral points
-        spiral_entry_pts = []
-        for frac in np.linspace(0, 1, n_pts + 1):
-            L_s = frac * L_entry
-            xe, ye = _compute_clothoid_shift(L_s, R) if L_s > 0 else (0.0, 0.0)
-            wx = float(TC[0]) + cos_d * xe - sign * sin_d * ye
-            wy = float(TC[1]) + sin_d * xe + sign * cos_d * ye
-            spiral_entry_pts.append([wx, wy])
-        spiral_entry_pts = np.array(spiral_entry_pts)
+        # Sample spiral points (skipped when n_pts <= 0 — see docstring)
+        if n_pts > 0:
+            spiral_entry_pts = []
+            for frac in np.linspace(0, 1, n_pts + 1):
+                L_s = frac * L_entry
+                xe, ye = _compute_clothoid_shift(L_s, R) if L_s > 0 else (0.0, 0.0)
+                wx = float(TC[0]) + cos_d * xe - sign * sin_d * ye
+                wy = float(TC[1]) + sin_d * xe + sign * cos_d * ye
+                spiral_entry_pts.append([wx, wy])
+            spiral_entry_pts = np.array(spiral_entry_pts)
+        else:
+            spiral_entry_pts = np.array([TC, arc_start])
     else:
         arc_start = TC.copy()
         dir_arc_start = dir_in
@@ -1112,14 +1127,18 @@ def _compute_zone_geometry(
         CT = np.array([ct_x, ct_y])
         # Sample from arc_end (r = L_exit) to CT (r = 0), where r is the
         # remaining spiral length measured backwards from CT.
-        spiral_exit_pts = []
-        for frac in np.linspace(1, 0, n_pts + 1):
-            r = frac * L_exit
-            xe, ye = _compute_clothoid_shift(r, R) if r > 0 else (0.0, 0.0)
-            wx = float(CT[0]) - (cos_o * xe + sign * sin_o * ye)
-            wy = float(CT[1]) - (sin_o * xe - sign * cos_o * ye)
-            spiral_exit_pts.append([wx, wy])
-        spiral_exit_pts = np.array(spiral_exit_pts)
+        # (skipped when n_pts <= 0 — see docstring)
+        if n_pts > 0:
+            spiral_exit_pts = []
+            for frac in np.linspace(1, 0, n_pts + 1):
+                r = frac * L_exit
+                xe, ye = _compute_clothoid_shift(r, R) if r > 0 else (0.0, 0.0)
+                wx = float(CT[0]) - (cos_o * xe + sign * sin_o * ye)
+                wy = float(CT[1]) - (sin_o * xe - sign * cos_o * ye)
+                spiral_exit_pts.append([wx, wy])
+            spiral_exit_pts = np.array(spiral_exit_pts)
+        else:
+            spiral_exit_pts = np.array([arc_end, CT])
     else:
         CT = arc_end.copy()
         spiral_exit_pts = np.array([arc_end, arc_end])
@@ -1360,7 +1379,9 @@ def _zone_objective(
     dir_in_hat = np.array([math.cos(dir_in), math.sin(dir_in)])
     TC = PI - Ts_entry * dir_in_hat
 
-    geom = _compute_zone_geometry(TC, dir_in, delta, R, L_entry, L_exit)
+    # n_pts>0: this objective consumes the sampled spiral polylines below.
+    geom = _compute_zone_geometry(TC, dir_in, delta, R, L_entry, L_exit,
+                                  n_pts=40)
     if geom is None:
         return PENALTY
 

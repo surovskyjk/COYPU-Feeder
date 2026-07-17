@@ -4,6 +4,8 @@ The internal working CRS is always a metric flat plane (auto-selected UTM or use
 """
 
 import math
+from functools import lru_cache
+
 from pyproj import Transformer, CRS
 
 
@@ -14,7 +16,14 @@ def utm_epsg_for_lon(lon: float) -> int:
     return 32600 + zone  # WGS84 UTM North
 
 
+@lru_cache(maxsize=64)
 def make_transformer(source_epsg: int, target_epsg: int) -> Transformer:
+    """
+    Cached transformer factory. `Transformer.from_crs` parses the CRS
+    definitions and is expensive; the rendering path used to build one per
+    element (hundreds per map refresh). Transformers are stateless for
+    `transform`, so caching them is safe.
+    """
     return Transformer.from_crs(source_epsg, target_epsg, always_xy=True)
 
 
@@ -25,26 +34,34 @@ def wgs84_to_projected(
     """
     Project (lat, lon) pairs to (easting, northing) in target_epsg.
     Returns (x, y) = (easting, northing).
+
+    Vectorised: pyproj transforms whole coordinate sequences in one call.
     """
+    if not len(coords_latlon):
+        return []
     transformer = make_transformer(4326, target_epsg)
-    result = []
-    for lat, lon in coords_latlon:
-        x, y = transformer.transform(lon, lat)
-        result.append((x, y))
-    return result
+    lats = [c[0] for c in coords_latlon]
+    lons = [c[1] for c in coords_latlon]
+    xs, ys = transformer.transform(lons, lats)
+    return list(zip(map(float, xs), map(float, ys)))
 
 
 def projected_to_wgs84(
     coords_xy: list[tuple[float, float]],
     source_epsg: int,
 ) -> list[tuple[float, float]]:
-    """Inverse: (x, y) → (lat, lon)."""
+    """
+    Inverse: (x, y) → (lat, lon).
+
+    Vectorised: pyproj transforms whole coordinate sequences in one call.
+    """
+    if not len(coords_xy):
+        return []
     transformer = make_transformer(source_epsg, 4326)
-    result = []
-    for x, y in coords_xy:
-        lon, lat = transformer.transform(x, y)
-        result.append((lat, lon))
-    return result
+    xs = [c[0] for c in coords_xy]
+    ys = [c[1] for c in coords_xy]
+    lons, lats = transformer.transform(xs, ys)
+    return list(zip(map(float, lats), map(float, lons)))
 
 
 def auto_utm_epsg(coords_latlon: list[tuple[float, float]]) -> int:

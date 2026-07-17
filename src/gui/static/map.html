@@ -36,6 +36,12 @@ map.createPane('alignmentPane').style.zIndex   = '650';
 map.createPane('crossSectionPane').style.zIndex = '625';
 map.createPane('stationPane').style.zIndex     = '660';
 
+/* Canvas renderers for the alignment: a long line has hundreds of elements,
+   and one SVG path per element makes pan/zoom crawl. Canvas draws them all
+   into a single element while keeping mouse events and tooltips working. */
+var _alnRenderer  = L.canvas({ pane: 'alignmentPane',     padding: 0.5 });
+var _glowRenderer = L.canvas({ pane: 'alignmentGlowPane', padding: 0.5 });
+
 var baseLayer       = null;
 var railOverlay     = null;
 var trackLayers     = [];
@@ -43,7 +49,7 @@ var osmRefLayers    = [];
 var alignmentLayers = [];
 var candidateLayers = [];
 var candIndex       = {};    // algo_id → [glow, main] (card-hover emphasis)
-var segIndex        = {};    // element_id → {main, glow} (highlight / hover)
+var segIndex        = {};    // element_id → {main, glow, pts, col, selected}
 var piLayers        = [];    // PI markers + dashed virtual tangents
 var stationLayers   = [];    // station markers
 var csLeftLayer     = null;
@@ -242,6 +248,30 @@ function _clearHover() {
   if (_hoverPopup) { try { map.closePopup(_hoverPopup); } catch(e){} _hoverPopup = null; }
 }
 
+/* Glow layers are created ON DEMAND (hover / selection) instead of one per
+   element: a 600-element alignment used to allocate 1 200 polylines up front. */
+function _ensureGlow(entry) {
+  if (!entry.glow) {
+    entry.glow = L.polyline(entry.pts, {
+      color: entry.col, weight: 13, opacity: 0.0,
+      pane: 'alignmentGlowPane', renderer: _glowRenderer,
+      interactive: false
+    }).addTo(map);
+    alignmentLayers.push(entry.glow);
+  }
+  return entry.glow;
+}
+
+function _emphasize(entry, on, weight) {
+  if (on) {
+    entry.main.setStyle({weight: weight || 7, opacity: 1.0});
+    _ensureGlow(entry).setStyle({opacity: 0.5});
+  } else {
+    entry.main.setStyle({weight: 4, opacity: 0.95});
+    if (entry.glow) entry.glow.setStyle({opacity: 0.0});
+  }
+}
+
 function showAlignmentSegmented(segments, fitView) {
   if (fitView === undefined) fitView = true;
   clearAlignment();
@@ -252,26 +282,22 @@ function showAlignmentSegmented(segments, fitView) {
     if (pts.length < 2) return;
     all = all.concat(pts);
     var col = ELEMENT_COLOR[seg.type] || '#ffffff';
-    /* Glow halo — invisible until hovered/highlighted (glowing effect) */
-    var glow = L.polyline(pts, {
-      color: col, weight: 13, opacity: 0.0, pane: 'alignmentGlowPane'
-    }).addTo(map);
-    alignmentLayers.push(glow);
-    /* Coloured main element */
+    /* Coloured main element (canvas-rendered: far cheaper for many paths) */
     var pl = L.polyline(pts, {
-      color: col, weight: 4, opacity: 0.95, pane: 'alignmentPane'
+      color: col, weight: 4, opacity: 0.95,
+      pane: 'alignmentPane', renderer: _alnRenderer
     }).addTo(map);
     pl.bindTooltip(_fmtTooltip(seg), {sticky: true, direction: 'top', className: 'aln-tip'});
     alignmentLayers.push(pl);
 
     var eid = (seg.params || {}).element_id;
-    if (eid) segIndex[eid] = {main: pl, glow: glow, selected: false};
+    var entry = {main: pl, glow: null, pts: pts, col: col, selected: false};
+    if (eid) segIndex[eid] = entry;
 
     /* Hover: immediate glow; after 3 s an ID + statistics popup.
        Selected elements keep their emphasized style on mouseout. */
     pl.on('mouseover', function(ev) {
-      pl.setStyle({weight: 7, opacity: 1.0});
-      glow.setStyle({opacity: 0.45});
+      _emphasize(entry, true, 7);
       _clearHover();
       var at = ev.latlng;
       _hoverTimer = setTimeout(function() {
@@ -282,9 +308,8 @@ function showAlignmentSegmented(segments, fitView) {
       }, 3000);
     });
     pl.on('mouseout', function() {
-      var isSel = eid && segIndex[eid] && segIndex[eid].selected;
-      pl.setStyle(isSel ? {weight: 8, opacity: 1.0} : {weight: 4, opacity: 0.95});
-      glow.setStyle({opacity: isSel ? 0.55 : 0.0});
+      if (entry.selected) _emphasize(entry, true, 8);
+      else                _emphasize(entry, false);
       _clearHover();
     });
 
@@ -319,14 +344,10 @@ function highlightElements(elementIds) {
   Object.keys(segIndex).forEach(function(k) {
     var e = segIndex[k];
     e.selected = !!wanted[k];
+    _emphasize(e, e.selected, 8);   // creates the glow lazily, only if needed
     if (e.selected) {
-      e.main.setStyle({weight: 8, opacity: 1.0});
-      e.glow.setStyle({opacity: 0.55});
-      e.main.bringToFront();
+      try { e.main.bringToFront(); } catch(err){}
       if (!firstSel) firstSel = e;
-    } else {
-      e.main.setStyle({weight: 4, opacity: 0.95});
-      e.glow.setStyle({opacity: 0.0});
     }
   });
   if (firstSel) {

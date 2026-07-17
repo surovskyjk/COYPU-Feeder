@@ -105,6 +105,9 @@ class PIAlignment:
     # Human-readable notes from the last rebuild (radius clamps, skips, …),
     # surfaced in the GUI log panel.
     log:            list = field(default_factory=list)
+    # Deviation stats from the last rebuild (compute_deviation_stats result);
+    # reused by the GUI so a rebuild costs exactly one pass.
+    last_stats:     dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +132,99 @@ _MIN_ARC_DEFLECTION_RAD = math.radians(5.0)
 # Candidate evaluation  (unchanged public API)
 # ---------------------------------------------------------------------------
 
+def _dists_to_element_vec(xy: np.ndarray, el: dict) -> np.ndarray:
+    """
+    Vectorised twin of `_point_to_element_dist`: distance from EVERY point in
+    `xy` (P, 2) to one element, returned as a (P,) array. Same maths, same
+    tie-breaking — just without the per-point Python call.
+    """
+    etype = el.get("type", "Line")
+    if etype == "Arc":
+        c = np.asarray(el["center"], dtype=float)
+        r = float(el.get("radius", 1.0))
+        return np.abs(np.hypot(xy[:, 0] - c[0], xy[:, 1] - c[1]) - r)
+
+    # Line / Spiral / unknown → clamped projection onto the chord
+    start = np.asarray(el.get("start", [0.0, 0.0]), dtype=float)
+    end   = np.asarray(el.get("end",   [0.0, 0.0]), dtype=float)
+    seg   = end - start
+    seg_len = float(np.hypot(seg[0], seg[1]))
+    d0 = xy - start
+    if seg_len < 1e-9:
+        return np.hypot(d0[:, 0], d0[:, 1])
+    t = (d0 @ seg) / (seg_len * seg_len)
+    np.clip(t, 0.0, 1.0, out=t)
+    px = start[0] + t * seg[0]
+    py = start[1] + t * seg[1]
+    return np.hypot(xy[:, 0] - px, xy[:, 1] - py)
+
+
+def compute_deviation_stats(elements: list[dict], xy: np.ndarray) -> dict:
+    """
+    One exact, vectorised pass: for every OSM point find its nearest element
+    and that distance. Replaces the two former O(points × elements) Python
+    loops (`evaluate_candidate` and `annotate_element_deviations`), which
+    together dominated every interactive rebuild.
+
+    Returns
+    -------
+    {"max_deviation": float, "rmse": float,
+     "per_element": [(max_dev, mean_dev, n_points), ...]}   # one per element
+    """
+    n_el = len(elements)
+    empty = {"max_deviation": 0.0, "rmse": 0.0,
+             "per_element": [(0.0, 0.0, 0)] * n_el}
+    if n_el == 0 or xy is None or len(xy) == 0:
+        return empty
+
+    pts = np.asarray(xy, dtype=float)
+    best   = np.full(len(pts), np.inf)
+    best_i = np.zeros(len(pts), dtype=np.int64)
+    for i, el in enumerate(elements):
+        d = _dists_to_element_vec(pts, el)
+        upd = d < best              # strict '<' → first element wins ties
+        if upd.any():
+            best[upd]   = d[upd]
+            best_i[upd] = i
+
+    ok = np.isfinite(best)
+    if not ok.any():
+        return empty
+    b  = best[ok]
+    bi = best_i[ok]
+
+    sums   = np.bincount(bi, weights=b, minlength=n_el)
+    counts = np.bincount(bi, minlength=n_el)
+    maxs   = np.zeros(n_el)
+    np.maximum.at(maxs, bi, b)
+
+    per_element = [
+        (float(maxs[i]),
+         float(sums[i] / counts[i]) if counts[i] else 0.0,
+         int(counts[i]))
+        for i in range(n_el)
+    ]
+    return {
+        "max_deviation": float(b.max()),
+        "rmse":          float(math.sqrt(float(np.mean(b * b)))),
+        "per_element":   per_element,
+    }
+
+
+def metrics_from_stats(stats: dict, elements: list[dict]) -> dict:
+    """Assemble the public metrics dict from a `compute_deviation_stats` result."""
+    try:
+        jj_rad = _max_heading_jump_rad(elements)
+    except Exception:
+        jj_rad = 0.0
+    return {
+        "max_deviation":        float(stats.get("max_deviation", 0.0)),
+        "rmse":                 float(stats.get("rmse", 0.0)),
+        "n_elements":           len(elements),
+        "max_heading_jump_deg": float(math.degrees(jj_rad)),
+    }
+
+
 def evaluate_candidate(
     elements:      list[dict],
     xy:            np.ndarray,
@@ -138,44 +234,17 @@ def evaluate_candidate(
     """
     Compute quality metrics for a list of fitted elements vs the OSM polyline.
 
-    Returns dict with keys: max_deviation (float), rmse (float), n_elements (int)
+    Per-OSM-point perpendicular distance to the *nearest* fitted element.
+    Chainage-free matching tolerates spiral insertion (which shifts downstream
+    stations relative to the original OSM chainages), hence `chainages` and
+    `check_interval` are accepted for API compatibility but not needed.
+
+    Returns dict with keys: max_deviation, rmse, n_elements, max_heading_jump_deg
     """
-    from geometry.alignment import max_deviation_element
-
-    if not elements or len(xy) < 2:
-        return {"max_deviation": 0.0, "rmse": 0.0, "n_elements": len(elements)}
-
-    max_dev = 0.0
-    sq_sum  = 0.0
-    sq_cnt  = 0
-
-    # Per-OSM-point perpendicular distance to the *nearest* fitted element.
-    # Chainage-free matching tolerates spiral insertion (which shifts
-    # downstream stations relative to the original OSM chainages).
-    for pt in xy:
-        min_dist = float("inf")
-        for el in elements:
-            d = _point_to_element_dist(pt, el)
-            if d < min_dist:
-                min_dist = d
-        if math.isfinite(min_dist):
-            if min_dist > max_dev:
-                max_dev = min_dist
-            sq_sum += min_dist * min_dist
-            sq_cnt += 1
-
-    rmse = math.sqrt(sq_sum / sq_cnt) if sq_cnt > 0 else 0.0
-    # Continuity sanity: max heading mismatch across element junctions.
-    try:
-        jj_rad = _max_heading_jump_rad(elements)
-    except Exception:
-        jj_rad = 0.0
-    return {
-        "max_deviation":        float(max_dev),
-        "rmse":                 float(rmse),
-        "n_elements":           len(elements),
-        "max_heading_jump_deg": float(math.degrees(jj_rad)),
-    }
+    if not elements or xy is None or len(xy) < 2:
+        return {"max_deviation": 0.0, "rmse": 0.0, "n_elements": len(elements),
+                "max_heading_jump_deg": 0.0}
+    return metrics_from_stats(compute_deviation_stats(elements, xy), elements)
 
 
 def _point_to_element_dist(pt: np.ndarray, el: dict) -> float:
@@ -3466,44 +3535,36 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
         e["sta_start"] = sta
         sta += e.get("length", 0.0)
     _assign_element_ids(elements)
-    annotate_element_deviations(elements, xy)
+    # Single deviation pass; kept on the model so the GUI can reuse it
+    # instead of running a second (identical) evaluation.
+    model.last_stats = annotate_element_deviations(elements, xy) or {}
 
     model.elements = elements
     return elements
 
 
-def annotate_element_deviations(elements: list[dict], xy: np.ndarray) -> None:
+def annotate_element_deviations(elements: list[dict], xy: np.ndarray,
+                                stats: dict | None = None) -> dict | None:
     """
-    Attach per-element deviation statistics (_max_dev / _mean_dev, metres)
-    by assigning every OSM point to its nearest element. Used by the map
-    hover popup.
+    Attach per-element deviation statistics (_max_dev / _mean_dev, metres) by
+    assigning every OSM point to its nearest element. Used by the map hover
+    popup and by the Consolidate step's tolerance check.
 
-    For very large alignments the OSM points are stride-subsampled so each
-    interactive rebuild stays fast (stats are indicative, not exhaustive).
+    Pass a precomputed `stats` (from `compute_deviation_stats`) to reuse a
+    pass that has already been made; otherwise one is computed here. Returns
+    the stats so callers can reuse them again.
     """
     if not elements or xy is None or len(xy) == 0:
-        return
-    budget = 200_000                       # ~ point-element distance checks
-    stride = max(1, (len(xy) * len(elements)) // budget)
-    if stride > 1:
-        xy = xy[::stride]
-    n = len(elements)
-    sums   = [0.0] * n
-    counts = [0]   * n
-    maxs   = [0.0] * n
-    for pt in xy:
-        best, bi = float("inf"), -1
-        for i, el in enumerate(elements):
-            d = _point_to_element_dist(pt, el)
-            if d < best:
-                best, bi = d, i
-        if bi >= 0 and math.isfinite(best):
-            sums[bi]   += best
-            counts[bi] += 1
-            maxs[bi]    = max(maxs[bi], best)
+        return stats
+    if stats is None:
+        stats = compute_deviation_stats(elements, xy)
+    per = stats.get("per_element") or []
     for i, el in enumerate(elements):
-        el["_max_dev"]  = maxs[i]
-        el["_mean_dev"] = (sums[i] / counts[i]) if counts[i] else 0.0
+        if i < len(per):
+            el["_max_dev"], el["_mean_dev"] = per[i][0], per[i][1]
+        else:
+            el["_max_dev"] = el["_mean_dev"] = 0.0
+    return stats
 
 
 def _assign_element_ids(elements: list[dict]) -> None:

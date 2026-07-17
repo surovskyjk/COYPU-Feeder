@@ -184,7 +184,64 @@ class ElementTableDock(QWidget):
                                 | Qt.AlignmentFlag.AlignVCenter)
         return it
 
+    def _displayed_ids(self) -> list:
+        """element_id of every currently displayed row (incl. omitted-PI rows)."""
+        out = []
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, COL_ID)
+            out.append(it.text() if it is not None else None)
+        return out
+
+    def _expected_ids(self) -> list:
+        """The ids _populate() would produce for the current model/elements."""
+        out = [el.get("element_id", f"#{i}") for i, el in enumerate(self._elements)]
+        if self._model is not None:
+            out += [f"PI {p.index}" for p in self._model.pis if p.omitted]
+        return out
+
+    def _update_in_place(self) -> bool:
+        """
+        Fast path: the row structure is unchanged (the usual case for radius /
+        spiral-length edits — ids only change on merges and omits), so just
+        refresh the value cells instead of tearing down and recreating ~6 300
+        Qt objects (items + per-row buttons).
+        """
+        if self._displayed_ids() != self._expected_ids():
+            return False
+        self._populating = True
+        self._table.setUpdatesEnabled(False)
+        try:
+            for i, el in enumerate(self._elements):
+                et     = el.get("type", "?")
+                sta    = float(el.get("sta_start", 0.0))
+                length = float(el.get("length", 0.0))
+                self._table.item(i, COL_STA).setText(f"{sta/1000.0:.3f}")
+                self._table.item(i, COL_LEN).setText(f"{length:.2f}")
+                if et == "Arc":
+                    self._table.item(i, COL_R).setText(
+                        f"{float(el.get('radius', 0.0)):.1f}")
+                    defl = el.get("_deflection")
+                    self._table.item(i, COL_DEFL).setText(
+                        f"{math.degrees(defl):+.2f}" if defl is not None else "—")
+                elif et == "Spiral":
+                    r_fin = self._spiral_R(el)
+                    self._table.item(i, COL_R).setText(
+                        f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞")
+                    self._table.item(i, COL_A).setText(
+                        f"{float(el.get('clothoid_A', 0.0)):.1f}")
+                    self._table.item(i, COL_SL).setText(f"{length:.1f}")
+        except Exception:
+            return False
+        finally:
+            self._populating = False
+            self._table.setUpdatesEnabled(True)
+        return True
+
     def _populate(self):
+        # Fast path first — keeps interactive edits snappy on long alignments.
+        if self._table.rowCount() and self._update_in_place():
+            return
+
         # Preserve the current selection (blue rows) across the repopulation
         # that follows every value edit / rebuild.
         prev_sel: set = set()
@@ -196,6 +253,7 @@ class ElementTableDock(QWidget):
                     prev_sel.add(it.text())
 
         self._populating = True
+        self._table.setUpdatesEnabled(False)
         try:
             self._table.setRowCount(0)
             editable = self._model is not None
@@ -268,6 +326,7 @@ class ElementTableDock(QWidget):
                     self._table.setCellWidget(row, COL_ACT, self._wrap_buttons([btn]))
         finally:
             self._populating = False
+            self._table.setUpdatesEnabled(True)
 
         # Restore the previous selection so edited rows stay highlighted
         if prev_sel:
@@ -449,7 +508,7 @@ class ElementTableDock(QWidget):
             QMessageBox.warning(self, "Cannot merge spirals", msg)
             return
         self.log_message.emit(f"Merge spirals PI {pi_a}+{pi_b}: {msg}", "ok")
-        self._rebuild()
+        self._rebuild(regenerate=False)   # merge already rebuilt the geometry
 
     def _undo_merge(self, pi_a: int):
         from geometry.candidates import undo_merge
@@ -457,17 +516,35 @@ class ElementTableDock(QWidget):
             return
         undo_merge(self._model, pi_a)
         self.log_message.emit(f"Merge at PI {pi_a} undone.", "info")
-        self._rebuild()
+        self._rebuild(regenerate=False)   # undo already rebuilt the geometry
 
     # ------------------------------------------------------------------
     # Rebuild + metrics
     # ------------------------------------------------------------------
 
-    def _rebuild(self):
-        from geometry.candidates import rebuild_from_pi_model, evaluate_candidate
-        els = rebuild_from_pi_model(self._model)
-        metrics = evaluate_candidate(
-            els, self._model.xy_ref, self._model.chainages_ref, self._check_interval)
+    def _rebuild(self, regenerate: bool = True):
+        """
+        Refresh table + map from the model.
+
+        `regenerate=False` is used by the merge/undo handlers: those functions
+        already rebuilt the geometry internally, so re-running
+        `rebuild_from_pi_model` here would just repeat a full (expensive)
+        reconstruction of the whole alignment.
+        """
+        from geometry.candidates import (rebuild_from_pi_model,
+                                         metrics_from_stats, evaluate_candidate)
+        if regenerate:
+            els = rebuild_from_pi_model(self._model)
+        else:
+            els = self._model.elements
+        # The rebuild already made exactly one deviation pass — reuse it.
+        stats = getattr(self._model, "last_stats", None)
+        if stats:
+            metrics = metrics_from_stats(stats, els)
+        else:
+            metrics = evaluate_candidate(
+                els, self._model.xy_ref, self._model.chainages_ref,
+                self._check_interval)
         self._elements = els
         self._populate()
         self._refresh_metrics(metrics)
@@ -535,7 +612,7 @@ class ElementTableDock(QWidget):
             QMessageBox.warning(self, "Cannot merge PI range", msg)
             return
         self.log_message.emit(msg, "ok")
-        self._rebuild()
+        self._rebuild(regenerate=False)   # merge_pi_range already rebuilt
 
     def _on_selection(self):
         rows = self._table.selectionModel().selectedRows()
