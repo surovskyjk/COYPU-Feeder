@@ -24,9 +24,14 @@ from .steps.step2_section import Step2Section
 from .steps.step3_configure import Step3Configure
 from .steps.step4_candidates import Step4Candidates
 from .steps.step5_refine        import Step5Refine
+from .steps.step6_consolidate   import Step6Consolidate
 from .steps.step6_stations      import Step6Stations
 from .steps.step6_crosssection  import Step6CrossSection
 from .steps.step7_export        import Step7Export
+
+# Stack indices — the UI numbers them 1-9
+S_FIND, S_SELECT, S_CONFIG, S_CANDIDATES, S_REFINE, \
+    S_CONSOLIDATE, S_STATIONS, S_CROSSSEC, S_EXPORT = range(9)
 
 # Maximum map-view span (km) allowed for "search in view"
 _MAX_VIEW_KM = 20.0
@@ -44,11 +49,19 @@ class App(QMainWindow):
         self._settings: dict        = {}
         self._bbox_workers: list    = []
         self._selected_candidate    = None
-        self._final_elements: list  = []
+        # App owns the working alignment: every step reads these, and Refine /
+        # Consolidate edit the SAME PI model — so edits remain possible at any
+        # point, including after consolidating or exporting.
+        self._pi_model              = None    # PIAlignment | None (Level 1 → None)
+        self._elements: list        = []
+        self._level: str            = ""
         self._stations: list        = []
         self._xy_list: list         = []
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
+        self._current_step: int     = 0
+        self._done_steps: set       = set()
+        self._stale: set            = set()
 
         self._qsettings = QSettings("COYPU", "COYPU-Feeder")
         self._prefs = self._load_prefs()
@@ -230,18 +243,20 @@ class App(QMainWindow):
         self.step3              = Step3Configure()
         self.step4_candidates   = Step4Candidates()
         self.step5_refine       = Step5Refine()
-        self.step6_stations     = Step6Stations()
-        self.step6_crosssec     = Step6CrossSection()   # step 7 in the UI
-        self.step7_export       = Step7Export()         # step 8 in the UI
+        self.step6_consolidate  = Step6Consolidate()    # step 6 in the UI
+        self.step6_stations     = Step6Stations()       # step 7 in the UI
+        self.step6_crosssec     = Step6CrossSection()   # step 8 in the UI
+        self.step7_export       = Step7Export()         # step 9 in the UI
 
-        self.stack.addWidget(self.step1)            # 0
-        self.stack.addWidget(self.step2)            # 1
-        self.stack.addWidget(self.step3)            # 2
-        self.stack.addWidget(self.step4_candidates) # 3
-        self.stack.addWidget(self.step5_refine)     # 4
-        self.stack.addWidget(self.step6_stations)   # 5
-        self.stack.addWidget(self.step6_crosssec)   # 6
-        self.stack.addWidget(self.step7_export)     # 7
+        self.stack.addWidget(self.step1)              # S_FIND
+        self.stack.addWidget(self.step2)              # S_SELECT
+        self.stack.addWidget(self.step3)              # S_CONFIG
+        self.stack.addWidget(self.step4_candidates)   # S_CANDIDATES
+        self.stack.addWidget(self.step5_refine)       # S_REFINE
+        self.stack.addWidget(self.step6_consolidate)  # S_CONSOLIDATE
+        self.stack.addWidget(self.step6_stations)     # S_STATIONS
+        self.stack.addWidget(self.step6_crosssec)     # S_CROSSSEC
+        self.stack.addWidget(self.step7_export)       # S_EXPORT
 
         h.addWidget(self.stack)
         self.statusBar().showMessage(
@@ -272,11 +287,11 @@ class App(QMainWindow):
         self.step2.highlight_changed.connect(self._on_highlight_changed)
         self.step2.fit_to_tracks_requested.connect(self._on_fit_to_tracks)
         self.step2.section_confirmed.connect(self._on_section_confirmed)
-        self.step2.back_requested.connect(lambda: self._goto_step(0))
+        self.step2.back_requested.connect(lambda: self._goto_step(S_FIND))
 
         # Step 3 → config confirmed / back
         self.step3.config_confirmed.connect(self._on_config_confirmed)
-        self.step3.back_requested.connect(lambda: self._goto_step(1))
+        self.step3.back_requested.connect(lambda: self._goto_step(S_SELECT))
 
         # Step 4 (candidates) → map update + selection + hover emphasis + back
         self.step4_candidates.candidate_map_update.connect(self._on_candidate_map_update)
@@ -299,20 +314,31 @@ class App(QMainWindow):
         self.map_widget.element_clicked.connect(self.element_table.select_element)
 
         # Step 6 (cross-section) → back / done / map overlay
-        # Step 6 (stations) → map markers / click mode / navigation
+        # Step 6 (consolidate) → model edits / navigation / map highlight
+        self.step6_consolidate.model_changed.connect(
+            self._on_consolidation_model_changed)
+        self.step6_consolidate.consolidation_done.connect(
+            self._on_consolidation_done)
+        self.step6_consolidate.back_requested.connect(
+            lambda: self._goto_step(S_REFINE))
+        self.step6_consolidate.log_message.connect(self.log_panel.log)
+        self.step6_consolidate.highlight_span.connect(
+            self.map_widget.highlight_elements)
+
+        # Step 7 (stations) → map markers / click mode / navigation
         self.step6_stations.stations_changed.connect(self._on_stations_changed)
         self.step6_stations.map_click_mode.connect(
             self.map_widget.set_station_click_mode)
         self.step6_stations.stations_done.connect(self._on_stations_done)
-        self.step6_stations.back_requested.connect(lambda: self._goto_step(4))
+        self.step6_stations.back_requested.connect(lambda: self._goto_step(S_CONSOLIDATE))
         self.map_widget.map_clicked.connect(self.step6_stations.on_map_clicked)
 
-        self.step6_crosssec.back_requested.connect(lambda: self._goto_step(5))
+        self.step6_crosssec.back_requested.connect(lambda: self._goto_step(S_STATIONS))
         self.step6_crosssec.analysis_done.connect(self._on_analysis_done)
         self.step6_crosssec.cross_section_ready.connect(self._on_cross_section_ready)
 
         # Step 7 (export) → back
-        self.step7_export.back_requested.connect(lambda: self._goto_step(6))
+        self.step7_export.back_requested.connect(lambda: self._goto_step(S_CROSSSEC))
 
         # Step 7 (export) → alignment display / fit / export / restart
         self.step7_export.osm_track_ready.connect(self._on_osm_track_ready)
@@ -349,49 +375,124 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     _STEP_TIPS = {
-        0: ("Step 1 — Find Railway", [
+        S_FIND: ("Step 1 — Find Railway", [
             "Search by line number, name or OSM relation ID,",
             "or zoom the map and use 'Lines in View'.",
         ]),
-        1: ("Step 2 — Select Section", [
+        S_SELECT: ("Step 2 — Select Section", [
             "Tick the tracks that belong to your section;",
             "click a row to highlight it on the map.",
         ]),
-        2: ("Step 3 — Configure", [
+        S_CONFIG: ("Step 3 — Configure", [
             "Max deviation = PI extraction tolerance;",
             "spiral length applies to Level 3.",
         ]),
-        3: ("Step 4 — Candidates", [
+        S_CANDIDATES: ("Step 4 — Candidates", [
             "Three levels are computed; hover a card to emphasise",
             "its line on the map, then Select one.",
         ]),
-        4: ("Step 5 — Refine", [
+        S_REFINE: ("Step 5 — Refine", [
             "Edit Radius / Spiral L in the table; the map updates live.",
             "Click elements on the map to select rows; Ctrl+click multi-selects.",
             "Select first & last tangent → 'Merge PI range → single curve'.",
             "Short straights between curves offer 'Merge spirals'.",
             "🗺 'Show alignment' re-draws everything after a map reload.",
         ]),
-        5: ("Step 6 — Stations", [
+        S_CONSOLIDATE: ("Step 6 — Consolidate", [
+            "Scan for runs of same-direction curves joined by short straights",
+            "and replace each run with one transition–circular–transition curve.",
+            "Only runs within the deviation limit are offered; Undo restores.",
+        ]),
+        S_STATIONS: ("Step 7 — Stations", [
             "⚡ Auto-detect stations from OSM, 📍 place on map, or add rows.",
             "The CSV (Station,Dwell Time,Name) is written next to the LandXML.",
         ]),
-        6: ("Step 7 — Cross-Section", [
+        S_CROSSSEC: ("Step 8 — Cross-Section", [
             "Optional deviation profile of the fitted alignment vs OSM.",
         ]),
-        7: ("Step 8 — Export", [
+        S_EXPORT: ("Step 9 — Export", [
             "Pick the output CRS and file; 👁 Preview shows the LandXML first.",
         ]),
     }
 
+    # Steps that consume the alignment and must be refreshed after an edit
+    _DOWNSTREAM = (S_STATIONS, S_CROSSSEC, S_EXPORT)
+
+    # ------------------------------------------------------------------
+    # Prerequisites — steps suggest an order, they do not gate it
+    # ------------------------------------------------------------------
+
+    def _step_reasons(self) -> dict:
+        """{step_index: why it is locked}. Absent key ⇒ available."""
+        r = {}
+        if not self._tracks:
+            for i in (S_SELECT, S_CONFIG, S_CANDIDATES):
+                r[i] = "Find and fetch a railway first (step 1)."
+        elif not self._selected_tracks:
+            for i in (S_CONFIG, S_CANDIDATES):
+                r[i] = "Select at least one track (step 2)."
+        elif not self._settings:
+            r[S_CANDIDATES] = "Confirm the geometry settings (step 3)."
+        if not self._elements:
+            for i in (S_REFINE,) + self._DOWNSTREAM:
+                r[i] = "Select a candidate level first (step 4)."
+            r[S_CONSOLIDATE] = "Select a candidate level first (step 4)."
+        elif self._pi_model is None:
+            r[S_CONSOLIDATE] = ("Level 1 (raw OSM polyline) has no editable "
+                                "curves — pick Level 2 or 3 to consolidate.")
+        return r
+
+    def _refresh_nav(self):
+        reasons = self._step_reasons()
+        available = {i for i in range(9) if i not in reasons}
+        done = set(self._done_steps) & available
+        suggested = None
+        for i in range(self._current_step + 1, 9):
+            if i in available:
+                suggested = i
+                break
+        self.sidebar.set_states(available, done, suggested, reasons)
+
     def _goto_step(self, idx: int):
+        # Refresh a downstream step from the current alignment if it went stale
+        if idx in self._DOWNSTREAM and idx in self._stale:
+            self._refresh_downstream(idx)
+        self._current_step = idx
+        self._done_steps.add(idx)
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
-        # Element table dock is a Step-5 (Refine) feature
-        self.element_table.setVisible(idx == 4)
+        # The element table belongs to the alignment-editing steps
+        self.element_table.setVisible(idx in (S_REFINE, S_CONSOLIDATE))
+        self._refresh_nav()
         tip = self._STEP_TIPS.get(idx)
         if tip:
             self.log_panel.log_step(tip[0], tip[1])
+
+    def _mark_stale(self):
+        """The alignment changed — downstream steps must re-read it."""
+        self._stale.update(self._DOWNSTREAM)
+
+    def _refresh_downstream(self, idx: int):
+        """Re-prepare a stale downstream step from the current elements."""
+        try:
+            if idx == S_STATIONS:
+                # Station chainages are re-snapped to the new geometry
+                self.step6_stations.prepare(self._elements,
+                                            self._selected_tracks, self._work_epsg)
+            elif idx == S_CROSSSEC:
+                self.step6_crosssec.prepare(self._elements, self._work_epsg)
+            elif idx == S_EXPORT:
+                self.step7_export.prepare(
+                    [self._elements], self._selected_tracks, self._settings,
+                    self._work_epsg, self._xy_list,
+                    stations=self._stations,
+                )
+            self._stale.discard(idx)
+            self.log_panel.log(
+                f"Step {idx + 1} refreshed from the edited alignment "
+                f"({len(self._elements)} elements).", "info")
+        except Exception as exc:
+            self.log_panel.log(f"⚠ Could not refresh step {idx + 1}: {exc}", "warn")
 
     # ------------------------------------------------------------------
     # Step 2 map interactions
@@ -510,7 +611,7 @@ class App(QMainWindow):
         n = len(results)
         status = f"Found {n} railway line{'s' if n != 1 else ''} in current view."
         self.step1.show_view_results(results, status)
-        self._goto_step(0)
+        self._goto_step(S_FIND)
         self.statusBar().showMessage(status + " Click a result to load it.")
 
     def _on_view_search_failed(self, error: str):
@@ -550,7 +651,7 @@ class App(QMainWindow):
             f"✓ Loaded '{name}' — {n} track{'s' if n != 1 else ''} drawn on map. "
             "Select tracks and click Next."
         )
-        self._goto_step(1)
+        self._goto_step(S_SELECT)
 
     # ------------------------------------------------------------------
     # Section confirmed
@@ -561,7 +662,7 @@ class App(QMainWindow):
         self.statusBar().showMessage(
             f"{len(selected_tracks)} track(s) selected. Configure export settings."
         )
-        self._goto_step(2)
+        self._goto_step(S_CONFIG)
 
     # ------------------------------------------------------------------
     # Config confirmed → project coordinates + launch candidate worker
@@ -606,7 +707,7 @@ class App(QMainWindow):
         self.statusBar().showMessage(
             "Projecting coordinates… Running candidate algorithms."
         )
-        self._goto_step(3)
+        self._goto_step(S_CANDIDATES)
 
     # ------------------------------------------------------------------
     # Candidate map overlay update
@@ -632,12 +733,20 @@ class App(QMainWindow):
 
     def _on_candidate_selected(self, candidate):
         self._selected_candidate = candidate
+        # App takes ownership of the working alignment: the PI model chosen
+        # here is the one Refine AND Consolidate edit for the rest of the
+        # session, so edits stay possible after any later step.
+        self._pi_model = getattr(candidate, "pi_model", None)
+        self._elements = list(getattr(candidate, "elements", []) or [])
+        self._level    = getattr(candidate, "algorithm_id", "")
+        self._mark_stale()
         # Clear candidate overlays; Step 5 will show the chosen one as
         # per-element coloured alignment with hover tooltips.
         self.map_widget.clear_candidates()
         xy        = self._xy_list[0]        if self._xy_list        else None
         chainages = self._chainages_list[0] if self._chainages_list else None
         self.step5_refine.prepare(candidate, xy, chainages, self._settings)
+        self.step6_consolidate.prepare(self._pi_model)
 
         # Always draw the merged red polyline first so the user is guaranteed
         # to see *something* even if the segmented call has any issue. Then
@@ -658,26 +767,25 @@ class App(QMainWindow):
             self.map_widget.show_alignment_segmented(segments)
 
         # Element table dock (editable when the candidate carries a PI model)
-        pi_model = getattr(candidate, "pi_model", None)
         self.element_table.prepare(
-            pi_model, getattr(candidate, "elements", []),
+            self._pi_model, self._elements,
             check_interval=self._settings.get("check_interval", 5.0),
         )
-        self._show_pi_overlay(pi_model)
+        self._show_pi_overlay(self._pi_model)
 
         self.statusBar().showMessage(
             f"Candidate '{getattr(candidate, 'label', '')}' selected — "
             f"{n_line} Lines · {n_arc} Arcs · {n_spiral} Spirals shown. "
             "Hover any segment for parameters."
         )
-        self._goto_step(4)
+        self._goto_step(S_REFINE)
 
     def _on_candidates_back(self):
         """Go back from Candidates to Configure — clear overlays."""
         self.map_widget.clear_candidates()
         self.map_widget.clear_alignment()
         self.map_widget.clear_osm_reference()
-        self._goto_step(2)
+        self._goto_step(S_CONFIG)
 
     def _render_elements_on_map(self, elements: list, fit_view: bool = False):
         """Render an element chain as the segmented alignment overlay.
@@ -770,6 +878,11 @@ class App(QMainWindow):
 
     def _on_elements_rebuilt(self, elements: list, metrics: dict):
         """Element table edited → refresh Step 5, map, PI overlay and log."""
+        # App owns the alignment; any edit invalidates the downstream steps,
+        # which re-read it when the user next opens them.
+        self._elements = list(elements)
+        self._mark_stale()
+        self._refresh_nav()
         self.step5_refine.set_elements(elements, metrics)
         self._render_elements_on_map(elements)
         self._show_pi_overlay(self.element_table._model)
@@ -790,23 +903,18 @@ class App(QMainWindow):
 
     def _on_show_alignment_clicked(self):
         """Re-draw the edited alignment + PI overlay (e.g. after map reload)."""
-        elements = self.element_table.current_elements()
-        if not elements and self._selected_candidate is not None:
-            elements = getattr(self._selected_candidate, "elements", [])
-        if not elements:
-            elements = self._final_elements
+        elements = self._elements or self.element_table.current_elements()
         if not elements:
             self.log_panel.log("No alignment to show yet.", "warn")
             return
         self._render_elements_on_map(elements, fit_view=True)
-        self._show_pi_overlay(self.element_table._model)
+        self._show_pi_overlay(self._pi_model)
         self.log_panel.log("Alignment re-drawn on the map.", "ok")
 
     def _on_refine_back(self):
         """Go back from Refine to Candidates — restore all candidate overlays."""
         self.map_widget.clear_alignment()
         self.map_widget.clear_pi_overlay()
-        self.element_table.clear()
         # Re-emit candidate overlays if available
         candidates = [c for c in self.step4_candidates._candidates.values()
                       if c.geo_wgs84]
@@ -817,25 +925,55 @@ class App(QMainWindow):
                 for c in candidates
             ]
             self.map_widget.show_candidates(payload)
-        self._goto_step(3)
+        self._goto_step(S_CANDIDATES)
 
     # ------------------------------------------------------------------
-    # Refinement done → go to Step 6 (Stations)
+    # Refinement accepted → suggest Consolidate (step 6)
     # ------------------------------------------------------------------
 
     def _on_refinement_done(self, elements: list):
-        self._final_elements = elements
-        self.map_widget.clear_pi_overlay()   # editing aid — Step 5 only
-        self.step6_stations.prepare(elements, self._selected_tracks,
-                                    self._work_epsg)
+        self._elements = elements
+        self._mark_stale()
+        self.step6_consolidate.prepare(self._pi_model)
         self.statusBar().showMessage(
-            "Refinement complete. Add stations/stops (auto-detect, map click "
-            "or table), then continue."
+            "Refinement accepted. Consolidate runs of same-direction curves, "
+            "or skip ahead — you can return and edit at any time."
         )
-        self._goto_step(5)
+        self._goto_step(S_CONSOLIDATE)
 
     # ------------------------------------------------------------------
-    # Stations done → go to Step 7 (Cross-section)
+    # Consolidate (step 6)
+    # ------------------------------------------------------------------
+
+    def _on_consolidation_model_changed(self):
+        """Consolidation applied/undone — refresh table, map and downstream."""
+        if self._pi_model is None:
+            return
+        from geometry.candidates import metrics_from_stats
+        self._elements = list(self._pi_model.elements)
+        metrics = metrics_from_stats(
+            getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
+        # Rebind the element table to the (structurally changed) model
+        self.element_table.prepare(
+            self._pi_model, self._elements,
+            check_interval=self._settings.get("check_interval", 5.0))
+        self.step5_refine.set_elements(self._elements, metrics)
+        self._render_elements_on_map(self._elements)
+        self._show_pi_overlay(self._pi_model)
+        self._mark_stale()
+        self._refresh_nav()
+        self.statusBar().showMessage(
+            f"Alignment now has {len(self._elements)} elements "
+            f"(max dev {metrics.get('max_deviation', 0.0):.2f} m).")
+
+    def _on_consolidation_done(self, elements: list):
+        if elements:
+            self._elements = elements
+        self._mark_stale()
+        self._goto_step(S_STATIONS)
+
+    # ------------------------------------------------------------------
+    # Stations done → go to Cross-section
     # ------------------------------------------------------------------
 
     def _on_stations_changed(self, stations: list):
@@ -851,25 +989,26 @@ class App(QMainWindow):
     def _on_stations_done(self, stations: list):
         self._stations = stations
         self.map_widget.set_station_click_mode(False)
-        self.step6_crosssec.prepare(self._final_elements, self._work_epsg)
+        self.step6_crosssec.prepare(self._elements, self._work_epsg)
+        self._stale.discard(S_CROSSSEC)
         self.statusBar().showMessage(
             f"{len(stations)} station(s) recorded. Run cross-section "
             "analysis or skip to export."
         )
-        self._goto_step(6)
+        self._goto_step(S_CROSSSEC)
 
     # ------------------------------------------------------------------
-    # Cross-section analysis done → go to Step 8 (Export)
+    # Cross-section analysis done → go to Export
     # ------------------------------------------------------------------
 
     def _on_analysis_done(self, results: list):
         # results may be [] if the step was skipped
-        elements_list = [self._final_elements]
         self.step7_export.prepare(
-            elements_list, self._selected_tracks, self._settings,
+            [self._elements], self._selected_tracks, self._settings,
             self._work_epsg, self._xy_list,
-            stations=getattr(self, "_stations", []),
+            stations=self._stations,
         )
+        self._stale.discard(S_EXPORT)
         n = len(results)
         msg = (
             f"Cross-section: {n} stations analysed. Choose a file and export."
@@ -877,7 +1016,7 @@ class App(QMainWindow):
             "Skipped cross-section analysis. Choose a file and export."
         )
         self.statusBar().showMessage(msg)
-        self._goto_step(7)
+        self._goto_step(S_EXPORT)
 
     def _on_cross_section_ready(self, left_pts: list, right_pts: list):
         """Show coloured cross-section overlays on the map."""
@@ -902,15 +1041,20 @@ class App(QMainWindow):
         self._selected_tracks    = []
         self._settings           = {}
         self._selected_candidate = None
-        self._final_elements     = []
+        self._pi_model           = None
+        self._elements           = []
+        self._level              = ""
         self._stations           = []
         self._xy_list            = []
         self._chainages_list     = []
+        self._done_steps         = set()
+        self._stale              = set()
         self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
         self.element_table.clear()
         self.step6_stations.reset()
+        self.step6_consolidate.prepare(None)
         self.sidebar.reset()
-        self._goto_step(0)
+        self._goto_step(S_FIND)
         self.statusBar().showMessage(
             "Ready. Search for a new railway or use 'Lines in View'."
         )

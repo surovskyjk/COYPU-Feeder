@@ -19,6 +19,7 @@ Algorithm IDs
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 from dataclasses import dataclass, field
@@ -3984,6 +3985,145 @@ def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
         b.merged_with_prev = False
     rebuild_from_pi_model(model)
     return True, "Merge undone."
+
+
+# ---------------------------------------------------------------------------
+# Curve consolidation — merge runs of same-direction curves (Step "Consolidate")
+# ---------------------------------------------------------------------------
+
+def _curve_runs(model: "PIAlignment", max_straight_m: float) -> list[list[int]]:
+    """
+    Maximal runs of ≥2 consecutive curves that turn the SAME way and are
+    connected either directly (spiral→spiral) or by straights whose total
+    length is below `max_straight_m`.
+
+    Returns a list of PI-index lists, e.g. [[3, 4, 5], [9, 10]].
+    Generalises `_find_split_curve_pair` (adjacent pair, hardcoded 60 m).
+    """
+    # Walk the element chain: record each curve (its PI + rotation) and the
+    # straight length accumulated between consecutive curves.
+    seq: list[tuple[int, str]] = []          # (pi_index, rot) in order
+    gap_after: dict[int, float] = {}         # pi_index → straight length after it
+    last_pi: int | None = None
+    for e in model.elements:
+        pi = e.get("_pi")
+        if e.get("type") == "Arc" and pi is not None:
+            if not seq or seq[-1][0] != pi:
+                seq.append((pi, e.get("rot", "")))
+            last_pi = pi
+        elif e.get("type") == "Line" and last_pi is not None:
+            gap_after[last_pi] = gap_after.get(last_pi, 0.0) + float(e.get("length", 0.0))
+
+    runs: list[list[int]] = []
+    cur: list[int] = []
+    for i, (pi, rot) in enumerate(seq):
+        if not cur:
+            cur = [pi]
+            cur_rot = rot
+            continue
+        prev_pi = cur[-1]
+        same_dir = (rot == cur_rot)
+        close    = gap_after.get(prev_pi, 0.0) <= max_straight_m
+        adjacent = (pi == prev_pi + 1)
+        if same_dir and close and adjacent:
+            cur.append(pi)
+        else:
+            if len(cur) >= 2:
+                runs.append(cur)
+            cur = [pi]
+            cur_rot = rot
+    if len(cur) >= 2:
+        runs.append(cur)
+    return runs
+
+
+def _group_max_dev(model: "PIAlignment", pi_index: int) -> float:
+    """Largest OSM deviation of the curve built at `pi_index` (after a rebuild)."""
+    devs = [float(e.get("_max_dev", 0.0))
+            for e in model.elements if e.get("_pi") == pi_index]
+    return max(devs) if devs else float("inf")
+
+
+def find_consolidation_groups(
+    model:          "PIAlignment",
+    max_straight_m: float = 30.0,
+    max_dev_m:      float = 2.0,
+    progress_cb=None,
+) -> list[dict]:
+    """
+    Propose runs of same-direction curves that can be replaced by ONE curve.
+
+    Each run is trial-merged on a deep copy via `merge_pi_range` (which keeps
+    the outer tangents, puts the new PI at their intersection and reindexes);
+    the trial is accepted only if the resulting single curve stays within
+    `max_dev_m` of the OSM polyline.
+
+    Returns one dict per run:
+      {k_from, k_to, n_curves, radii_before, radius_after, max_dev, ok, reason}
+    Rejected runs are returned too (ok=False + reason) so the UI can show why.
+    """
+    runs = _curve_runs(model, max_straight_m)
+    out: list[dict] = []
+    for n_done, run in enumerate(runs, start=1):
+        if progress_cb:
+            progress_cb(f"Evaluating group {n_done}/{len(runs)} (PIs {run[0]}–{run[-1]})…")
+        k_from, k_to = run[0], run[-1]
+        radii_before = [
+            round(float(e["radius"]), 1)
+            for e in model.elements
+            if e.get("type") == "Arc" and e.get("_pi") in run
+        ]
+        rec = {
+            "k_from": k_from, "k_to": k_to, "n_curves": len(run),
+            "radii_before": radii_before, "radius_after": None,
+            "max_dev": None, "ok": False, "reason": "",
+        }
+        trial = copy.deepcopy(model)
+        ok, msg = merge_pi_range(trial, k_from, k_to)
+        if not ok:
+            rec["reason"] = msg
+            out.append(rec)
+            continue
+        arcs = [e for e in trial.elements
+                if e.get("type") == "Arc" and e.get("_pi") == k_from]
+        if not arcs:
+            rec["reason"] = "Merged curve could not be constructed."
+            out.append(rec)
+            continue
+        rec["radius_after"] = round(float(arcs[0]["radius"]), 1)
+        dev = _group_max_dev(trial, k_from)
+        rec["max_dev"] = round(dev, 3)
+        if dev <= max_dev_m:
+            rec["ok"] = True
+            rec["reason"] = "within tolerance"
+        else:
+            rec["reason"] = (f"merged curve deviates {dev:.2f} m "
+                             f"(limit {max_dev_m:.2f} m)")
+        out.append(rec)
+    return out
+
+
+def apply_consolidation(model: "PIAlignment", groups: list[dict]
+                        ) -> tuple[int, list[str]]:
+    """
+    Apply the accepted `groups` to `model`.
+
+    Applied **back-to-front**: `merge_pi_range` reindexes every PI after the
+    merged range, so working from the last group backwards keeps the earlier
+    groups' indices valid.
+
+    Returns (n_applied, messages).
+    """
+    msgs: list[str] = []
+    todo = sorted([g for g in groups if g.get("ok")],
+                  key=lambda g: g["k_from"], reverse=True)
+    applied = 0
+    for g in todo:
+        ok, msg = merge_pi_range(model, g["k_from"], g["k_to"])
+        msgs.append(f"PIs {g['k_from']}–{g['k_to']}: {msg}")
+        if ok:
+            applied += 1
+    return applied, msgs
 
 
 # ---------------------------------------------------------------------------
