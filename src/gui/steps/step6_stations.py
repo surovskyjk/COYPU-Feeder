@@ -160,6 +160,12 @@ class Step6Stations(QWidget):
         self._populate()
         self._status_lbl.setText("")
 
+    def set_stations(self, stations: list):
+        """Replace the station list (e.g. when a project is opened)."""
+        self._stations = list(stations or [])
+        self._sort_and_refresh()
+        self._status_lbl.setText(f"{len(self._stations)} station(s) loaded.")
+
     def on_map_clicked(self, lat: float, lon: float):
         """Forwarded from App when click mode is armed."""
         if not self._click_armed:

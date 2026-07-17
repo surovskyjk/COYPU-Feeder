@@ -62,6 +62,8 @@ class App(QMainWindow):
         self._current_step: int     = 0
         self._done_steps: set       = set()
         self._stale: set            = set()
+        self._project_path          = None
+        self._dirty                 = False
 
         self._qsettings = QSettings("COYPU", "COYPU-Feeder")
         self._prefs = self._load_prefs()
@@ -110,6 +112,33 @@ class App(QMainWindow):
 
     def _build_menu(self):
         mb = self.menuBar()
+
+        file_menu = mb.addMenu("&File")
+        new_act = QAction("New project", self)
+        new_act.setShortcut("Ctrl+N")
+        new_act.triggered.connect(self._on_new_project)
+        file_menu.addAction(new_act)
+        open_act = QAction("Open project…", self)
+        open_act.setShortcut("Ctrl+O")
+        open_act.triggered.connect(self._on_open_project)
+        file_menu.addAction(open_act)
+        file_menu.addSeparator()
+        save_act = QAction("Save project", self)
+        save_act.setShortcut("Ctrl+S")
+        save_act.triggered.connect(self._on_save_project)
+        file_menu.addAction(save_act)
+        saveas_act = QAction("Save project as…", self)
+        saveas_act.setShortcut("Ctrl+Shift+S")
+        saveas_act.triggered.connect(self._on_save_project_as)
+        file_menu.addAction(saveas_act)
+        file_menu.addSeparator()
+        self._recent_menu = file_menu.addMenu("Recent projects")
+        self._rebuild_recent_menu()
+        file_menu.addSeparator()
+        quit_act = QAction("Exit", self)
+        quit_act.setShortcut("Alt+F4")
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(quit_act)
 
         view_menu = mb.addMenu("&View")
         self._act_show_log = QAction("Show log panel", self, checkable=True)
@@ -189,6 +218,183 @@ class App(QMainWindow):
         import webbrowser
         import app_meta as meta
         webbrowser.open(meta.RELEASES_URL)
+
+    # ------------------------------------------------------------------
+    # Project files (.coypu)
+    # ------------------------------------------------------------------
+
+    def _set_dirty(self, dirty: bool = True):
+        self._dirty = dirty
+        self._update_title()
+
+    def _update_title(self):
+        import os
+        name = (os.path.basename(self._project_path) if self._project_path
+                else "Untitled project")
+        star = "*" if getattr(self, "_dirty", False) else ""
+        self.setWindowTitle(f"{star}{name} — COYPU Feeder")
+
+    def _rebuild_recent_menu(self):
+        self._recent_menu.clear()
+        recent = self._qsettings.value("recent_projects", [], list) or []
+        if not recent:
+            act = QAction("(none)", self)
+            act.setEnabled(False)
+            self._recent_menu.addAction(act)
+            return
+        for path in recent[:8]:
+            act = QAction(path, self)
+            act.triggered.connect(lambda _=False, p=path: self._load_project(p))
+            self._recent_menu.addAction(act)
+
+    def _push_recent(self, path: str):
+        recent = self._qsettings.value("recent_projects", [], list) or []
+        recent = [p for p in recent if p != path]
+        recent.insert(0, path)
+        self._qsettings.setValue("recent_projects", recent[:8])
+        self._qsettings.sync()
+        self._rebuild_recent_menu()
+
+    def _confirm_discard(self) -> bool:
+        """Ask to save when there are unsaved changes. False = cancel."""
+        if not getattr(self, "_dirty", False):
+            return True
+        r = QMessageBox.question(
+            self, "Unsaved changes",
+            "This project has unsaved changes. Save before continuing?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Cancel:
+            return False
+        if r == QMessageBox.StandardButton.Save:
+            return self._on_save_project()
+        return True
+
+    def _collect_state(self) -> dict:
+        sel_idx = [i for i, t in enumerate(self._tracks)
+                   if t in self._selected_tracks]
+        return {
+            "project_name": self._settings.get("project_name", "Railway Alignment"),
+            "work_epsg":    self._work_epsg,
+            "level":        self._level,
+            "step":         self._current_step,
+            "settings":     self._settings,
+            "tracks":       self._tracks,
+            "selected_indices": sel_idx,
+            "pi_model":     self._pi_model,
+            "stations":     self._stations,
+        }
+
+    def _on_new_project(self):
+        if not self._confirm_discard():
+            return
+        self._project_path = None
+        self._start_over()
+        self._set_dirty(False)
+        self.log_panel.log("New project.", "step")
+
+    def _on_open_project(self):
+        from PySide6.QtWidgets import QFileDialog
+        if not self._confirm_discard():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open COYPU Feeder project", "",
+            "COYPU Feeder project (*.coypu);;All files (*.*)")
+        if path:
+            self._load_project(path)
+
+    def _on_save_project(self) -> bool:
+        if not self._project_path:
+            return self._on_save_project_as()
+        return self._save_project(self._project_path)
+
+    def _on_save_project_as(self) -> bool:
+        from PySide6.QtWidgets import QFileDialog
+        suggested = self._settings.get("project_name", "project") + ".coypu"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save COYPU Feeder project", suggested,
+            "COYPU Feeder project (*.coypu)")
+        if not path:
+            return False
+        if not path.lower().endswith(".coypu"):
+            path += ".coypu"
+        return self._save_project(path)
+
+    def _save_project(self, path: str) -> bool:
+        from project_io import save_project
+        if not self._tracks:
+            QMessageBox.information(self, "Nothing to save",
+                                    "Load a railway first.")
+            return False
+        try:
+            save_project(path, self._collect_state())
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            self.log_panel.log(f"⚠ Save failed: {exc}", "error")
+            return False
+        self._project_path = path
+        self._set_dirty(False)
+        self._push_recent(path)
+        self.log_panel.log(f"Project saved: {path}", "ok")
+        self.statusBar().showMessage(f"✓ Project saved: {path}")
+        return True
+
+    def _load_project(self, path: str):
+        from project_io import load_project
+        from geometry.candidates import metrics_from_stats
+        import os
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Not found", f"File no longer exists:\n{path}")
+            return
+        try:
+            st = load_project(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open failed", str(exc))
+            self.log_panel.log(f"⚠ Open failed: {exc}", "error")
+            return
+
+        self._start_over()
+        self._settings        = st["settings"]
+        self._work_epsg       = st["work_epsg"]
+        self._level           = st["level"]
+        self._tracks          = st["tracks"]
+        self._selected_tracks = st["selected_tracks"]
+        self._xy_list         = st["xy_list"]
+        self._chainages_list  = st["chainages_list"]
+        self._pi_model        = st["pi_model"]
+        self._elements        = st["elements"]
+        self._stations        = st["stations"]
+        self._project_path    = path
+
+        # Repopulate the steps that own UI state
+        self.step2.populate(self._tracks)
+        self.map_widget.show_tracks(self._tracks)
+        if self._elements:
+            metrics = metrics_from_stats(
+                getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
+            self.element_table.prepare(
+                self._pi_model, self._elements,
+                check_interval=self._settings.get("check_interval", 5.0))
+            self.step5_refine.set_elements(self._elements, metrics)
+            self.step6_consolidate.prepare(self._pi_model)
+            self._render_elements_on_map(self._elements, fit_view=True)
+            self._show_pi_overlay(self._pi_model)
+        if self._stations:
+            self.step6_stations.set_stations(self._stations)
+            self._on_stations_changed(self._stations)
+        self._mark_stale()
+        self._set_dirty(False)
+        self._push_recent(path)
+        n_pi = len(self._pi_model.pis) if self._pi_model else 0
+        self.log_panel.log(
+            f"Project opened: {path} — {len(self._tracks)} track(s), "
+            f"{len(self._elements)} elements, {n_pi} PIs, "
+            f"{len(self._stations)} station(s).", "ok")
+        step = st.get("step", S_REFINE)
+        if step not in self._step_reasons():
+            self._goto_step(step)
+        else:
+            self._goto_step(S_REFINE if self._elements else S_FIND)
 
     def _build_layout(self):
         central = QWidget()
@@ -471,6 +677,13 @@ class App(QMainWindow):
     def _mark_stale(self):
         """The alignment changed — downstream steps must re-read it."""
         self._stale.update(self._DOWNSTREAM)
+        self._set_dirty(True)
+
+    def closeEvent(self, event):
+        if self._confirm_discard():
+            event.accept()
+        else:
+            event.ignore()
 
     def _refresh_downstream(self, idx: int):
         """Re-prepare a stale downstream step from the current elements."""
