@@ -20,6 +20,8 @@ datas = [
     (str(src_dir / "gui" / "static" / "leaflet.css"),"gui/static"),
     # Curated railway lines database
     (str(src_dir / "data" / "suggested_lines.py"),   "data"),
+    # Offline snapshot of the Czech railway line list (relation 2332889)
+    (str(src_dir / "data" / "cz_railways.json"),     "data"),
 ]
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
@@ -50,6 +52,8 @@ hidden_imports = [
     "PySide6.QtPrintSupport",
     # project modules (dynamic path insertion in main.py)
     "app_meta",
+    "project_io",
+    "data.cz_lines",
     "gui.app",
     "gui.theme",
     "gui.branding",
@@ -64,6 +68,7 @@ hidden_imports = [
     "gui.steps.step3_configure",
     "gui.steps.step4_candidates",
     "gui.steps.step5_refine",
+    "gui.steps.step6_consolidate",
     "gui.steps.step6_stations",
     "gui.steps.step6_crosssection",
     "gui.steps.step7_export",

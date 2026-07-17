@@ -1,0 +1,2139 @@
+{
+ "generated": "2026-07-17",
+ "relation": 2332889,
+ "lines": [
+  {
+   "id": 48517,
+   "name": "010 – Kolín – Česká Třebová",
+   "ref": "010",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 38576,
+   "name": "011 – Praha – Kolín",
+   "ref": "011",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 8409657,
+   "name": "012 Pečky - Kouřim",
+   "ref": "012",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48616,
+   "name": "014 – Kolín – Ledečko",
+   "ref": "014",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48620,
+   "name": "016 Chrudim – Holice",
+   "ref": "016",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48619,
+   "name": "017 – Chrudim město – Heřmanův Městec",
+   "ref": "017",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48646,
+   "name": "018 – Choceň – Litomyšl",
+   "ref": "018",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48621,
+   "name": "020 – Velký Osek – Choceň",
+   "ref": "020",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49017,
+   "name": "021 – Týniště nad Orlicí – Letohrad",
+   "ref": "021",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48733,
+   "name": "022 – Častolovice – Solnice",
+   "ref": "022",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48523,
+   "name": "023 – Doudleby nad Orlicí – Rokytnice v Orlických horách",
+   "ref": "023",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 2147425,
+   "name": "024 Ústí nad Orlicí - Mlýnický Dvůr",
+   "ref": "024",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49028,
+   "name": "025 – Dolní Lipka – Hanušovice",
+   "ref": "025",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49029,
+   "name": "026 – Týniště nad Orlicí – Otovice zastávka",
+   "ref": "026",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49030,
+   "name": "028 – Opočno pod Orlickými horami – Dobruška",
+   "ref": "028",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 38685,
+   "name": "030 – Jaroměř – Turnov – Liberec",
+   "ref": "030",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49031,
+   "name": "031 – Pardubice – Hradec Králové – Jaroměř",
+   "ref": "031",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49032,
+   "name": "032 – Jaroměř – Trutnov",
+   "ref": "032",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49033,
+   "name": "033 – Starkoč – Václavice",
+   "ref": "033",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49034,
+   "name": "034 – Smržovka – Josefův Důl",
+   "ref": "034",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49036,
+   "name": "035 – Železný Brod – Tanvald",
+   "ref": "035",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49037,
+   "name": "036 – Liberec – Tanvald – Harrachov",
+   "ref": "036",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49038,
+   "name": "037 – Liberec – Zawidów",
+   "ref": "037",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49205,
+   "name": "038 – Raspenava – Bílý Potok pod Smrkem",
+   "ref": "038",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49040,
+   "name": "039 – Frýdlant v Čechách – Jindřichovice pod Smrkem",
+   "ref": "039",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 38684,
+   "name": "040 - Trutnov - Chlumec nad Cidlinou",
+   "ref": "040",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49041,
+   "name": "041 – Hradec Králové – Jičín – Turnov",
+   "ref": "041",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 38914,
+   "name": "042 – Martinice v Krkonoších – Rokytnice nad Jizerou",
+   "ref": "042",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49042,
+   "name": "043 – Trutnov – Žacléř",
+   "ref": "043",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49046,
+   "name": "044 – Kunčice nad Labem – Vrchlabí",
+   "ref": "044",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49045,
+   "name": "045 – Trutnov – Svoboda nad Úpou",
+   "ref": "045",
+   "network": "",
+   "operator": "cz:PDV RAILWAY",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49048,
+   "name": "046 - Hněvčeves – Smiřice",
+   "ref": "046",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49044,
+   "name": "047 – Trutnov – Teplice nad Metují",
+   "ref": "047",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49049,
+   "name": "060 – Poříčany – Nymburk",
+   "ref": "060",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49050,
+   "name": "061 – Nymburk – Jičín",
+   "ref": "061",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49051,
+   "name": "062 – Chlumec nad Cidlinou – Křinec",
+   "ref": "062",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 12430447,
+   "name": "063 AŽD Dolní Bousov - Kopidlno",
+   "ref": "063",
+   "network": "",
+   "operator": "cz:AŽD",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49053,
+   "name": "063 – Bakov nad Jizerou – Kopidlno",
+   "ref": "063",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 38993,
+   "name": "064 - Mladá Boleslav - Stará Paka",
+   "ref": "064",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48629,
+   "name": "070 – Praha – Turnov",
+   "ref": "070",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49056,
+   "name": "071 – Nymburk – Mladá Boleslav",
+   "ref": "071",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49059,
+   "name": "072 – Lysá nad Labem – Ústí nad Labem",
+   "ref": "072",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49062,
+   "name": "073 – Ústí nad Labem – Děčín východ",
+   "ref": "073",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48626,
+   "name": "074 – Čelákovice – Neratovice",
+   "ref": "074",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49063,
+   "name": "076 – Mladá Boleslav – Mělník",
+   "ref": "076",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49064,
+   "name": "080 – Bakov nad Jizerou – Jedlová",
+   "ref": "080",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48790,
+   "name": "081 – Děčín – Benešov nad Ploučnicí – Rumburk/Česká Lípa",
+   "ref": "081",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 8439617,
+   "name": "083 - Děčín - Schöna Gr.",
+   "ref": "083",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 8439579,
+   "name": "083 - Rumburk - Dolní Poustevna",
+   "ref": "083",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48794,
+   "name": "084 – Rumburk – Panský – Mikulášovice",
+   "ref": "084",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48795,
+   "name": "085 – Krásná Lípa – Panský",
+   "ref": "085",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48796,
+   "name": "086 – Liberec – Česká Lípa",
+   "ref": "086",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48797,
+   "name": "087 – Lovosice – Česká Lípa",
+   "ref": "087",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48798,
+   "name": "088 – Rumburk – Ebersbach",
+   "ref": "088",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48799,
+   "name": "089 – Liberec – Rybniště",
+   "ref": "089",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48801,
+   "name": "090 – Kralupy nad Vltavou - Děčín",
+   "ref": "090",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48800,
+   "name": "091 – Praha – Kralupy nad Vltavou",
+   "ref": "091",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48628,
+   "name": "092 – Neratovice – Kralupy nad Vltavou",
+   "ref": "092",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48802,
+   "name": "093 – Kralupy nad Vltavou – Kladno",
+   "ref": "093",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48803,
+   "name": "094 – Vraňany – Lužec nad Vltavou",
+   "ref": "094",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48804,
+   "name": "095 – Vraňany – Libochovice",
+   "ref": "095",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48809,
+   "name": "096 – Roudnice nad Labem – Zlonice",
+   "ref": "096",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 9191,
+   "name": "097 – Lovosice – Teplice v Čechách",
+   "ref": "097",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48811,
+   "name": "110 – Kralupy nad Vltavou – Louny",
+   "ref": "110",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48812,
+   "name": "111 – Kralupy nad Vltavou – Velvary",
+   "ref": "111",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 12430446,
+   "name": "113 AŽD Čížkovice - Obrnice",
+   "ref": "113",
+   "network": "",
+   "operator": "cz:AŽD",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48813,
+   "name": "113 – Čížkovice – Obrnice",
+   "ref": "113",
+   "network": "",
+   "operator": "cz:AŽD",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48814,
+   "name": "114 – Lovosice – Postoloprty",
+   "ref": "114",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49179,
+   "name": "120 – Praha – Rakovník",
+   "ref": "120",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49186,
+   "name": "121 – Hostivice – Podlešín",
+   "ref": "121",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49189,
+   "name": "122 – Praha – Hostivice – Rudná u Prahy",
+   "ref": "122",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 23288,
+   "name": "123 – Žatec – Obrnice",
+   "ref": "123",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 14035,
+   "name": "124 – Lužná u Rakovníka – Chomutov",
+   "ref": "124",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49180,
+   "name": "125 – Krupá – Kolešovice",
+   "ref": "125",
+   "network": "",
+   "operator": "wikidata=Q18480",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49191,
+   "name": "126 – Most – Rakovník",
+   "ref": "126",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 9190,
+   "name": "130 – Ústí nad Labem – Chomutov",
+   "ref": "130",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48823,
+   "name": "131 – Ústí nad Labem – Bílina",
+   "ref": "131",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 9298,
+   "name": "132 – Děčín – Oldřichov u Duchcova",
+   "ref": "132",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48824,
+   "name": "133 – Chomutov – Jirkov",
+   "ref": "133",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48825,
+   "name": "134 – Teplice v Čechách – Litvínov",
+   "ref": "134",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48826,
+   "name": "135 – Most – Moldava",
+   "ref": "135",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48821,
+   "name": "137 – Chomutov – Vejprty",
+   "ref": "137",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48827,
+   "name": "140 - Chomutov – Karlovy Vary – Cheb",
+   "ref": "140",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48839,
+   "name": "141 – Karlovy Vary – Merklín",
+   "ref": "141",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48838,
+   "name": "142 – Karlovy Vary – Johanngeorgenstadt",
+   "ref": "142",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48836,
+   "name": "143 – Chodov – Nová Role",
+   "ref": "143",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48835,
+   "name": "144 – Nové Sedlo u Lokte – Krásný Jez",
+   "ref": "144",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3174957,
+   "name": "145 - Falkenau – Graslitz – Zwotental",
+   "ref": "145",
+   "network": "",
+   "operator": "cz:PDV RAILWAY",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48830,
+   "name": "146 - Cheb – Luby u Chebu",
+   "ref": "146",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48829,
+   "name": "147 – Franzensbad – Bad Brambach",
+   "ref": "147",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48828,
+   "name": "148 – Cheb – Hranice v Čechách",
+   "ref": "148",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48840,
+   "name": "149 – Karlovy Vary – Mariánské Lázně",
+   "ref": "149",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 14037,
+   "name": "160 – Plzeň – Žatec",
+   "ref": "160",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48841,
+   "name": "161 – Rakovník – Bečov nad Teplou",
+   "ref": "161",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48843,
+   "name": "162 – Rakovník – Mladotice",
+   "ref": "162",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48979,
+   "name": "163 – Protivec – Bochov",
+   "ref": "163",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3938747,
+   "name": "164 - Kadaňský Rohozec - Doupov",
+   "ref": "164",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48844,
+   "name": "164 – Kadaň – Vilémov u Kadaně – Kaštice",
+   "ref": "164",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48845,
+   "name": "165 – Kadaňský Rohozec – Vilémov u Kadaně",
+   "ref": "165",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 23190,
+   "name": "170 – Beroun – Plzeň – Cheb",
+   "ref": "170",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 23188,
+   "name": "171 – Souhrnná doprava Praha – Beroun",
+   "ref": "171",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48846,
+   "name": "172 – Zadní Třebaň – Lochovice",
+   "ref": "172",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48847,
+   "name": "173 – Praha–Smíchov – Rudná u Prahy – Beroun",
+   "ref": "173",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48848,
+   "name": "174 – Beroun – Rakovník",
+   "ref": "174",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48849,
+   "name": "175 – Rokycany – Nezvěstice",
+   "ref": "175",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48850,
+   "name": "176 – Chrást u Plzně – Radnice",
+   "ref": "176",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48851,
+   "name": "177 – Pňovany – Bezdružice",
+   "ref": "177",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48854,
+   "name": "železniční trať Cheb–Schirnding",
+   "ref": "179",
+   "network": "",
+   "operator": "cz:SŽDC",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48855,
+   "name": "180 – Plzeň – Furth im Wald",
+   "ref": "180",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48856,
+   "name": "181 – Nýřany – Heřmanova Huť",
+   "ref": "181",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48857,
+   "name": "182 – Staňkov – Poběžovice",
+   "ref": "182",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48861,
+   "name": "183 – Plzeň – Klatovy – Železná Ruda",
+   "ref": "183",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48858,
+   "name": "184 - Domažlice – Planá u Mariánských Lázní",
+   "ref": "184",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48859,
+   "name": "185 – Horažďovice předměstí – Domažlice",
+   "ref": "185",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48852,
+   "name": "186 - Svojšín – Bor",
+   "ref": "186",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48867,
+   "name": "190 – Plzeň – České Budějovice",
+   "ref": "190",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48870,
+   "name": "192 – Nepomuk – Blatná",
+   "ref": "192",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48869,
+   "name": "192 – Číčenice – Týn nad Vltavou",
+   "ref": "192",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48868,
+   "name": "193 – Dívčice – Netolice",
+   "ref": "193",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48815,
+   "name": "194 – České Budějovice – Volary, Nové Údolí – Černý Kříž",
+   "ref": "194",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48872,
+   "name": "195 – Rybník – Lipno nad Vltavou",
+   "ref": "195",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48871,
+   "name": "196 – České Budějovice – Summerau",
+   "ref": "196",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 39077,
+   "name": "197 – Číčenice – Volary",
+   "ref": "197",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48873,
+   "name": "198 – Strakonice – Volary",
+   "ref": "198",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48874,
+   "name": "199 – České Budějovice – České Velenice – Gmünd NÖ",
+   "ref": "199",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48876,
+   "name": "200 – Zdice – Protivín",
+   "ref": "200",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48877,
+   "name": "201 – Tábor – Ražice",
+   "ref": "201",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48878,
+   "name": "202 – Tábor – Bechyně",
+   "ref": "202",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48879,
+   "name": "203 – Březnice – Strakonice",
+   "ref": "203",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48880,
+   "name": "204 – Březnice – Rožmitál pod Třemšínem",
+   "ref": "204",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48882,
+   "name": "210 – Praha – Vrané nad Vltavou – Čerčany, Vrané nad Vltavou – Dobříš",
+   "ref": "210",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 39019,
+   "name": "212 – Čerčany – Světlá nad Sázavou",
+   "ref": "212",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48888,
+   "name": "220 – Benešov u Prahy – České Budějovice",
+   "ref": "220",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48883,
+   "name": "221 – Praha – Benešov u Prahy",
+   "ref": "221",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48890,
+   "name": "222 – Benešov u Prahy – Trhový Štěpánov",
+   "ref": "222",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48891,
+   "name": "223 – Olbramovice – Sedlčany",
+   "ref": "223",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48893,
+   "name": "224 – Tábor – Horní Cerekev",
+   "ref": "224",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48896,
+   "name": "225 – Havlíčkův Brod – Veselí nad Lužnicí",
+   "ref": "225",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48875,
+   "name": "226 – Veselí nad Lužnicí – Gmünd NÖ",
+   "ref": "226",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48898,
+   "name": "227 – Kostelec u Jihlavy – Slavonice",
+   "ref": "227",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49104,
+   "name": "228 JMHD Jindřichův Hradec - Obrataň",
+   "ref": "228",
+   "network": "",
+   "operator": "cz:JHMD",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48899,
+   "name": "229 JMHD Jindřichův Hradec - Nová Bystřice",
+   "ref": "229",
+   "network": "",
+   "operator": "cz:JHMD",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 61113,
+   "name": "230 – Kolín – Havlíčkův Brod",
+   "ref": "230",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 8410815,
+   "name": "213 - Praha-Libeň - Praha-Vysočany",
+   "ref": "231",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48623,
+   "name": "231 – Praha – Lysá nad Labem – Kolín",
+   "ref": "231",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48624,
+   "name": "232 – Lysá nad Labem – Milovice",
+   "ref": "232",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48625,
+   "name": "233 – Čelákovice – Mochov",
+   "ref": "233",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Čelákovice",
+   "to": "Mochov"
+  },
+  {
+   "id": 48901,
+   "name": "235 - Kutná Hora – Zruč nad Sázavou",
+   "ref": "235",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48902,
+   "name": "236 - Čáslav – Třemošnice",
+   "ref": "236",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48904,
+   "name": "237 – Havlíčkův Brod – Humpolec",
+   "ref": "237",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48756,
+   "name": "238 – Pardubice – Havlíčkův Brod",
+   "ref": "238",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48905,
+   "name": "240 – Brno – Jihlava",
+   "ref": "240",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48907,
+   "name": "241 – Znojmo – Okříšky",
+   "ref": "241",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48909,
+   "name": "242 – Dobronín – Polná",
+   "ref": "242",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48910,
+   "name": "243 – Moravské Budějovice – Jemnice",
+   "ref": "243",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48912,
+   "name": "244 – Brno – Moravské Bránice – (Oslavany) – Hrušovany nad Jevišovkou",
+   "ref": "244",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48913,
+   "name": "245 – Hrušovany nad Jevišovkou-Šanov – Hevlín",
+   "ref": "245",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48914,
+   "name": "246 – Břeclav – Znojmo",
+   "ref": "246",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48915,
+   "name": "247 - Břeclav - Lednice",
+   "ref": "247",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48916,
+   "name": "248 – Znojmo – Retz",
+   "ref": "248",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48918,
+   "name": "250 - Havlíčkův Brod - Brno - Břeclav - Kúty",
+   "ref": "250",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3646950,
+   "name": "251 - Hrušovany u Brna – Židlochovice",
+   "ref": "251",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48928,
+   "name": "251 - Šakvice - Hustopeče u Brna",
+   "ref": "251",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48919,
+   "name": "251 - Žďár nad Sázavou - Nové Město na Moravě - Tišnov",
+   "ref": "251",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48927,
+   "name": "253 – Vranovice – Pohořelice",
+   "ref": "253",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48930,
+   "name": "255 - Hodonín - Zaječí",
+   "ref": "255",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49931,
+   "name": "256 – Čejč – Uhřice u Kyjova (– Ždánice)",
+   "ref": "256",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48921,
+   "name": "257 – Křižanov – Studenec",
+   "ref": "257",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48758,
+   "name": "260 - Brno – Česká Třebová",
+   "ref": "260",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48757,
+   "name": "261 – Svitavy – Žďárec u Skutče",
+   "ref": "261",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48759,
+   "name": "262 - Chornice - Skalice nad Svitavou (provozovaná část)",
+   "ref": "262",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48766,
+   "name": "270 - Česká Třebová – Přerov – Bohumín",
+   "ref": "270",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Česká Třebová",
+   "to": "Bohumín"
+  },
+  {
+   "id": 48760,
+   "name": "271 – Prostějov – Chornice",
+   "ref": "271",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48767,
+   "name": "272 – Rudoltice v Čechách – Lanškroun",
+   "ref": "272",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48936,
+   "name": "273 – Červenka – Senice na Hané",
+   "ref": "273",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48937,
+   "name": "308 - Litovel předměstí – Mladeč",
+   "ref": "274",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48939,
+   "name": "275 – Prostějov – Kostelec na Hané – Olomouc",
+   "ref": "275",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48940,
+   "name": "277 - Suchdol nad Odrou – Fulnek",
+   "ref": "277",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Suchdol nad Odrou",
+   "to": "Fulnek"
+  },
+  {
+   "id": 48946,
+   "name": "278 – Suchdol nad Odrou – Nový Jičín",
+   "ref": "278",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Suchdol nad Odrou",
+   "to": "Nový Jičín"
+  },
+  {
+   "id": 48948,
+   "name": "279 - Studénka - Bílovec",
+   "ref": "279",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Studénka",
+   "to": "Bílovec"
+  },
+  {
+   "id": 48949,
+   "name": "280 - Hranice na Moravě - Valašské Meziříčí - Střelná (- Púchov)",
+   "ref": "280",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Hranice na Moravě",
+   "to": "Střelná (Púchov (SK))"
+  },
+  {
+   "id": 48950,
+   "name": "281 - Valašské Meziříčí – Rožnov pod Radhoštěm",
+   "ref": "281",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Valašské Meziříčí",
+   "to": "Rožnov pod Radhoštěm"
+  },
+  {
+   "id": 48953,
+   "name": "282 - Vsetín – Velké Karlovice",
+   "ref": "282",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Vsetín",
+   "to": "Velké Karlovice"
+  },
+  {
+   "id": 48955,
+   "name": "283 - Horní Lideč - Bylnice",
+   "ref": "283",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Horní Lideč",
+   "to": "Bylnice"
+  },
+  {
+   "id": 48980,
+   "name": "290 – Olomouc – Šumperk",
+   "ref": "290",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48982,
+   "name": "291 – Zábřeh na Moravě – Šumperk",
+   "ref": "291",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48985,
+   "name": "292 – Šumperk – Krnov",
+   "ref": "292",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48986,
+   "name": "294 – Hanušovice – Staré Město pod Sněžníkem",
+   "ref": "294",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48988,
+   "name": "295 – Lipová Lázně – Javorník ve Slezsku",
+   "ref": "295",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48989,
+   "name": "296 – Velká Kraš – Vidnava",
+   "ref": "296",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48994,
+   "name": "297 – Mikulovice – Zlaté Hory",
+   "ref": "297",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 51238,
+   "name": "298 – Třemešná ve Slezsku – Osoblaha",
+   "ref": "298",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48997,
+   "name": "300 – Brno – Přerov",
+   "ref": "300",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Brno",
+   "to": "Přerov"
+  },
+  {
+   "id": 48998,
+   "name": "301 – Nezamyslice – Olomouc",
+   "ref": "301",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48999,
+   "name": "302 – Nezamyslice – Morkovice",
+   "ref": "302",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49000,
+   "name": "303 – Kojetín – Valašské Meziříčí",
+   "ref": "303",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Kojetín",
+   "to": "Valašské Meziříčí"
+  },
+  {
+   "id": 49002,
+   "name": "310 – Olomouc – Opava",
+   "ref": "310",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49003,
+   "name": "311 – Valšov – Rýmařov",
+   "ref": "311",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49004,
+   "name": "312 – Bruntál – Malá Morávka",
+   "ref": "312",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49006,
+   "name": "313 – Milotice nad Opavou – Vrbno pod Pradědem",
+   "ref": "313",
+   "network": "",
+   "operator": "cz:AWT",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49008,
+   "name": "314 – Opava východ – Svobodné Heřmanice",
+   "ref": "314",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49009,
+   "name": "315 – Opava východ – Hradec nad Moravicí",
+   "ref": "315",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49010,
+   "name": "316 - Opava východ - Ostrava-Svinov (bývalá)",
+   "ref": "316",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49012,
+   "name": "317 – Opava východ – Hlučín",
+   "ref": "317",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 49015,
+   "name": "318 – Kravaře ve Slezsku – Chuchelná",
+   "ref": "318",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 7478694,
+   "name": "320 - (Bohumín -) Dětmarovice - Petrovice u Karviné - státní hranice",
+   "ref": "320",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48769,
+   "name": "320 - Bohumín - Český Těšín - Mosty u Jablunkova (- Čadca)",
+   "ref": "320",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Bohumín",
+   "to": "Mosty u Jablunkova"
+  },
+  {
+   "id": 48770,
+   "name": "321 - Opava východ - Ostrava-Svinov - Ostrava-Kunčice - Český Těšín",
+   "ref": "321",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48771,
+   "name": "322 – Český Těšín – Frýdek-Místek",
+   "ref": "322",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Český Těšín",
+   "to": "Frýdek-Místek"
+  },
+  {
+   "id": 1711144,
+   "name": "323 - Ostrava hlavní nádraží - Valašské Meziříčí",
+   "ref": "323",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Ostrava hlavní nádraží",
+   "to": "Valašské Meziříčí"
+  },
+  {
+   "id": 4274476,
+   "name": "324 - Ostravice - Bílá (Opuštěná část)",
+   "ref": "324",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48773,
+   "name": "324 – Frýdlant nad Ostravicí – Ostravice",
+   "ref": "324",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Frýdlant nad Ostravicí",
+   "to": "Ostravice"
+  },
+  {
+   "id": 48774,
+   "name": "325 - Studénka - Veřovice",
+   "ref": "325",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Studénka",
+   "to": "Veřovice"
+  },
+  {
+   "id": 48775,
+   "name": "326 – Hostašovice – Nový Jičín horní nádraží",
+   "ref": "326",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Hostašovice",
+   "to": "Nový Jičín horní nádraží"
+  },
+  {
+   "id": 48780,
+   "name": "331 - Otrokovice - Vizovice",
+   "ref": "331",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Otrokovice",
+   "to": "Vizovice"
+  },
+  {
+   "id": 48781,
+   "name": "332 – Hodonín – Holíč",
+   "ref": "332",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48782,
+   "name": "334 - Kojetín - Tovačov",
+   "ref": "334",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48783,
+   "name": "340 - Brno - Veselí nad Moravou - Uherské Hradiště",
+   "ref": "340",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "Brno",
+   "to": "Uherské Hradiště"
+  },
+  {
+   "id": 48784,
+   "name": "341 - Staré Město u Uherského Hradiště – Vlárský průsmyk (– Trenčianska Teplá)",
+   "ref": "341",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48785,
+   "name": "342 – Bzenec – Moravský Písek",
+   "ref": "342",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48786,
+   "name": "343 - Hodonín - Veselí nad Moravou - Vrbovce (- Nové Mesto nad Váhom)",
+   "ref": "343",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 4805321,
+   "name": "345 – Nemotice – Koryčany",
+   "ref": "345",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48788,
+   "name": "346 - Újezdec u Luhačovic - Luhačovice",
+   "ref": "346",
+   "network": "",
+   "operator": "Správa železnic",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 8409665,
+   "name": "523 Bošice - Bečváry",
+   "ref": "523",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48789,
+   "name": "901 – Česká Kamenice – Česká Lípa",
+   "ref": "901",
+   "network": "",
+   "operator": "cz:KŽC",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 4072531,
+   "name": "029a - Petrovice u Karviné – Karviná",
+   "ref": "029a",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 4177855,
+   "name": "1d - Hrochův Týnec – Chrast u Chrudimi",
+   "ref": "1d",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 5502214,
+   "name": "25m – Havlíčkův Brod – Žďár nad Sázavou",
+   "ref": "25m",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3087576,
+   "name": "293 ŽD Železnice Desná",
+   "ref": "",
+   "network": "",
+   "operator": "cz:SART",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 5391152,
+   "name": "4b Smirady – Vysoké Veselí",
+   "ref": "4b",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 4123756,
+   "name": "Kladensko-nučická dráha",
+   "ref": "",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 2899452,
+   "name": "Relation 2899452",
+   "ref": "168a",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 48617,
+   "name": "Relation 48617",
+   "ref": "",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 5484908,
+   "name": "Skalsko – Chotětov",
+   "ref": "",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3980861,
+   "name": "Tochovice–Orlík",
+   "ref": "",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 3733808,
+   "name": "Z20 - Vojkovice nad Ohří – Kyselka",
+   "ref": "Z20",
+   "network": "",
+   "operator": "cz:Rail system",
+   "from": "",
+   "to": ""
+  },
+  {
+   "id": 4103244,
+   "name": "Zvoleněves – Kladno-Dubí",
+   "ref": "11b",
+   "network": "",
+   "operator": "",
+   "from": "",
+   "to": ""
+  }
+ ]
+}

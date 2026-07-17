@@ -73,6 +73,8 @@ class App(QMainWindow):
         self._wire_signals()
         self._connect_scheme_changes()
         self._apply_prefs()
+        self._update_title()
+        self._refresh_nav()
 
     # ------------------------------------------------------------------
     # Preferences (persisted via QSettings)

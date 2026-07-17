@@ -6,7 +6,9 @@ Three tabs:
   • Lines in View    — search for all railway lines visible in the current map view
                        (available only when the view is ≤ ~20 km wide/tall)
   • Czech Railways   — browse / filter all members of OSM relation 2332889
-                       ("Railways in Czech Republic"), loaded once on demand
+                       ("Railways in Czech Republic") from a bundled offline
+                       snapshot; 🔄 Update refreshes it from OSM and stores
+                       the copy in the user data folder
 """
 
 
@@ -83,6 +85,10 @@ class Step1Find(QWidget):
         self._tabs.addTab(self._build_view_tab(),    "In View")
         self._tabs.addTab(self._build_cz_tab(),      "Czech Railways")
         layout.addWidget(self._tabs)
+
+        # The Czech list comes from the bundled/user snapshot — instant, and
+        # works without a network connection.
+        self.load_cz_offline()
 
         # Shared fetch-status bar (visible only while a FetchWorker is running)
         self._fetch_status_lbl = QLabel("")
@@ -238,18 +244,22 @@ class Step1Find(QWidget):
         v.addWidget(hdr)
 
         hint = QLabel(
-            "Lists all member relations of OSM relation 2332889\n"
-            "(Railways in Czech Republic). Loaded once on demand.\n"
-            "Use the filter box to narrow the list instantly."
+            "All member relations of OSM relation 2332889 (Railways in Czech "
+            "Republic). A snapshot ships with the app, so the list works "
+            "offline; use 🔄 Update to refresh it from OpenStreetMap."
         )
         hint.setStyleSheet("color:#888; font-size:10px;")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
-        # Load button (shown only before first load)
-        self._cz_load_btn = QPushButton("📥  Load Czech Railway Lines")
-        self._cz_load_btn.setMinimumHeight(34)
-        self._cz_load_btn.clicked.connect(self._load_cz_railways)
+        # Refresh the bundled/user snapshot from Overpass
+        self._cz_load_btn = QPushButton("🔄  Update list")
+        self._cz_load_btn.setMinimumHeight(30)
+        self._cz_load_btn.setToolTip(
+            "Re-fetch the line list from OpenStreetMap and store it in your\n"
+            "user data folder. The stored copy is used from then on."
+        )
+        self._cz_load_btn.clicked.connect(self._update_cz_railways)
         v.addWidget(self._cz_load_btn)
 
         self._cz_status = QLabel("")
@@ -354,12 +364,28 @@ class Step1Find(QWidget):
 
     # ── Czech Railways actions ────────────────────────────────────────
 
-    def _load_cz_railways(self):
-        if self._cz_loaded:
-            return
+    def load_cz_offline(self):
+        """Populate the tab instantly from the bundled/user snapshot."""
+        from data.cz_lines import load_cz_lines
+        lines, meta = load_cz_lines()
+        self._cz_all_results = lines
+        self._cz_loaded = bool(lines)
+        if lines:
+            self._cz_status.setText(
+                f"Snapshot {meta['generated']} · {meta['source']} · "
+                f"{meta['count']} lines. Type to filter."
+            )
+        else:
+            self._cz_status.setText(
+                "No offline snapshot available — press 🔄 Update list."
+            )
+        self._apply_cz_filter(self._cz_filter.text())
+
+    def _update_cz_railways(self):
+        """Refresh the list from OSM and persist it to the user data folder."""
         self._cz_load_btn.setEnabled(False)
-        self._cz_load_btn.setText("Loading…")
-        self._cz_status.setText("Connecting to Overpass API…")
+        self._cz_load_btn.setText("Updating…")
+        self._cz_status.setText("Fetching the line list from OpenStreetMap…")
 
         worker = SearchWorker("relation_members", str(CZ_RAILWAYS_RELATION), self)
         worker.results_ready.connect(self._on_cz_loaded)
@@ -370,18 +396,34 @@ class Step1Find(QWidget):
         worker.start()
 
     def _on_cz_loaded(self, results: list):
+        from data.cz_lines import save_cz_lines
         self._cz_all_results = results
         self._cz_loaded = True
-        self._cz_load_btn.setVisible(False)
-        self._cz_status.setText(
-            f"Loaded {len(results)} railway lines. Type to filter."
-        )
+        self._cz_load_btn.setEnabled(True)
+        self._cz_load_btn.setText("🔄  Update list")
+        try:
+            save_cz_lines(results)
+            from datetime import date
+            self._cz_status.setText(
+                f"Snapshot {date.today().isoformat()} · updated · "
+                f"{len(results)} lines. Type to filter."
+            )
+        except Exception as exc:
+            self._cz_status.setText(
+                f"Loaded {len(results)} lines, but saving the snapshot "
+                f"failed: {exc}"
+            )
         self._apply_cz_filter(self._cz_filter.text())
 
     def _on_cz_load_failed(self, error: str):
+        """Keep the existing snapshot; just report why the update failed."""
         self._cz_load_btn.setEnabled(True)
-        self._cz_load_btn.setText("📥  Load Czech Railway Lines")
-        self._cz_status.setText(f"Load failed: {_friendly_error(error)}")
+        self._cz_load_btn.setText("🔄  Update list")
+        n = len(self._cz_all_results)
+        self._cz_status.setText(
+            f"Update failed: {_friendly_error(error)} — "
+            f"keeping the current snapshot ({n} lines)."
+        )
 
     def _apply_cz_filter(self, text: str):
         """Filter the already-loaded list client-side (no network call)."""

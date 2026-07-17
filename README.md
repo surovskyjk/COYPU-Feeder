@@ -28,19 +28,22 @@ No Python installation required.
 
 - **Find any railway** by timetable reference number, name, or direct OSM relation ID
 - **Search in map view** — find all railway route-relations visible in the current map window (≤ 20 × 20 km)
-- **Czech Railways browser** — lazy-loads all ~300 lines from the *Railways in Czech Republic* OSM collection with instant client-side filtering
+- **Czech Railways browser** — all ~240 lines of the *Railways in Czech Republic* OSM collection from a **bundled offline snapshot** (instant, no network), refreshable with 🔄 Update
 - **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
 - **Clothoid transition curves** — entry/exit spirals at every arc, exact Fresnel-based tangent placement
-- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore PIs, merge short straights between curves into prolonged symmetric spirals
+- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore PIs, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with one curve
+- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose
+- **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
+- **Project files (`.coypu`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
 - **PI display** — Points of Intersection as markers, virtual tangent extensions dashed light-grey
 - **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
 - **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
 - **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
 - **Elevation sampling** — DEM-based vertical profile at a configurable chainage interval, fitted with parabolic vertical curves
 - **LandXML 1.2 export** — COYPU-compatible structure with horizontal + vertical geometry, Cant block (0 mm placeholders) and CRS metadata
-- **Dark / light mode** — automatically follows the OS system theme
+- **Dark / light mode** — automatic, or forced from Settings ▸ Preferences (with adjustable font size)
 
 ---
 
@@ -50,17 +53,28 @@ No Python installation required.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
+│ File  View  Settings  Help                                           │
+├───────────────────┬────────────────────────────────────────┬─────────┤
 │ [1] Find Railway  │        Interactive Leaflet Map         │  Step   │
 │ [2] Select        │  (tile provider selector + railway     │  panel  │
 │ [3] Configure     │   overlay toggle)                      │ 340 px  │
 │ [4] Candidates    │                                        │         │
-│ [5] Refine        ├─────────────────────────────────────────┤        │
-│ [6] Stations      │  Element table (Step 5): ID · type ·   │         │
-│ [7] Cross-section │  station · length · radius · A · defl  │         │
-│ [8] Export        │  · spiral L · actions                  │         │
-│   200 px sidebar  │                                        │         │
-└──────────────────────────────────────────────────────────────────────┘
+│ [5] Refine        ├──────────────┬─────────────────────────┤         │
+│ [6] Consolidate   │   Log        │  Element table:         │         │
+│ [7] Stations      │  (timestamped│  ID · type · station ·  │         │
+│ [8] Cross-section │   activity + │  length · radius · A ·  │         │
+│ [9] Export        │   step tips) │  defl · spiral L · ⋯    │         │
+│   200 px sidebar  │              │                         │         │
+└───────────────────┴──────────────┴─────────────────────────┴─────────┘
 ```
+
+---
+
+## Working with projects
+
+The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine* or *Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically).
+
+Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypu` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
 
 ---
 
@@ -80,7 +94,7 @@ Three ways to find a railway:
 Zoom the map to an area ≤ 20 × 20 km, then click *Search Railway Lines in Current View*. Returns all railway route-relations whose geometry intersects the visible map area.
 
 **Czech Railways tab**
-Click *Load Czech Railway Lines* once to fetch all members of OSM relation 2332889. The list of ~300 lines loads in a few seconds and is then filtered instantly as you type — by line number, name, or terminal stations.
+All members of OSM relation 2332889 are listed **immediately from a bundled offline snapshot** — no network needed — and filtered instantly as you type, by line number, name, or terminal stations. The header shows the snapshot date and whether it is the bundled copy or your own; **🔄 Update list** re-fetches it from OpenStreetMap and stores the result in your user data folder, which is preferred from then on. A failed update keeps the existing snapshot.
 
 Double-click any result or select it and click *Fetch selected* to load the full relation geometry.
 
@@ -105,12 +119,11 @@ Configure geometry parameters before running the fitting algorithms:
 | Group | Setting | Default | Description |
 |---|---|---|---|
 | **Project** | Project name | `Railway Alignment` | Written into the LandXML `<Project>` element |
-| **Export Settings** | Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
-| | Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
-| | Spiral length | 20 m | Entry/exit clothoid length for *Segment & Fit (Spirals)*; 0 = disabled |
 | **Alignment Geometry** | Max deviation (PI tolerance) | 1.0 m | Douglas-Peucker tolerance for extracting the tangent polygon (Points of Intersection) |
 | | Minimum curve radius | 150 m | Minimum horizontal curve radius for all circular arcs |
 | | Spiral length (Level 3) | 20 m | Clothoid length; auto-shortened where tangents are too short |
+| **Export Settings** | Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
+| | Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
 
 ---
 
@@ -137,13 +150,29 @@ The full **element table** appears under the map: every Line, Arc and Spiral wit
 - **Edit** an arc *Radius* or a *Spiral L* value — the alignment rebuilds and the map updates automatically (values are clamped to what the tangent geometry allows; C1 continuity is preserved by construction).
 - **Omit PI** removes a curve; the neighbouring curves absorb its deflection. Omitted PIs stay listed (struck through) and can be restored.
 - **Merge spirals ↔** appears on short straights (< 30 m) sandwiched between two transition curves: the straight is removed by prolonging the adjacent spirals, and the spirals on the far side of each circular curve prolong identically so both curves stay **symmetrical**. *Undo merge* restores the previous state.
-- The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element; hover an element for 3 s to see its ID and deviation statistics.
+- **Merge PI range → single curve** replaces every PI between the two selected tangents with one curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button.
+- The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element, or click an element on the map to select its row (Ctrl+click multi-selects); hover an element for 3 s to see its ID and deviation statistics.
 
-Click **Accept →** when the geometry is final.
+Click **Accept →** when the geometry is final — though you can return here and keep editing at any later point.
 
 ---
 
-### Step 6 — Stations
+### Step 6 — Consolidate
+
+Level 2/3 sometimes split one physical curve into a run of consecutive curves. This step replaces such a run with a single transition–circular–transition curve.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Max intermediate straight | 30 m | Curves separated by a longer straight are left alone (0 = only curves that touch directly) |
+| Max deviation from OSM | 2.0 m | The merged curve must stay within this of the OSM polyline, otherwise the run is rejected |
+
+**🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — or **↩ Undo** to restore. Selecting a row highlights that run on the map.
+
+> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself.
+
+---
+
+### Step 7 — Stations
 
 Build the station/stop list whose chainages are measured along the fitted alignment (identical to the LandXML stationing):
 
@@ -151,7 +180,7 @@ Build the station/stop list whose chainages are measured along the fitted alignm
 - **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
 - **＋ Add row** — manual entry; edit the km value directly in the table.
 
-Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 8 as a CSV next to the LandXML file:
+Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 9 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
 
 ```csv
 Station,Dwell Time,Name
@@ -161,7 +190,7 @@ Station,Dwell Time,Name
 
 ---
 
-### Step 7 — Cross-Section
+### Step 8 — Cross-Section
 
 The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export.
 
@@ -169,7 +198,7 @@ Click **Next → Export** to proceed.
 
 ---
 
-### Step 8 — Export
+### Step 9 — Export
 
 1. Choose an output CRS from the preset list or enter a custom EPSG code
 2. Click **Browse…** and choose an output `.xml` file path
@@ -308,7 +337,10 @@ COYPU-Feeder/
     ├── gui/
     │   ├── app.py                # QMainWindow, signal wiring
     │   ├── map_widget.py         # Leaflet map via QWebEngineView + local HTTP server
-    │   ├── element_table.py      # Editable element table (bottom dock, Step 5)
+    │   ├── element_table.py      # Editable element table (bottom dock)
+│   ├── log_panel.py         # Timestamped activity log (bottom-left)
+│   ├── branding.py          # App icon + splash artwork (painted)
+│   ├── dialogs.py           # About / Settings dialogs
     │   ├── step_sidebar.py       # Numbered step sidebar
     │   ├── theme.py              # Dark/light Fusion palette + stylesheet
     │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Stations, Export)
@@ -319,21 +351,26 @@ COYPU-Feeder/
     │       ├── step3_configure.py# Geometry parameters
     │       ├── step4_candidates.py  # Level 1/2/3 comparison
     │       ├── step5_refine.py   # Interactive editing (with element table)
-    │       ├── step6_stations.py # Stations & stops → chainage CSV
-    │       ├── step6_crosssection.py  # Deviation profile (step 7 in the UI)
-    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 8)
+│       ├── step6_consolidate.py # Merge same-direction curve runs
+    │       ├── step6_stations.py # Stations & stops → chainage CSV (step 7)
+    │       ├── step6_crosssection.py  # Deviation profile (step 8)
+    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 9)
     ├── osm/
     │   ├── query.py              # Overpass API queries (incl. station detection)
     │   └── parser.py             # OSM way → Track objects
     ├── geometry/
     │   ├── alignment.py          # Element fitting + continuity enforcement
-    │   ├── candidates.py         # Level 1/2/3 PI-model construction + editing
+    │   ├── candidates.py         # Level 1/2/3 PI-model + editing + consolidation
     │   ├── stationing.py         # Station chainage projection + CSV writer
     │   ├── curvature.py          # Curvature computation and segmentation
     │   ├── elevation.py          # DEM sampling and vertical geometry
     │   └── projection.py         # CRS transformations (pyproj)
+    ├── app_meta.py              # Name / version / license / data sources
+    ├── project_io.py            # .coypu project save / load
     ├── data/
-    │   └── suggested_lines.py    # Curated Czech railway line database
+    │   ├── suggested_lines.py    # Curated Czech railway line database
+    │   ├── cz_lines.py          # Offline CZ list loader (+ user copy)
+    │   └── cz_railways.json     # Bundled snapshot of relation 2332889
     └── landxml/
         └── builder.py            # LandXML 1.2 tree builder and file writer
 ```
