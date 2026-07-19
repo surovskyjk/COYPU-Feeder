@@ -1046,7 +1046,11 @@ class App(QMainWindow):
                 segments_payload = []
 
             if segments_payload:
-                self.map_widget.show_alignment_segmented(segments_payload, fit_view)
+                if fit_view:
+                    self.map_widget.show_alignment_segmented(segments_payload, True)
+                else:
+                    # edit-driven refresh: diff-update keeps unchanged layers
+                    self.map_widget.update_alignment_segmented(segments_payload)
             else:
                 geo_xy     = reconstruct_alignment_projected(elements, sample_interval=5.0)
                 geo_latlon = projected_to_wgs84(geo_xy, self._work_epsg)

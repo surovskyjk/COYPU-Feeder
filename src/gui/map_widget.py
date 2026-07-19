@@ -358,6 +358,15 @@ class MapWidget(QWidget):
         fit = "true" if fit_view else "false"
         self._run_js(f"showAlignmentSegmented({json.dumps(segments)}, {fit})")
 
+    def update_alignment_segmented(self, segments: list):
+        """
+        Diff-update the segmented alignment after an edit: the JS side keeps
+        the Leaflet layers of unchanged elements and recreates only the
+        edited span (falls back to a full redraw when nothing is shown yet).
+        Keeps the user's current zoom/pan.
+        """
+        self._run_js(f"updateAlignmentSegmented({json.dumps(segments)})")
+
     def fly_to_alignment(self):
         self._run_js("flyToAlignment()")
 
@@ -387,10 +396,18 @@ class MapWidget(QWidget):
 
         payload = {"pis":      [{"id", "latlon", "omitted", "defl_deg"}, …],
                    "tangents": [{"from": [lat,lon], "to": [lat,lon]}, …]}
+
+        Skipped entirely when the payload is identical to the one currently
+        displayed (edits far from any PI leave the overlay untouched).
         """
-        self._run_js(f"showPIOverlay({json.dumps(payload)})")
+        js = json.dumps(payload)
+        if js == getattr(self, "_last_pi_overlay", None):
+            return
+        self._last_pi_overlay = js
+        self._run_js(f"showPIOverlay({js})")
 
     def clear_pi_overlay(self):
+        self._last_pi_overlay = None
         self._run_js("clearPIOverlay()")
 
     def highlight_element(self, element_id: str):

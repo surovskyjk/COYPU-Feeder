@@ -237,9 +237,192 @@ class ElementTableDock(QWidget):
             self._table.setUpdatesEnabled(True)
         return True
 
+    def _row_specs(self) -> list:
+        """One spec per row _populate would produce (elements + omitted PIs)."""
+        editable = self._model is not None
+        specs = []
+        for i, el in enumerate(self._elements):
+            specs.append({
+                "kind": "el", "i": i, "el": el,
+                "id": el.get("element_id", f"#{i}"),
+                "sig": (el.get("type", "?"),) + self._action_sig(
+                    el, self._elements, i, self._model, editable),
+            })
+        if editable:
+            for pid in self._model.pis:
+                if pid.omitted:
+                    specs.append({"kind": "om", "pid": pid,
+                                  "id": f"PI {pid.index}", "sig": ("omitted",)})
+        return specs
+
+    def _fill_row(self, row: int, spec: dict):
+        """Create all items + action widget for one row from its spec."""
+        editable = self._model is not None
+        if spec["kind"] == "om":
+            pid = spec["pid"]
+            grey = QColor("#777777")
+            it = self._mk_item(spec["id"], color=grey, align_right=False)
+            f = it.font(); f.setStrikeOut(True); it.setFont(f)
+            self._table.setItem(row, COL_ID, it)
+            self._table.setItem(row, COL_TYPE,
+                self._mk_item("omitted PI", color=grey, align_right=False))
+            self._table.setItem(row, COL_DEFL,
+                self._mk_item(f"{math.degrees(pid.deflection):+.2f}", color=grey))
+            for c in (COL_STA, COL_LEN, COL_R, COL_A, COL_SL):
+                self._table.setItem(row, c, self._mk_item("—", color=grey))
+            it.setData(Qt.ItemDataRole.UserRole,
+                       {"pi": pid.index, "etype": "omitted", "sig": spec["sig"]})
+            btn = QPushButton("Restore PI")
+            btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+            wrap = self._wrap_buttons([btn])
+            wrap._meta = {"pi": pid.index}
+            btn.clicked.connect(lambda _=False, w=wrap: self._restore_pi(w._meta["pi"]))
+            self._table.setCellWidget(row, COL_ACT, wrap)
+            return
+
+        i, el = spec["i"], spec["el"]
+        et    = el.get("type", "?")
+        col   = TYPE_COLORS.get(et)
+        sta   = float(el.get("sta_start", 0.0))
+        length = float(el.get("length", 0.0))
+
+        self._table.setItem(row, COL_ID,   self._mk_item(spec["id"], color=col, align_right=False))
+        self._table.setItem(row, COL_TYPE, self._mk_item(self._type_label(el), color=col, align_right=False))
+        self._table.setItem(row, COL_STA,  self._mk_item(f"{sta/1000.0:.3f}"))
+        self._table.setItem(row, COL_LEN,  self._mk_item(f"{length:.2f}"))
+
+        if et == "Arc":
+            r = float(el.get("radius", 0.0))
+            self._table.setItem(row, COL_R, self._mk_item(f"{r:.1f}", editable=editable))
+            defl = el.get("_deflection")
+            self._table.setItem(row, COL_DEFL,
+                self._mk_item(f"{math.degrees(defl):+.2f}" if defl is not None else "—"))
+            self._table.setItem(row, COL_A,  self._mk_item("—"))
+            self._table.setItem(row, COL_SL, self._mk_item("—"))
+        elif et == "Spiral":
+            r_fin = self._spiral_R(el)
+            self._table.setItem(row, COL_R, self._mk_item(
+                f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞"))
+            self._table.setItem(row, COL_A,
+                self._mk_item(f"{float(el.get('clothoid_A', 0.0)):.1f}"))
+            self._table.setItem(row, COL_DEFL, self._mk_item("—"))
+            self._table.setItem(row, COL_SL,
+                self._mk_item(f"{length:.1f}", editable=editable))
+        else:  # Line
+            for c in (COL_R, COL_A, COL_DEFL, COL_SL):
+                self._table.setItem(row, c, self._mk_item("—"))
+
+        self._table.item(row, COL_ID).setData(
+            Qt.ItemDataRole.UserRole,
+            {"pi": el.get("_pi"), "etype": et, "elem_index": i,
+             "sig": spec["sig"]})
+        self._add_actions(row, i, el, editable)
+
+    def _refresh_row(self, row: int, spec: dict):
+        """Update a structurally-matching row in place (texts + meta only)."""
+        it = self._table.item(row, COL_ID)
+        it.setText(spec["id"])
+        if spec["kind"] == "om":
+            pid = spec["pid"]
+            self._table.item(row, COL_DEFL).setText(
+                f"{math.degrees(pid.deflection):+.2f}")
+            it.setData(Qt.ItemDataRole.UserRole,
+                       {"pi": pid.index, "etype": "omitted", "sig": spec["sig"]})
+            wrap = self._table.cellWidget(row, COL_ACT)
+            if wrap is not None and hasattr(wrap, "_meta"):
+                wrap._meta["pi"] = pid.index
+            return
+        i, el = spec["i"], spec["el"]
+        et     = el.get("type", "?")
+        sta    = float(el.get("sta_start", 0.0))
+        length = float(el.get("length", 0.0))
+        self._table.item(row, COL_STA).setText(f"{sta/1000.0:.3f}")
+        self._table.item(row, COL_LEN).setText(f"{length:.2f}")
+        if et == "Arc":
+            self._table.item(row, COL_R).setText(f"{float(el.get('radius', 0.0)):.1f}")
+            defl = el.get("_deflection")
+            self._table.item(row, COL_DEFL).setText(
+                f"{math.degrees(defl):+.2f}" if defl is not None else "—")
+        elif et == "Spiral":
+            r_fin = self._spiral_R(el)
+            self._table.item(row, COL_R).setText(
+                f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞")
+            self._table.item(row, COL_A).setText(
+                f"{float(el.get('clothoid_A', 0.0)):.1f}")
+            self._table.item(row, COL_SL).setText(f"{length:.1f}")
+        it.setData(Qt.ItemDataRole.UserRole,
+                   {"pi": el.get("_pi"), "etype": et, "elem_index": i,
+                    "sig": spec["sig"]})
+        wrap = self._table.cellWidget(row, COL_ACT)
+        if wrap is not None and hasattr(wrap, "_meta"):
+            if "pi_b" in wrap._meta:      # merge-spirals widget on a Line row
+                if 0 < i < len(self._elements) - 1:
+                    wrap._meta["pi"] = self._elements[i - 1].get("_pi")
+                    wrap._meta["pi_b"] = self._elements[i + 1].get("_pi")
+            else:
+                wrap._meta["pi"] = el.get("_pi")
+
+    def _update_diff(self) -> bool:
+        """
+        Structural diff: keep the common prefix (same id + signature) and
+        common suffix (same signature; ids/stations are refreshed in place —
+        they shift after a merge renumbers downstream elements), rebuild only
+        the middle rows. Turns a merge's table update from ~N rows of Qt
+        churn into ~6.
+        """
+        specs = self._row_specs()
+        n_new, n_old = len(specs), self._table.rowCount()
+        lim = min(n_old, n_new)
+
+        p = 0
+        while p < lim:
+            it = self._table.item(p, COL_ID)
+            if it is None:
+                return False
+            meta = it.data(Qt.ItemDataRole.UserRole) or {}
+            if it.text() == specs[p]["id"] and meta.get("sig") == specs[p]["sig"]:
+                p += 1
+            else:
+                break
+
+        s = 0
+        while s < lim - p:
+            it = self._table.item(n_old - 1 - s, COL_ID)
+            if it is None:
+                return False
+            meta = it.data(Qt.ItemDataRole.UserRole) or {}
+            if meta.get("sig") == specs[n_new - 1 - s]["sig"]:
+                s += 1
+            else:
+                break
+
+        if p + s == 0:
+            return False                     # nothing reusable — full rebuild
+        mid_old = n_old - p - s
+        mid_new = n_new - p - s
+
+        self._populating = True
+        self._table.setUpdatesEnabled(False)
+        try:
+            for _ in range(mid_old):
+                self._table.removeRow(p)
+            for q in range(mid_new):
+                self._table.insertRow(p + q)
+                self._fill_row(p + q, specs[p + q])
+            for q in range(s):
+                r = p + mid_new + q
+                self._refresh_row(r, specs[r])
+        finally:
+            self._populating = False
+            self._table.setUpdatesEnabled(True)
+        return True
+
     def _populate(self):
-        # Fast path first — keeps interactive edits snappy on long alignments.
+        # Fast paths first — keep interactive edits snappy on long alignments:
+        # identical structure → cell updates only; localized change → diff.
         if self._table.rowCount() and self._update_in_place():
+            return
+        if self._table.rowCount() and self._update_diff():
             return
 
         # Preserve the current selection (blue rows) across the repopulation
@@ -256,74 +439,9 @@ class ElementTableDock(QWidget):
         self._table.setUpdatesEnabled(False)
         try:
             self._table.setRowCount(0)
-            editable = self._model is not None
-            els = self._elements
-
-            for i, el in enumerate(els):
-                row = self._table.rowCount()
+            for row, spec in enumerate(self._row_specs()):
                 self._table.insertRow(row)
-                et    = el.get("type", "?")
-                col   = TYPE_COLORS.get(et)
-                eid   = el.get("element_id", f"#{i}")
-                sta   = float(el.get("sta_start", 0.0))
-                length = float(el.get("length", 0.0))
-
-                self._table.setItem(row, COL_ID,   self._mk_item(eid, color=col, align_right=False))
-                self._table.setItem(row, COL_TYPE, self._mk_item(self._type_label(el), color=col, align_right=False))
-                self._table.setItem(row, COL_STA,  self._mk_item(f"{sta/1000.0:.3f}"))
-                self._table.setItem(row, COL_LEN,  self._mk_item(f"{length:.2f}"))
-
-                if et == "Arc":
-                    r = float(el.get("radius", 0.0))
-                    self._table.setItem(row, COL_R, self._mk_item(f"{r:.1f}", editable=editable))
-                    defl = el.get("_deflection")
-                    self._table.setItem(row, COL_DEFL,
-                        self._mk_item(f"{math.degrees(defl):+.2f}" if defl is not None else "—"))
-                    self._table.setItem(row, COL_A,  self._mk_item("—"))
-                    self._table.setItem(row, COL_SL, self._mk_item("—"))
-                elif et == "Spiral":
-                    r_fin = self._spiral_R(el)
-                    self._table.setItem(row, COL_R, self._mk_item(
-                        f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞"))
-                    self._table.setItem(row, COL_A,
-                        self._mk_item(f"{float(el.get('clothoid_A', 0.0)):.1f}"))
-                    self._table.setItem(row, COL_DEFL, self._mk_item("—"))
-                    self._table.setItem(row, COL_SL,
-                        self._mk_item(f"{length:.1f}", editable=editable))
-                else:  # Line
-                    for c in (COL_R, COL_A, COL_DEFL, COL_SL):
-                        self._table.setItem(row, c, self._mk_item("—"))
-
-                # Row metadata for edit routing
-                self._table.item(row, COL_ID).setData(Qt.ItemDataRole.UserRole,
-                                                      {"pi": el.get("_pi"), "etype": et,
-                                                       "elem_index": i})
-
-                self._add_actions(row, i, el, editable)
-
-            # Omitted-PI section (restorable)
-            if editable:
-                for pid in self._model.pis:
-                    if not pid.omitted:
-                        continue
-                    row = self._table.rowCount()
-                    self._table.insertRow(row)
-                    grey = QColor("#777777")
-                    it = self._mk_item(f"PI {pid.index}", color=grey, align_right=False)
-                    f = it.font(); f.setStrikeOut(True); it.setFont(f)
-                    self._table.setItem(row, COL_ID, it)
-                    self._table.setItem(row, COL_TYPE,
-                        self._mk_item("omitted PI", color=grey, align_right=False))
-                    self._table.setItem(row, COL_DEFL,
-                        self._mk_item(f"{math.degrees(pid.deflection):+.2f}", color=grey))
-                    for c in (COL_STA, COL_LEN, COL_R, COL_A, COL_SL):
-                        self._table.setItem(row, c, self._mk_item("—", color=grey))
-                    self._table.item(row, COL_ID).setData(
-                        Qt.ItemDataRole.UserRole, {"pi": pid.index, "etype": "omitted"})
-                    btn = QPushButton("Restore PI")
-                    btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
-                    btn.clicked.connect(lambda _=False, k=pid.index: self._restore_pi(k))
-                    self._table.setCellWidget(row, COL_ACT, self._wrap_buttons([btn]))
+                self._fill_row(row, spec)
         finally:
             self._populating = False
             self._table.setUpdatesEnabled(True)
@@ -358,6 +476,37 @@ class ElementTableDock(QWidget):
         return r_en if math.isinf(r_st) else r_st
 
     @staticmethod
+    def _action_sig(el: dict, elements: list, elem_index: int,
+                    model, editable: bool) -> tuple:
+        """
+        Signature of the action-button set a row needs. Rows whose signature
+        is unchanged keep their widgets across rebuilds (the diff path
+        rewrites only the target PI in the widget's meta dict).
+        """
+        if not editable:
+            return ()
+        et = el.get("type")
+        pi = el.get("_pi")
+        if et == "Arc" and pi is not None:
+            pid = next((p for p in model.pis if p.index == pi), None)
+            merged = bool(pid is not None and pid.merged_with_next)
+            return ("arc", merged)
+        if et == "Line":
+            if (0 < elem_index < len(elements) - 1
+                    and float(el.get("length", 0.0)) < MERGE_LINE_THRESHOLD):
+                prev_el = elements[elem_index - 1]
+                next_el = elements[elem_index + 1]
+                if (prev_el.get("type") == "Spiral"
+                        and next_el.get("type") == "Spiral"
+                        and math.isinf(float(prev_el.get("radius_end", 0.0) or 0.0))
+                        and math.isinf(float(next_el.get("radius_start", 0.0) or 0.0))
+                        and prev_el.get("_pi") is not None
+                        and next_el.get("_pi") is not None):
+                    return ("line", "merge")
+            return ()
+        return ()
+
+    @staticmethod
     def _wrap_buttons(buttons: list) -> QWidget:
         w = QWidget()
         h = QHBoxLayout(w)
@@ -369,64 +518,67 @@ class ElementTableDock(QWidget):
         return w
 
     def _add_actions(self, row: int, elem_index: int, el: dict, editable: bool):
-        if not editable:
+        """
+        Create the action-button widget for a row. Callbacks read the target
+        PI from the widget's mutable `_meta` dict (never from a closure), so
+        the diff path can retarget a reused widget with a dict update.
+        """
+        sig = self._action_sig(el, self._elements, elem_index,
+                               self._model, editable)
+        if not sig:
             return
-        buttons = []
         et = el.get("type")
         pi = el.get("_pi")
+        buttons = []
+        meta = {"pi": pi}
 
-        if et == "Arc" and pi is not None:
+        if sig[0] == "arc":
             omit = QPushButton("Omit PI")
             omit.setStyleSheet("font-size: 10px; padding: 2px 8px;")
             omit.setToolTip("Remove this curve; neighbouring curves absorb its deflection.")
-            omit.clicked.connect(lambda _=False, k=pi: self._omit_pi(k))
             buttons.append(omit)
 
             reset = QPushButton("Reset")
             reset.setStyleSheet("font-size: 10px; padding: 2px 8px;")
             reset.setToolTip("Reset radius and spiral length to their auto-estimated values.")
-            reset.clicked.connect(lambda _=False, k=pi: self._reset_pi(k))
             buttons.append(reset)
 
-            pid = next((p for p in self._model.pis if p.index == pi), None)
-            if pid is not None and pid.merged_with_next:
-                undo = QPushButton("Undo merge")
-                undo.setStyleSheet(
-                    "QPushButton { font-size: 10px; padding: 2px 8px; "
-                    "background: #ffb300; color: #212121; border-radius: 3px; "
-                    "font-weight: bold; }"
-                    "QPushButton:hover { background: #ffc633; }")
-                undo.clicked.connect(lambda _=False, k=pi: self._undo_merge(k))
-                buttons.append(undo)
+            wrap = self._wrap_buttons(buttons if not sig[1] else buttons + [
+                self._mk_amber_button("Undo merge")])
+            wrap._meta = meta
+            omit.clicked.connect(lambda _=False, w=wrap: self._omit_pi(w._meta["pi"]))
+            reset.clicked.connect(lambda _=False, w=wrap: self._reset_pi(w._meta["pi"]))
+            if sig[1]:
+                undo = wrap.layout().itemAt(2).widget()
+                undo.clicked.connect(
+                    lambda _=False, w=wrap: self._undo_merge(w._meta["pi"]))
+            self._table.setCellWidget(row, COL_ACT, wrap)
+            return
 
-        elif et == "Line":
-            # Merge action: short straight sandwiched between an exit spiral
-            # and an entry spiral of two different curves.
-            if (0 < elem_index < len(self._elements) - 1
-                    and float(el.get("length", 0.0)) < MERGE_LINE_THRESHOLD):
-                prev_el = self._elements[elem_index - 1]
-                next_el = self._elements[elem_index + 1]
-                if (prev_el.get("type") == "Spiral" and next_el.get("type") == "Spiral"
-                        and math.isinf(float(prev_el.get("radius_end", 0.0) or 0.0))
-                        and math.isinf(float(next_el.get("radius_start", 0.0) or 0.0))
-                        and prev_el.get("_pi") is not None
-                        and next_el.get("_pi") is not None):
-                    merge = QPushButton("Merge spirals ↔")
-                    merge.setStyleSheet(
-                        "QPushButton { font-size: 10px; padding: 2px 8px; "
-                        "background: #ffb300; color: #212121; border-radius: 3px; "
-                        "font-weight: bold; }"
-                        "QPushButton:hover { background: #ffc633; }")
-                    merge.setToolTip(
-                        "Remove this short straight by prolonging the adjacent\n"
-                        "transition spirals (kept symmetrical on both curves).")
-                    merge.clicked.connect(
-                        lambda _=False, a=prev_el.get("_pi"), b=next_el.get("_pi"):
-                        self._merge_spirals(a, b))
-                    buttons.append(merge)
+        if sig == ("line", "merge"):
+            prev_el = self._elements[elem_index - 1]
+            next_el = self._elements[elem_index + 1]
+            meta = {"pi": prev_el.get("_pi"), "pi_b": next_el.get("_pi")}
+            merge = self._mk_amber_button("Merge spirals ↔")
+            merge.setToolTip(
+                "Remove this short straight by prolonging the adjacent\n"
+                "transition spirals (kept symmetrical on both curves).")
+            wrap = self._wrap_buttons([merge])
+            wrap._meta = meta
+            merge.clicked.connect(
+                lambda _=False, w=wrap:
+                self._merge_spirals(w._meta["pi"], w._meta["pi_b"]))
+            self._table.setCellWidget(row, COL_ACT, wrap)
 
-        if buttons:
-            self._table.setCellWidget(row, COL_ACT, self._wrap_buttons(buttons))
+    @staticmethod
+    def _mk_amber_button(text: str) -> QPushButton:
+        b = QPushButton(text)
+        b.setStyleSheet(
+            "QPushButton { font-size: 10px; padding: 2px 8px; "
+            "background: #ffb300; color: #212121; border-radius: 3px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background: #ffc633; }")
+        return b
 
     # ------------------------------------------------------------------
     # Editing
@@ -470,8 +622,12 @@ class ElementTableDock(QWidget):
                 self.log_message.emit(
                     f"PI {pi_idx}: {labels.get(field_name, field_name)} → "
                     f"{value:.1f} m requested…", "info")
+        changed = list(self._pending.keys())
         self._pending.clear()
-        self._rebuild()
+        if changed:
+            self._rebuild(span=(min(changed), max(changed)))
+        else:
+            self._rebuild()
 
     def _omit_pi(self, pi_index: int):
         self._set_pi(pi_index, omitted=True)
@@ -486,7 +642,7 @@ class ElementTableDock(QWidget):
         pid.radius = -1.0
         pid.spiral_len = -1.0
         pid.merged_with_next = False
-        self._rebuild()
+        self._rebuild(span=(pi_index, pi_index))
 
     def _set_pi(self, pi_index: int, omitted: bool):
         if self._model is None:
@@ -495,7 +651,7 @@ class ElementTableDock(QWidget):
         if pid is None:
             return
         pid.omitted = omitted
-        self._rebuild()
+        self._rebuild(span=(pi_index, pi_index))
 
     def _merge_spirals(self, pi_a: int, pi_b: int):
         from geometry.candidates import merge_intermediate_line
@@ -522,18 +678,23 @@ class ElementTableDock(QWidget):
     # Rebuild + metrics
     # ------------------------------------------------------------------
 
-    def _rebuild(self, regenerate: bool = True):
+    def _rebuild(self, regenerate: bool = True,
+                 span: tuple | None = None):
         """
         Refresh table + map from the model.
 
         `regenerate=False` is used by the merge/undo handlers: those functions
-        already rebuilt the geometry internally, so re-running
-        `rebuild_from_pi_model` here would just repeat a full (expensive)
-        reconstruction of the whole alignment.
+        already rebuilt the geometry internally. `span=(k_lo, k_hi)` routes a
+        value edit / omit / reset through the span-local rebuild — on long
+        lines that is ~60x faster than the full reconstruction.
         """
         from geometry.candidates import (rebuild_from_pi_model,
+                                         rebuild_pi_span,
                                          metrics_from_stats, evaluate_candidate)
-        if regenerate:
+        if regenerate and span is not None:
+            rebuild_pi_span(self._model, span[0], span[1])
+            els = self._model.elements
+        elif regenerate:
             els = rebuild_from_pi_model(self._model)
         else:
             els = self._model.elements

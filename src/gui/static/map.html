@@ -272,66 +272,139 @@ function _emphasize(entry, on, weight) {
   }
 }
 
+var alignEntries = [];   /* ordered entries, parallel to the segments payload */
+
+function _rebuildSegIndex() {
+  segIndex = {};
+  alignEntries.forEach(function(e){ if (e.eid) segIndex[e.eid] = e; });
+}
+
+/* Create the polyline + handlers for one segment. Handlers and the tooltip
+   read from the mutable entry (entry.seg / entry.eid), so a diff update can
+   retarget a kept layer by assigning those fields — no rebinding needed. */
+function _addSegmentLayer(seg) {
+  var pts = (seg.points || []).map(function(n){ return [n[0], n[1]]; });
+  if (pts.length < 2) return null;
+  var col = ELEMENT_COLOR[seg.type] || '#ffffff';
+  /* Coloured main element (canvas-rendered: far cheaper for many paths) */
+  var pl = L.polyline(pts, {
+    color: col, weight: 4, opacity: 0.95,
+    pane: 'alignmentPane', renderer: _alnRenderer
+  }).addTo(map);
+  var entry = {main: pl, glow: null, pts: pts, col: col, selected: false,
+               seg: seg, eid: (seg.params || {}).element_id || null};
+  pl.bindTooltip(function(){ return _fmtTooltip(entry.seg); },
+                 {sticky: true, direction: 'top', className: 'aln-tip'});
+
+  /* Hover: immediate glow; after 3 s an ID + statistics popup.
+     Selected elements keep their emphasized style on mouseout. */
+  pl.on('mouseover', function(ev) {
+    _emphasize(entry, true, 7);
+    _clearHover();
+    var at = ev.latlng;
+    _hoverTimer = setTimeout(function() {
+      _hoverPopup = L.popup({closeButton: false, className: 'aln-tip', autoPan: false})
+        .setLatLng(at)
+        .setContent(_fmtStatsPopup(entry.seg))
+        .openOn(map);
+    }, 3000);
+  });
+  pl.on('mouseout', function() {
+    if (entry.selected) _emphasize(entry, true, 8);
+    else                _emphasize(entry, false);
+    _clearHover();
+  });
+
+  /* Click: select this element in the table below.
+     Ctrl+click toggles it into a multi-selection (for PI-range merge). */
+  pl.on('click', function(ev) {
+    L.DomEvent.stopPropagation(ev);
+    if (_stationClickMode) {
+      /* Station placement takes priority: forward the click instead */
+      if (backend && backend.on_map_clicked)
+        backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
+      return;
+    }
+    if (!entry.eid) return;
+    var ctrl = !!(ev.originalEvent &&
+                  (ev.originalEvent.ctrlKey || ev.originalEvent.metaKey));
+    if (backend && backend.on_element_clicked)
+      backend.on_element_clicked(entry.eid, ctrl);
+  });
+  return entry;
+}
+
 function showAlignmentSegmented(segments, fitView) {
   if (fitView === undefined) fitView = true;
   clearAlignment();
-  segIndex = {};
   var all = [];
   segments.forEach(function(seg) {
-    var pts = (seg.points || []).map(function(n){ return [n[0], n[1]]; });
-    if (pts.length < 2) return;
-    all = all.concat(pts);
-    var col = ELEMENT_COLOR[seg.type] || '#ffffff';
-    /* Coloured main element (canvas-rendered: far cheaper for many paths) */
-    var pl = L.polyline(pts, {
-      color: col, weight: 4, opacity: 0.95,
-      pane: 'alignmentPane', renderer: _alnRenderer
-    }).addTo(map);
-    pl.bindTooltip(_fmtTooltip(seg), {sticky: true, direction: 'top', className: 'aln-tip'});
-    alignmentLayers.push(pl);
-
-    var eid = (seg.params || {}).element_id;
-    var entry = {main: pl, glow: null, pts: pts, col: col, selected: false};
-    if (eid) segIndex[eid] = entry;
-
-    /* Hover: immediate glow; after 3 s an ID + statistics popup.
-       Selected elements keep their emphasized style on mouseout. */
-    pl.on('mouseover', function(ev) {
-      _emphasize(entry, true, 7);
-      _clearHover();
-      var at = ev.latlng;
-      _hoverTimer = setTimeout(function() {
-        _hoverPopup = L.popup({closeButton: false, className: 'aln-tip', autoPan: false})
-          .setLatLng(at)
-          .setContent(_fmtStatsPopup(seg))
-          .openOn(map);
-      }, 3000);
-    });
-    pl.on('mouseout', function() {
-      if (entry.selected) _emphasize(entry, true, 8);
-      else                _emphasize(entry, false);
-      _clearHover();
-    });
-
-    /* Click: select this element in the table below.
-       Ctrl+click toggles it into a multi-selection (for PI-range merge). */
-    pl.on('click', function(ev) {
-      L.DomEvent.stopPropagation(ev);
-      if (_stationClickMode) {
-        /* Station placement takes priority: forward the click instead */
-        if (backend && backend.on_map_clicked)
-          backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
-        return;
-      }
-      if (!eid) return;
-      var ctrl = !!(ev.originalEvent &&
-                    (ev.originalEvent.ctrlKey || ev.originalEvent.metaKey));
-      if (backend && backend.on_element_clicked)
-        backend.on_element_clicked(eid, ctrl);
-    });
+    var entry = _addSegmentLayer(seg);
+    if (!entry) return;
+    all = all.concat(entry.pts);
+    alignmentLayers.push(entry.main);
+    alignEntries.push(entry);
   });
+  _rebuildSegIndex();
   if (all.length && fitView)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
+}
+
+function _segGeomEqual(entry, seg) {
+  var pts = seg.points || [];
+  if (entry.seg.type !== seg.type) return false;
+  if (entry.pts.length !== pts.length) return false;
+  var a0 = entry.pts[0], b0 = pts[0];
+  var a1 = entry.pts[entry.pts.length - 1], b1 = pts[pts.length - 1];
+  var eps = 1e-9;
+  return Math.abs(a0[0]-b0[0]) < eps && Math.abs(a0[1]-b0[1]) < eps &&
+         Math.abs(a1[0]-b1[0]) < eps && Math.abs(a1[1]-b1[1]) < eps;
+}
+
+/* Diff update after an edit: keep layers whose geometry is unchanged
+   (common prefix/suffix), recreate only the edited middle span, and
+   refresh kept entries' seg/eid (ids and stations shift after merges).
+   Falls back to a full redraw if the arrays cannot be kept parallel. */
+function updateAlignmentSegmented(segments) {
+  if (!alignEntries.length) {
+    showAlignmentSegmented(segments, false);
+    return;
+  }
+  var nOld = alignEntries.length, nNew = segments.length;
+  var lim = Math.min(nOld, nNew);
+  var p = 0;
+  while (p < lim && _segGeomEqual(alignEntries[p], segments[p])) p++;
+  var s = 0;
+  while (s < lim - p &&
+         _segGeomEqual(alignEntries[nOld-1-s], segments[nNew-1-s])) s++;
+
+  var removed = alignEntries.splice(p, nOld - p - s);
+  removed.forEach(function(e){
+    try { map.removeLayer(e.main); } catch(err){}
+    if (e.glow) try { map.removeLayer(e.glow); } catch(err){}
+  });
+  var inserted = [];
+  for (var q = p; q < nNew - s; q++) {
+    var entry = _addSegmentLayer(segments[q]);
+    if (entry) inserted.push(entry);
+  }
+  Array.prototype.splice.apply(alignEntries, [p, 0].concat(inserted));
+  if (alignEntries.length !== nNew) {       /* degenerate segment — bail out */
+    showAlignmentSegmented(segments, false);
+    return;
+  }
+  for (var i = 0; i < nNew; i++) {          /* retarget kept entries */
+    if (i >= p && i < p + inserted.length) continue;
+    alignEntries[i].seg = segments[i];
+    alignEntries[i].eid = (segments[i].params || {}).element_id || null;
+  }
+  /* rebuild the flat layer list (glows included) + the id index */
+  alignmentLayers = [];
+  alignEntries.forEach(function(e){
+    alignmentLayers.push(e.main);
+    if (e.glow) alignmentLayers.push(e.glow);
+  });
+  _rebuildSegIndex();
 }
 
 /* Emphasize the selected elements (called from Python on every table
@@ -454,6 +527,7 @@ function flyToAlignment() {
 function clearAlignment() {
   alignmentLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
   alignmentLayers = [];
+  alignEntries = [];
   segIndex = {};
   _clearHover();
 }
