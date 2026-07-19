@@ -153,7 +153,10 @@ def _dists_to_element_vec(xy: np.ndarray, el: dict) -> np.ndarray:
     d0 = xy - start
     if seg_len < 1e-9:
         return np.hypot(d0[:, 0], d0[:, 1])
-    t = (d0 @ seg) / (seg_len * seg_len)
+    # Elementwise on purpose (not d0 @ seg): BLAS picks size-dependent
+    # kernels (FMA vs plain) so a windowed slice would round differently
+    # from the full array — rebuild_pi_span needs bitwise-equal distances.
+    t = (d0[:, 0] * seg[0] + d0[:, 1] * seg[1]) / (seg_len * seg_len)
     np.clip(t, 0.0, 1.0, out=t)
     px = start[0] + t * seg[0]
     py = start[1] + t * seg[1]
@@ -170,7 +173,12 @@ def compute_deviation_stats(elements: list[dict], xy: np.ndarray) -> dict:
     Returns
     -------
     {"max_deviation": float, "rmse": float,
-     "per_element": [(max_dev, mean_dev, n_points), ...]}   # one per element
+     "per_element": [(max_dev, mean_dev, n_points), ...],   # one per element
+     "point_dist": (P,) float array,   # per-OSM-point nearest distance
+     "point_elem": (P,) int array}     # per-OSM-point nearest element index
+
+    The per-point arrays are what makes `rebuild_pi_span` able to update the
+    stats incrementally instead of re-running this whole E×P pass.
     """
     n_el = len(elements)
     empty = {"max_deviation": 0.0, "rmse": 0.0,
@@ -191,8 +199,25 @@ def compute_deviation_stats(elements: list[dict], xy: np.ndarray) -> dict:
     ok = np.isfinite(best)
     if not ok.any():
         return empty
-    b  = best[ok]
-    bi = best_i[ok]
+    stats = _stats_from_point_arrays(best, best_i, n_el)
+    stats["point_dist"] = best
+    stats["point_elem"] = best_i
+    return stats
+
+
+def _stats_from_point_arrays(point_dist: np.ndarray, point_elem: np.ndarray,
+                             n_el: int) -> dict:
+    """
+    Aggregate max/rmse/per-element stats from the per-point nearest-distance
+    arrays. O(P) numpy — this is what lets `rebuild_pi_span` refresh the
+    global stats after recomputing only a window of points.
+    """
+    ok = np.isfinite(point_dist)
+    if not ok.any() or n_el == 0:
+        return {"max_deviation": 0.0, "rmse": 0.0,
+                "per_element": [(0.0, 0.0, 0)] * n_el}
+    b  = point_dist[ok]
+    bi = point_elem[ok]
 
     sums   = np.bincount(bi, weights=b, minlength=n_el)
     counts = np.bincount(bi, minlength=n_el)
@@ -3220,36 +3245,34 @@ def _max_radius_for_tangent(T_allow: float, half_tan: float, L: float) -> float:
     return lo
 
 
-def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
+def _line_dict(p0, p1, direction=None) -> dict | None:
+    """Connector Line element between two points; None if degenerate (<1e-6 m)."""
+    length = float(np.hypot(*(p1 - p0)))
+    if length < 1e-6:
+        return None
+    if direction is None:
+        direction = math.atan2(float(p1[1] - p0[1]), float(p1[0] - p0[0]))
+    return {
+        "type": "Line", "sta_start": 0.0, "length": length,
+        "start": p0.tolist(), "end": p1.tolist(),
+        "direction_rad": direction,
+    }
+
+
+def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
+                      cur_pt) -> tuple:
     """
-    (Re)construct the C1-continuous element chain from the PI model,
-    honouring per-PI overrides (radius, spiral_len, omitted).
+    Build the element chain for the interior PIs k_lo..k_hi (inclusive,
+    vertex indices into model.V), starting from `cur_pt`.
 
-    Level 2 (model.use_spirals=False):  Line – Arc – Line …
-    Level 3 (model.use_spirals=True):   Line – Spiral – Arc – Spiral – Line …
+    This is the single zone constructor: `rebuild_from_pi_model` runs it
+    over all PIs, `rebuild_pi_span` over a window. Side effects match the
+    pre-factor-out behaviour exactly: log notes are appended to model.log
+    and the applied radius / spiral_len are written back into each PIData.
 
-    Guarantees
-    ----------
-    • The first element starts exactly at xy_ref[0]; the last element ends
-      exactly at xy_ref[-1] (the original OSM endpoints).
-    • Every junction is tangent (C1): arcs meet their tangents at
-      T = R·tan(|δ|/2); spirals use the exact Fresnel shift
-      p = y_sp − R(1−cos θ_s), k = x_sp − R·sin θ_s,
-      T_s = (R+p)·tan(|δ|/2) + k, so the L–S–A–S–L zone closes on the
-      outgoing tangent by construction.
-    • Spiral radius continuity: radius at the arc side equals the arc
-      radius exactly; radius at the line side is ∞.
-    • Where geometry does not fit (short tangents, tiny deflection) the
-      builder degrades gracefully: shorter spiral → no spiral (plain arc)
-      → smaller radius, in that order. C1 is never abandoned. Overridden
-      values are clamped by the same guards and the *applied* value is
-      written back into the PIData (visible in the element table).
-    • Omitted PIs are skipped; the self-healing incoming direction absorbs
-      their deflection into the next curve.
-
-    Side effects: fills model.elements, model.tangent_stubs, and writes the
-    applied radius / spiral_len (+ *_auto fields when auto-estimated) back
-    into each PIData. Elements carry stable "_pi" and "element_id" keys.
+    Returns (elements, tangent_stubs, exit_point). The leading connector
+    Line into each zone is included; the trailing connector after the last
+    zone is NOT (the caller appends it — final tangent or splice connector).
     """
     from geometry.alignment import (
         _compute_zone_geometry, _compute_clothoid_shift, _fit_circle_kasa,
@@ -3261,33 +3284,16 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
     use_spirals   = model.use_spirals
     m = len(V)
 
-    model.tangent_stubs = []
-    model.log = []
-
-    if m < 2:
-        model.elements = []
-        return model.elements
-    if m == 2:
-        model.elements = _two_point_line(xy, model.chainages_ref)
-        _assign_element_ids(model.elements)
-        return model.elements
-
     elements: list[dict] = []
-    cur_pt = V[0].copy()              # exact OSM start point
+    stubs:    list[dict] = []
+    cur_pt = np.asarray(cur_pt, dtype=float).copy()
 
     def _append_line(p0, p1, direction=None):
-        length = float(np.hypot(*(p1 - p0)))
-        if length < 1e-6:
-            return
-        if direction is None:
-            direction = math.atan2(float(p1[1] - p0[1]), float(p1[0] - p0[0]))
-        elements.append({
-            "type": "Line", "sta_start": 0.0, "length": length,
-            "start": p0.tolist(), "end": p1.tolist(),
-            "direction_rad": direction,
-        })
+        e = _line_dict(p0, p1, direction)
+        if e is not None:
+            elements.append(e)
 
-    for k in range(1, m - 1):
+    for k in range(max(1, k_lo), min(k_hi, m - 2) + 1):
         pi_data = model.pis[k - 1]
         if pi_data.omitted:
             continue          # self-healing: next curve absorbs the deflection
@@ -3489,7 +3495,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
                     "radius_start": R, "radius_end": float("inf"),
                     "clothoid_A": A_cl, "rot": rot, "_pi": k,
                 })
-                model.tangent_stubs.append({
+                stubs.append({
                     "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
                     "tc": TC.tolist(), "ct": np.array(CT, dtype=float).tolist(),
                 })
@@ -3513,7 +3519,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
                 "chord": float(np.hypot(*(ST - TS))),
                 "_deflection": delta, "_pi": k,
             })
-            model.tangent_stubs.append({
+            stubs.append({
                 "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
                 "tc": TS.tolist(), "ct": ST.tolist(),
             })
@@ -3527,8 +3533,68 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
             if pi_data.spiral_len_auto <= 0.0 and L > 0.0:
                 pi_data.spiral_len_auto = L
 
-    # ── Final tangent to the exact OSM end point ─────────────────────────
-    _append_line(cur_pt, V[-1].copy())
+    return elements, stubs, cur_pt
+
+
+def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
+    """
+    (Re)construct the C1-continuous element chain from the PI model,
+    honouring per-PI overrides (radius, spiral_len, omitted).
+
+    Level 2 (model.use_spirals=False):  Line – Arc – Line …
+    Level 3 (model.use_spirals=True):   Line – Spiral – Arc – Spiral – Line …
+
+    Guarantees
+    ----------
+    • The first element starts exactly at xy_ref[0]; the last element ends
+      exactly at xy_ref[-1] (the original OSM endpoints).
+    • Every junction is tangent (C1): arcs meet their tangents at
+      T = R·tan(|δ|/2); spirals use the exact Fresnel shift
+      p = y_sp − R(1−cos θ_s), k = x_sp − R·sin θ_s,
+      T_s = (R+p)·tan(|δ|/2) + k, so the L–S–A–S–L zone closes on the
+      outgoing tangent by construction.
+    • Spiral radius continuity: radius at the arc side equals the arc
+      radius exactly; radius at the line side is ∞.
+    • Where geometry does not fit (short tangents, tiny deflection) the
+      builder degrades gracefully: shorter spiral → no spiral (plain arc)
+      → smaller radius, in that order. C1 is never abandoned. Overridden
+      values are clamped by the same guards and the *applied* value is
+      written back into the PIData (visible in the element table).
+    • Omitted PIs are skipped; the self-healing incoming direction absorbs
+      their deflection into the next curve.
+
+    Side effects: fills model.elements, model.tangent_stubs, and writes the
+    applied radius / spiral_len (+ *_auto fields when auto-estimated) back
+    into each PIData. Elements carry stable "_pi" and "element_id" keys.
+    """
+    from geometry.alignment import (
+        _compute_zone_geometry, _compute_clothoid_shift, _fit_circle_kasa,
+    )
+
+    V, idx, xy = model.V, model.idx, model.xy_ref
+    tol           = model.tol
+    min_radius    = model.min_radius
+    use_spirals   = model.use_spirals
+    m = len(V)
+
+    model.tangent_stubs = []
+    model.log = []
+
+    if m < 2:
+        model.elements = []
+        return model.elements
+    if m == 2:
+        model.elements = _two_point_line(xy, model.chainages_ref)
+        _assign_element_ids(model.elements)
+        return model.elements
+
+    elements, stubs, cur_pt = _build_zone_range(model, 1, m - 2, V[0])
+    model.tangent_stubs = stubs
+
+    # Final tangent to the exact OSM end point
+    _tail = _line_dict(cur_pt, V[-1].copy())
+    if _tail is not None:
+        elements.append(_tail)
 
     # ── Station chain + stable element ids + deviation stats ─────────────
     sta = 0.0
@@ -3589,6 +3655,371 @@ def _assign_element_ids(elements: list[dict]) -> None:
             else:
                 r_st = float(e.get("radius_start", float("inf")))
                 e["element_id"] = f"S{k}-in" if math.isinf(r_st) else f"S{k}-out"
+
+
+# ---------------------------------------------------------------------------
+# Span-local rebuild — the merge-click fast path
+# ---------------------------------------------------------------------------
+# A zone's geometry depends only on its two polygon legs, its PIData and the
+# entry point carried in from the previous zone. Editing PIs [k_lo, k_hi]
+# can therefore only change elements from zone k_lo-1 (its outgoing leg
+# moved) up to the first downstream zone that rebuilds identically to its
+# old self — everything beyond is provably unchanged. rebuild_pi_span
+# exploits this: it rebuilds a handful of zones instead of thousands and
+# refreshes the deviation stats from the stored per-point arrays instead of
+# re-running the full E×P pass.
+
+_SPAN_EQ_TOL = 1e-9
+_SPAN_MAX_EXTEND = 6      # zones to try past k_hi+1 before giving up
+
+# Diagnostic: why span rebuilds fell back to the full path (reason → count)
+span_fallback_counts: dict = {}
+
+
+def _span_fallback(reason: str) -> None:
+    span_fallback_counts[reason] = span_fallback_counts.get(reason, 0) + 1
+
+
+def _element_geom_equal(a: dict, b: dict, tol: float = _SPAN_EQ_TOL) -> bool:
+    """Geometric equality of two element dicts (type + key numbers to 1e-9)."""
+    if a.get("type") != b.get("type"):
+        return False
+    for key in ("length", "radius", "radius_start", "radius_end",
+                "clothoid_A", "_deflection"):
+        va, vb = a.get(key), b.get(key)
+        if (va is None) != (vb is None):
+            return False
+        if va is not None:
+            va, vb = float(va), float(vb)
+            if math.isinf(va) or math.isinf(vb):
+                if va != vb:
+                    return False
+            elif abs(va - vb) > tol:
+                return False
+    for key in ("start", "end", "center"):
+        va, vb = a.get(key), b.get(key)
+        if (va is None) != (vb is None):
+            return False
+        if va is not None and (abs(va[0] - vb[0]) > tol
+                               or abs(va[1] - vb[1]) > tol):
+            return False
+    return True
+
+
+def _zone_spans(elements: list[dict]) -> dict:
+    """_pi tag → (first_index, last_index) of that zone's tagged elements."""
+    spans: dict = {}
+    for i, e in enumerate(elements):
+        k = e.get("_pi")
+        if k is None:
+            continue
+        if k in spans:
+            spans[k] = (spans[k][0], i)
+        else:
+            spans[k] = (i, i)
+    return spans
+
+
+def _span_snapshot(model: "PIAlignment") -> dict:
+    """Everything a splice mutates, for O(span) rollback without a rebuild."""
+    st = model.last_stats or {}
+    stats_copy: dict = {
+        "max_deviation": st.get("max_deviation", 0.0),
+        "rmse":          st.get("rmse", 0.0),
+        "per_element":   list(st.get("per_element") or []),
+    }
+    if st.get("point_dist") is not None:
+        stats_copy["point_dist"] = st["point_dist"].copy()
+    if st.get("point_elem") is not None:
+        stats_copy["point_elem"] = st["point_elem"].copy()
+    return {
+        "elements": model.elements,
+        "stubs":    model.tangent_stubs,
+        "stats":    stats_copy,
+        # write-back fields by PIData *reference*: shared objects survive
+        # any list swap the caller does during its own rollback
+        "pi_vals":  [(p, p.radius, p.radius_auto, p.spiral_len,
+                      p.spiral_len_auto) for p in model.pis],
+    }
+
+
+def restore_span_snapshot(model: "PIAlignment", snap: dict) -> None:
+    """Rollback of a rebuild_pi_span splice (call BEFORE restoring caller-
+    managed PIData fields — this rewrites the rebuild write-backs)."""
+    for p, r, ra, sl, sla in snap["pi_vals"]:
+        p.radius, p.radius_auto = r, ra
+        p.spiral_len, p.spiral_len_auto = sl, sla
+    model.elements = snap["elements"]
+    model.tangent_stubs = snap["stubs"]
+    model.last_stats = snap["stats"]
+    # The splice may have overwritten _max_dev / ids / sta on the kept
+    # prefix dicts — rewrite them from the restored stats (all O(E)-cheap).
+    annotate_element_deviations(model.elements, model.xy_ref,
+                                stats=model.last_stats)
+    sta = 0.0
+    for e in model.elements:
+        e["sta_start"] = sta
+        sta += e.get("length", 0.0)
+    _assign_element_ids(model.elements)
+
+
+def rebuild_pi_span(model: "PIAlignment", k_lo: int, k_hi: int, *,
+                    old_lo: int | None = None, old_hi: int | None = None,
+                    k_shift: int = 0) -> dict | None:
+    """
+    Span-local alternative to `rebuild_from_pi_model`.
+
+    Call AFTER mutating model.V/idx/pis. Rebuilds zones [k_lo-1 … ] (new
+    indexing) until the chain re-converges with the old elements, splices
+    the result into model.elements and updates model.last_stats from the
+    per-point arrays. `old_lo`/`old_hi` give the edited range in the OLD
+    `_pi` tagging (default k_lo/k_hi); `k_shift` = new_tag − old_tag for
+    zones after old_hi (−removed for a range merge, +1 for an insert).
+
+    Returns a rollback snapshot (see `restore_span_snapshot`) on success or
+    None when it fell back to a full `rebuild_from_pi_model` — the model is
+    valid either way, and the result is bit-identical to a full rebuild by
+    construction (same zone constructor, convergence checked to 1e-9,
+    window deviation recomputed against ALL elements with the exact
+    semantics of the full pass).
+    """
+    if old_lo is None:
+        old_lo = k_lo
+    if old_hi is None:
+        old_hi = k_hi
+
+    V, idx, xy = model.V, model.idx, model.xy_ref
+    m = len(V)
+    old_elements = model.elements
+    st = model.last_stats or {}
+    pd, pe = st.get("point_dist"), st.get("point_elem")
+    if (m <= 3 or not old_elements or pd is None or pe is None
+            or len(pd) != len(xy) or xy is None or len(xy) == 0):
+        _span_fallback("no-point-arrays")
+        rebuild_from_pi_model(model)
+        return None
+
+    snap = _span_snapshot(model)
+    old_zones = _zone_spans(old_elements)
+
+    # ── upstream boundary: zone k_lo-1 must be rebuilt (its outgoing leg
+    # may have moved); zone k_lo-2 is provably unchanged ────────────────────
+    a = max(1, k_lo - 1)
+    prev_tags = [t for t in old_zones if t < a]     # a < old_lo ⇒ same tags
+    if prev_tags:
+        i_prev_last = old_zones[max(prev_tags)][1]
+        i0 = i_prev_last + 1
+        cur_pt = np.asarray(old_elements[i_prev_last]["end"], dtype=float)
+    else:
+        i0 = 0
+        cur_pt = V[0].copy()
+
+    # ── build forward until a rebuilt zone matches its old self exactly ─────
+    built: list = []
+    built_stubs: list = []
+    j = a
+    converged_at = None
+    i1_end = len(old_elements)          # slice end (exclusive) in old list
+    hard_stop = min(m - 2, k_hi + 1 + _SPAN_MAX_EXTEND)
+    while j <= m - 2:
+        els_j, stubs_j, cur_pt = _build_zone_range(model, j, j, cur_pt)
+        if j > k_hi:
+            osp = old_zones.get(j - k_shift)
+            new_zone_els = [e for e in els_j if e.get("_pi") is not None]
+            if osp is not None and new_zone_els:
+                old_zone_els = old_elements[osp[0]:osp[1] + 1]
+                if (len(old_zone_els) == len(new_zone_els)
+                        and all(_element_geom_equal(x, y) for x, y
+                                in zip(old_zone_els, new_zone_els))):
+                    # keep the (possibly moved) connector, drop the
+                    # identical rebuilt zone, keep old from here on
+                    first_tagged = next(i for i, e in enumerate(els_j)
+                                        if e.get("_pi") is not None)
+                    built.extend(els_j[:first_tagged])
+                    converged_at = j
+                    i1_end = osp[0]
+                    break
+            if j >= hard_stop and osp is not None:
+                # chain refuses to re-converge — bail out to a full rebuild
+                _span_fallback("no-convergence")
+                restore_span_snapshot(model, snap)
+                rebuild_from_pi_model(model)
+                return None
+        built.extend(els_j)
+        built_stubs.extend(stubs_j)
+        j += 1
+    else:
+        # rebuilt to the last PI — replace through the end + final tangent
+        tail = _line_dict(cur_pt, V[-1].copy())
+        if tail is not None:
+            built.append(tail)
+
+    # ── OSM point window (new idx space; ±2 PI windows of margin) ───────────
+    j_end = converged_at if converged_at is not None else (m - 2)
+    # Low bound: the slice's leading connector reaches back to the previous
+    # BUILT zone, which can be far behind a-2 when intervening PIs are
+    # omitted or their curves were dropped — the window must cover it.
+    prev_tag = max(prev_tags) if prev_tags else 0
+    lo_pt = int(idx[max(0, min(a - 2, prev_tag - 1))])
+    hi_pt = int(idx[min(m - 1, j_end + 2)])
+
+    # The window must contain every point currently assigned into the
+    # replaced slice (in dense PI clusters ownership wanders far beyond any
+    # fixed PI margin), so extend it by the actual ownership range.
+    owned = np.nonzero((pe >= i0) & (pe < i1_end))[0]
+    if owned.size:
+        lo_pt = min(lo_pt, int(owned[0]))
+        hi_pt = max(hi_pt, int(owned[-1]))
+
+    # ── assemble the new element list (tail dicts copied for rollback) ──────
+    delta_el = len(built) - (i1_end - i0)
+    new_tail = []
+    for e in old_elements[i1_end:]:
+        c = dict(e)
+        if k_shift and c.get("_pi") is not None:
+            c["_pi"] = c["_pi"] + k_shift
+        new_tail.append(c)
+    new_list = old_elements[:i0] + built + new_tail
+
+    # ── incremental deviation update ─────────────────────────────────────────
+    if delta_el:
+        tail_mask = pe >= i1_end
+        pe[tail_mask] += delta_el
+    # Candidate elements: everything from two zones before the window's
+    # first zone (a−2) to two zones after its last (j_end+2) — window edge
+    # points live two zones out, and THEIR nearest element can be another
+    # zone further. Zone-tag based (element counts vary; zones can be
+    # omitted): the largest tag ≤ a−4 opens the range, the smallest tag
+    # ≥ j_end+4 closes it.
+    pts = xy[lo_pt:hi_pt + 1]
+    new_zones = _zone_spans(new_list)
+    lo_tags = [t for t in new_zones if t <= a - 4]
+    hi_tags = [t for t in new_zones if t >= j_end + 4]
+    c0 = new_zones[max(lo_tags)][0] if lo_tags else 0
+    c1 = (new_zones[min(hi_tags)][1] if hi_tags else len(new_list) - 1)
+    best = np.full(len(pts), np.inf)
+    best_i = np.zeros(len(pts), dtype=np.int64)
+    for ci in range(c0, c1 + 1):
+        d = _dists_to_element_vec(pts, new_list[ci])
+        upd = d < best                  # strict '<': full-pass tie semantics
+        if upd.any():
+            best[upd] = d[upd]
+            best_i[upd] = ci
+
+    # Exact completion: when local deviations are large (omitted zones
+    # strand OSM points metres away), a window point's true nearest can be
+    # a kept element arbitrarily far outside the candidate range. Sweep
+    # every element whose bounding box lies within the preliminary worst
+    # window distance — a lower-bound prune, so the result matches the
+    # full pass exactly (even across hairpins).
+    if len(pts) and len(new_list) > (c1 - c0 + 1):
+        bound = float(best.max())
+        if math.isfinite(bound):
+            wx0 = float(pts[:, 0].min()); wx1 = float(pts[:, 0].max())
+            wy0 = float(pts[:, 1].min()); wy1 = float(pts[:, 1].max())
+            for ci, el in enumerate(new_list):
+                if c0 <= ci <= c1:
+                    continue
+                if el.get("type") == "Arc":
+                    cx, cy = el["center"]
+                    r = float(el.get("radius", 0.0))
+                    bx0, by0, bx1, by1 = cx - r, cy - r, cx + r, cy + r
+                else:
+                    sx, sy = el["start"]; ex, ey = el["end"]
+                    bx0, bx1 = min(sx, ex), max(sx, ex)
+                    by0, by1 = min(sy, ey), max(sy, ey)
+                gx = max(bx0 - wx1, wx0 - bx1, 0.0)
+                gy = max(by0 - wy1, wy0 - by1, 0.0)
+                if math.hypot(gx, gy) > bound:
+                    continue
+                d = _dists_to_element_vec(pts, el)
+                upd = d < best
+                if upd.any():
+                    best[upd] = d[upd]
+                    best_i[upd] = ci
+    pd[lo_pt:hi_pt + 1] = best
+    pe[lo_pt:hi_pt + 1] = best_i
+
+    # Points OUTSIDE the window keep valid distances to their (unchanged)
+    # elements, but a rebuilt span element may have moved closer to them —
+    # e.g. an omit swings the absorbing curve by metres. One cheap pass:
+    # all outside points vs only the built elements (E_span ≪ E).
+    if built:
+        out_mask = np.ones(len(pd), dtype=bool)
+        out_mask[lo_pt:hi_pt + 1] = False
+        if out_mask.any():
+            pts_out = xy[out_mask]
+            d_min = np.full(pts_out.shape[0], np.inf)
+            d_arg = np.zeros(pts_out.shape[0], dtype=np.int64)
+            for off, el in enumerate(built):
+                d = _dists_to_element_vec(pts_out, el)
+                upd = d < d_min
+                if upd.any():
+                    d_min[upd] = d[upd]
+                    d_arg[upd] = i0 + off          # absolute new index
+            take = d_min < pd[out_mask]            # strictly closer wins
+            if take.any():
+                rows = np.nonzero(out_mask)[0][take]
+                pd[rows] = d_min[take]
+                pe[rows] = d_arg[take]
+
+    stats = _stats_from_point_arrays(pd, pe, len(new_list))
+    stats["point_dist"] = pd
+    stats["point_elem"] = pe
+
+    # ── finalize: stations, ids, annotations, stubs ──────────────────────────
+    sta = 0.0
+    for e in new_list:
+        e["sta_start"] = sta
+        sta += e.get("length", 0.0)
+    _assign_element_ids(new_list)
+    annotate_element_deviations(new_list, xy, stats=stats)
+
+    kept_before = [s for s in snap["stubs"] if s["pi"] < a]
+    kept_after = []
+    if converged_at is not None:
+        for s in snap["stubs"]:
+            if s["pi"] >= converged_at - k_shift:
+                s2 = dict(s)
+                s2["pi"] = s["pi"] + k_shift
+                kept_after.append(s2)
+    model.tangent_stubs = kept_before + built_stubs + kept_after
+    model.elements = new_list
+    model.last_stats = stats
+    return snap
+
+
+def _light_copy(model: "PIAlignment") -> "PIAlignment":
+    """
+    Trial copy for consolidation scans: shares the big read-only arrays
+    (xy_ref, chainages_ref), copies everything a trial merge mutates.
+    Replaces copy.deepcopy, which cloned the whole OSM polyline per group.
+    """
+    import dataclasses as _dc
+    c = PIAlignment(
+        V=model.V.copy(),
+        idx=list(model.idx),
+        pis=[_dc.replace(p) for p in model.pis],
+        xy_ref=model.xy_ref,
+        chainages_ref=model.chainages_ref,
+        tol=model.tol,
+        min_radius=model.min_radius,
+        spiral_default=model.spiral_default,
+        use_spirals=model.use_spirals,
+        elements=[dict(e) for e in model.elements],
+        tangent_stubs=[dict(s) for s in model.tangent_stubs],
+        log=[],
+    )
+    st = model.last_stats or {}
+    ls = dict(st)
+    if st.get("point_dist") is not None:
+        ls["point_dist"] = st["point_dist"].copy()
+    if st.get("point_elem") is not None:
+        ls["point_elem"] = st["point_elem"].copy()
+    if st.get("per_element") is not None:
+        ls["per_element"] = list(st["per_element"])
+    c.last_stats = ls
+    return c
 
 
 def _find_split_curve_pair(elements: list[dict]) -> tuple[int, int] | None:
@@ -3856,7 +4287,7 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
     a.merge_partner = pi_b
     b.merged_with_prev = True
 
-    els = rebuild_from_pi_model(model)
+    span_snap = rebuild_pi_span(model, pi_a, pi_b)
     ok = (abs(a.spiral_len - L_a_new) < 0.05
           and abs(b.spiral_len - L_b_new) < 0.05)
     if ok:
@@ -3871,12 +4302,15 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
         else:
             ok = False
     if not ok:
+        if span_snap is not None:
+            restore_span_snapshot(model, span_snap)   # splice-back, no rebuild
         (a.spiral_len, a.premerge_spiral_len,
          a.merged_with_next, a.merged_with_prev) = snap[0]
         (b.spiral_len, b.premerge_spiral_len,
          b.merged_with_next, b.merged_with_prev) = snap[1]
         a.merge_partner = -1
-        rebuild_from_pi_model(model)
+        if span_snap is None:
+            rebuild_from_pi_model(model)
         return False, ("Merging failed: the outer tangents are too short for "
                        "the prolonged spirals (rolled back).")
     return True, f"Merged: spirals prolonged to {L_a_new:.1f} m / {L_b_new:.1f} m."
@@ -3955,13 +4389,19 @@ def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int
     new_pis.insert(k_from - 1, merged_pi)
     model.pis = new_pis
 
-    elements = rebuild_from_pi_model(model)
+    span_snap = rebuild_pi_span(model, k_from, k_from,
+                                old_lo=k_from, old_hi=k_to,
+                                k_shift=-removed)
+    elements = model.elements
     # Sanity: the merged curve must actually have been constructed
     if not any(e.get("_pi") == k_from and e["type"] == "Arc" for e in elements):
         model.V, model.idx, model.pis = old_V, old_idx, old_pis
         for p, i in zip(model.pis, old_indices):
             p.index = i
-        rebuild_from_pi_model(model)
+        if span_snap is not None:
+            restore_span_snapshot(model, span_snap)   # splice-back, no rebuild
+        else:
+            rebuild_from_pi_model(model)
         return False, ("The merged curve could not be constructed (no room "
                        "for a tangent-fitting radius) — rolled back.")
     return True, (f"PIs {k_from}–{k_to} replaced by a single curve "
@@ -3975,6 +4415,8 @@ def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
     if a is None or not a.merged_with_next:
         return False, "This PI has no merge to undo."
     b = pids.get(a.merge_partner)
+    k_hi = a.merge_partner if (b is not None
+                               and a.merge_partner > pi_a) else pi_a
     a.spiral_len = a.premerge_spiral_len if a.premerge_spiral_len >= 0 else -1.0
     a.merged_with_next = False
     a.merge_partner = -1
@@ -3983,7 +4425,7 @@ def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
         b.spiral_len = b.premerge_spiral_len if b.premerge_spiral_len >= 0 else -1.0
         b.premerge_spiral_len = -1.0
         b.merged_with_prev = False
-    rebuild_from_pi_model(model)
+    rebuild_pi_span(model, pi_a, k_hi)
     return True, "Merge undone."
 
 
@@ -4078,7 +4520,7 @@ def find_consolidation_groups(
             "radii_before": radii_before, "radius_after": None,
             "max_dev": None, "ok": False, "reason": "",
         }
-        trial = copy.deepcopy(model)
+        trial = _light_copy(model)      # shares xy_ref; O(span) trial merge
         ok, msg = merge_pi_range(trial, k_from, k_to)
         if not ok:
             rec["reason"] = msg
