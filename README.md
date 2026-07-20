@@ -31,10 +31,12 @@ No Python installation required.
 - **Czech Railways browser** — all ~240 lines of the *Railways in Czech Republic* OSM collection from a **bundled offline snapshot** (instant, no network), refreshable with 🔄 Update
 - **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
+- **Track editing** — split a track at a map point, merge two or more tracks end-to-end (endpoints matched and reversed automatically), or remove a track from the selection — all before fitting
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
 - **Clothoid transition curves** — entry/exit spirals at every arc, exact Fresnel-based tangent placement
-- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore PIs, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with one curve
-- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose
+- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore/delete PIs, split a Line by inserting a new PI, trim the alignment's start/end, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with one curve — including turns past 90° and even past 180°, built as a chain of curves sharing one radius
+- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose; handles high-angle runs the same way
+- **Toolbar** — ◀ Back / ▶ Forward step navigation, quick access to New/Open/Save and the most-used Refine actions
 - **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
 - **Project files (`.coypu`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
 - **PI display** — Points of Intersection as markers, virtual tangent extensions dashed light-grey
@@ -54,6 +56,8 @@ No Python installation required.
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ File  View  Settings  Help                                           │
+├──────────────────────────────────────────────────────────────────────┤
+│ ◀ Back  ▶ Forward   Step 5 · Refine   │ New Open Save │ 🗺 ⤺ ↩       │
 ├───────────────────┬────────────────────────────────────────┬─────────┤
 │ [1] Find Railway  │        Interactive Leaflet Map         │  Step   │
 │ [2] Select        │  (tile provider selector + railway     │  panel  │
@@ -67,6 +71,8 @@ No Python installation required.
 │   200 px sidebar  │              │                         │         │
 └───────────────────┴──────────────┴─────────────────────────┴─────────┘
 ```
+
+The toolbar under the menu bar gives quick access to step navigation (◀ Back / ▶ Forward, matching what the current step's own Back button and the sidebar's suggested-next step would do), the File actions, and — while in Refine or Consolidate — the alignment's most-used edit actions (🗺 Show alignment, ⤺ Merge selection, ↩ Undo merge), enabled only when the current selection supports them.
 
 ---
 
@@ -108,6 +114,14 @@ The loaded tracks appear in a list and are drawn on the map in distinct colours.
 - Click a track row to highlight it on the map in yellow
 - Click *📍 Fit map to tracks* to zoom the map to show all tracks
 
+**Edit tracks**, if the loaded relation doesn't already match what you want to export:
+
+- **📍 Split at map point** — select exactly one track, arm the mode, then click the map: the track splits at the nearest point into two, sharing the boundary so there is no gap.
+- **🔗 Merge selected** — select two or more tracks and chain them end-to-end; the closest pair of endpoints is matched automatically (reversing a track if needed). Tracks whose endpoints are more than 50 m apart are refused with a clear reason rather than silently joined.
+- **🗑 Remove selected** — drop the selected track(s) from the list; the OSM data can always be re-fetched.
+
+Editing tracks here re-locks the later steps (they need to be re-confirmed with the new track set) — this is expected, since the fitted alignment was built from the old tracks.
+
 Click **Next → Configure** when your selection is ready.
 
 ---
@@ -148,9 +162,11 @@ Each result card shows the element count, maximum deviation, RMSE, and the worst
 The full **element table** appears under the map: every Line, Arc and Spiral with its ID, station [km], length, radius, clothoid A and deflection.
 
 - **Edit** an arc *Radius* or a *Spiral L* value — the alignment rebuilds and the map updates automatically (values are clamped to what the tangent geometry allows; C1 continuity is preserved by construction).
-- **Omit PI** removes a curve; the neighbouring curves absorb its deflection. Omitted PIs stay listed (struck through) and can be restored.
+- **Omit PI** removes a curve; the neighbouring curves absorb its deflection. Omitted PIs stay listed (struck through) and can be restored, or **🗑 Delete**d outright (unlike Omit, this physically removes the vertex — the neighbours connect directly and it cannot be restored).
+- **✂ Split here** on a Line row inserts a new PI at that line's midpoint — useful when Douglas-Peucker simplified away a real curve. **📍 Pick split point** arms a map click-to-insert mode instead, so you can choose the exact location.
+- **✂ Trim start / Trim end** discard everything before/after the selected row — the alignment starts or ends fresh at that point.
 - **Merge spirals ↔** appears on short straights (< 30 m) sandwiched between two transition curves: the straight is removed by prolonging the adjacent spirals, and the spirals on the far side of each circular curve prolong identically so both curves stay **symmetrical**. *Undo merge* restores the previous state.
-- **Merge PI range → single curve** replaces every PI between the two selected tangents with one curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button.
+- **Merge PI range → single curve** replaces every PI between the two selected tangents with one curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button. Totals up to 90° become one curve as before; **beyond 90° — even past 180° — the range becomes a chain of curves sharing one radius**, built from a circle fitted to the OSM points, so long sweeping curves are no longer capped. In the rare case where the total turn is genuinely ambiguous (a single PI's own reading sits within a few degrees of ±180°), you're asked which interpretation you meant, each with its resulting deviation; the common case never asks.
 - The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element, or click an element on the map to select its row (Ctrl+click multi-selects); hover an element for 3 s to see its ID and deviation statistics.
 
 Click **Accept →** when the geometry is final — though you can return here and keep editing at any later point.
@@ -168,7 +184,7 @@ Level 2/3 sometimes split one physical curve into a run of consecutive curves. T
 
 **🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — or **↩ Undo** to restore. Selecting a row highlights that run on the map.
 
-> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself.
+> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself. Long runs whose total turn exceeds 90° are handled the same way as in Refine's Merge PI range — one shared radius fitted from the OSM points, split across as many curves as the turn needs.
 
 ---
 
