@@ -59,6 +59,7 @@ var _showRailOverlay = true;
 var _hoverTimer     = null;
 var _hoverPopup     = null;
 var _stationClickMode = false;
+var _splitClickMode = false;   // click-to-pick a Line-split point (Refine)
 
 /* ── Tile provider ─────────────────────────────────────────────── */
 function setTileProvider(url, subs, attr, maxZoom) {
@@ -325,6 +326,11 @@ function _addSegmentLayer(seg) {
         backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
       return;
     }
+    if (_splitClickMode) {
+      if (backend && backend.on_split_point_clicked)
+        backend.on_split_point_clicked(ev.latlng.lat, ev.latlng.lng);
+      return;
+    }
     if (!entry.eid) return;
     var ctrl = !!(ev.originalEvent &&
                   (ev.originalEvent.ctrlKey || ev.originalEvent.metaKey));
@@ -495,9 +501,16 @@ function setStationClickMode(on) {
   map.getContainer().style.cursor = on ? 'crosshair' : '';
 }
 
+function setSplitClickMode(on) {
+  _splitClickMode = !!on;
+  map.getContainer().style.cursor = on ? 'crosshair' : '';
+}
+
 map.on('click', function(ev) {
   if (_stationClickMode && backend && backend.on_map_clicked) {
     backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
+  } else if (_splitClickMode && backend && backend.on_split_point_clicked) {
+    backend.on_split_point_clicked(ev.latlng.lat, ev.latlng.lng);
   }
 });
 

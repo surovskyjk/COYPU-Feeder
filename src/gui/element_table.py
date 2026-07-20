@@ -40,6 +40,8 @@ COL_ID, COL_TYPE, COL_STA, COL_LEN, COL_R, COL_A, COL_DEFL, COL_SL, COL_ACT = ra
 
 # Lines shorter than this between two spirals qualify for the merge action
 MERGE_LINE_THRESHOLD = 30.0
+# Lines longer than this offer "Split here" (inserts a PI at its midpoint)
+MIN_SPLIT_LINE_LENGTH = 15.0
 
 
 class ElementTableDock(QWidget):
@@ -47,6 +49,7 @@ class ElementTableDock(QWidget):
     elements_selected        = Signal(list)        # selected element_ids (map highlight)
     log_message              = Signal(str, str)    # (text, level) → log panel
     show_alignment_requested = Signal()            # re-draw alignment on the map
+    split_pick_mode          = Signal(bool)        # "Pick split point" toggled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,6 +120,37 @@ class ElementTableDock(QWidget):
         self._range_btn.setEnabled(False)
         self._range_btn.clicked.connect(self._on_merge_range)
         header.addWidget(self._range_btn)
+
+        self._trim_start_btn = QPushButton("✂ Trim start")
+        self._trim_start_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
+        self._trim_start_btn.setToolTip(
+            "Discard everything before the selected row — the alignment\n"
+            "starts fresh at that point.")
+        self._trim_start_btn.setEnabled(False)
+        self._trim_start_btn.clicked.connect(lambda: self._on_trim("start"))
+        header.addWidget(self._trim_start_btn)
+
+        self._trim_end_btn = QPushButton("✂ Trim end")
+        self._trim_end_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
+        self._trim_end_btn.setToolTip(
+            "Discard everything after the selected row — the alignment\n"
+            "ends at that point.")
+        self._trim_end_btn.setEnabled(False)
+        self._trim_end_btn.clicked.connect(lambda: self._on_trim("end"))
+        header.addWidget(self._trim_end_btn)
+
+        self._pick_split_btn = QPushButton("📍 Pick split point")
+        self._pick_split_btn.setCheckable(True)
+        self._pick_split_btn.setStyleSheet(
+            "QPushButton { font-size: 10px; padding: 3px 10px; }"
+            "QPushButton:checked { background: #2a82da; color: #ffffff; "
+            "font-weight: bold; }")
+        self._pick_split_btn.setToolTip(
+            "Click, then click a point on the map to insert a PI there\n"
+            "(splits whichever Line currently covers that point).\n"
+            "Stays armed for multiple picks — click again to stop.")
+        self._pick_split_btn.toggled.connect(self.split_pick_mode.emit)
+        header.addWidget(self._pick_split_btn)
         v.addLayout(header)
 
         self._table = QTableWidget(0, len(COLS))
@@ -274,9 +308,17 @@ class ElementTableDock(QWidget):
                        {"pi": pid.index, "etype": "omitted", "sig": spec["sig"]})
             btn = QPushButton("Restore PI")
             btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
-            wrap = self._wrap_buttons([btn])
+            delete = QPushButton("🗑 Delete")
+            delete.setStyleSheet(
+                "QPushButton { font-size: 10px; padding: 2px 8px; "
+                "color: #ff8a80; }")
+            delete.setToolTip(
+                "Physically remove this PI (it is currently only omitted,\n"
+                "not deleted — the vertex is still in the tangent polygon).")
+            wrap = self._wrap_buttons([btn, delete])
             wrap._meta = {"pi": pid.index}
             btn.clicked.connect(lambda _=False, w=wrap: self._restore_pi(w._meta["pi"]))
+            delete.clicked.connect(lambda _=False, w=wrap: self._delete_pi(w._meta["pi"]))
             self._table.setCellWidget(row, COL_ACT, wrap)
             return
 
@@ -355,8 +397,9 @@ class ElementTableDock(QWidget):
                     "sig": spec["sig"]})
         wrap = self._table.cellWidget(row, COL_ACT)
         if wrap is not None and hasattr(wrap, "_meta"):
-            if "pi_b" in wrap._meta:      # merge-spirals widget on a Line row
-                if 0 < i < len(self._elements) - 1:
+            if "elem_index" in wrap._meta:    # Line row (Split and/or Merge)
+                wrap._meta["elem_index"] = i
+                if "pi_b" in wrap._meta and 0 < i < len(self._elements) - 1:
                     wrap._meta["pi"] = self._elements[i - 1].get("_pi")
                     wrap._meta["pi_b"] = self._elements[i + 1].get("_pi")
             else:
@@ -492,6 +535,7 @@ class ElementTableDock(QWidget):
             merged = bool(pid is not None and pid.merged_with_next)
             return ("arc", merged)
         if et == "Line":
+            can_merge = False
             if (0 < elem_index < len(elements) - 1
                     and float(el.get("length", 0.0)) < MERGE_LINE_THRESHOLD):
                 prev_el = elements[elem_index - 1]
@@ -502,7 +546,10 @@ class ElementTableDock(QWidget):
                         and math.isinf(float(next_el.get("radius_start", 0.0) or 0.0))
                         and prev_el.get("_pi") is not None
                         and next_el.get("_pi") is not None):
-                    return ("line", "merge")
+                    can_merge = True
+            can_split = float(el.get("length", 0.0)) >= MIN_SPLIT_LINE_LENGTH
+            if can_merge or can_split:
+                return ("line", can_merge, can_split)
             return ()
         return ()
 
@@ -543,31 +590,59 @@ class ElementTableDock(QWidget):
             reset.setToolTip("Reset radius and spiral length to their auto-estimated values.")
             buttons.append(reset)
 
-            wrap = self._wrap_buttons(buttons if not sig[1] else buttons + [
-                self._mk_amber_button("Undo merge")])
+            delete = QPushButton("🗑 Delete")
+            delete.setStyleSheet(
+                "QPushButton { font-size: 10px; padding: 2px 8px; "
+                "color: #ff8a80; }")
+            delete.setToolTip(
+                "Physically remove this PI — unlike Omit, the tangent\n"
+                "polygon loses the vertex and its neighbours connect directly.")
+            buttons.append(delete)
+
+            if sig[1]:
+                buttons.append(self._mk_amber_button("Undo merge"))
+            wrap = self._wrap_buttons(buttons)
             wrap._meta = meta
             omit.clicked.connect(lambda _=False, w=wrap: self._omit_pi(w._meta["pi"]))
             reset.clicked.connect(lambda _=False, w=wrap: self._reset_pi(w._meta["pi"]))
+            delete.clicked.connect(lambda _=False, w=wrap: self._delete_pi(w._meta["pi"]))
             if sig[1]:
-                undo = wrap.layout().itemAt(2).widget()
+                undo = wrap.layout().itemAt(3).widget()
                 undo.clicked.connect(
                     lambda _=False, w=wrap: self._undo_merge(w._meta["pi"]))
             self._table.setCellWidget(row, COL_ACT, wrap)
             return
 
-        if sig == ("line", "merge"):
-            prev_el = self._elements[elem_index - 1]
-            next_el = self._elements[elem_index + 1]
-            meta = {"pi": prev_el.get("_pi"), "pi_b": next_el.get("_pi")}
-            merge = self._mk_amber_button("Merge spirals ↔")
-            merge.setToolTip(
-                "Remove this short straight by prolonging the adjacent\n"
-                "transition spirals (kept symmetrical on both curves).")
-            wrap = self._wrap_buttons([merge])
+        if sig[0] == "line":
+            _, can_merge, can_split = sig
+            meta = {"elem_index": elem_index}
+            buttons = []
+            if can_split:
+                split = QPushButton("✂ Split here")
+                split.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+                split.setToolTip(
+                    "Insert a new PI at this line's midpoint — lets the fit\n"
+                    "pick up a curve that Douglas-Peucker simplified away.")
+                buttons.append(split)
+            if can_merge:
+                prev_el = self._elements[elem_index - 1]
+                next_el = self._elements[elem_index + 1]
+                meta["pi"] = prev_el.get("_pi")
+                meta["pi_b"] = next_el.get("_pi")
+                merge = self._mk_amber_button("Merge spirals ↔")
+                merge.setToolTip(
+                    "Remove this short straight by prolonging the adjacent\n"
+                    "transition spirals (kept symmetrical on both curves).")
+                buttons.append(merge)
+            wrap = self._wrap_buttons(buttons)
             wrap._meta = meta
-            merge.clicked.connect(
-                lambda _=False, w=wrap:
-                self._merge_spirals(w._meta["pi"], w._meta["pi_b"]))
+            if can_split:
+                split.clicked.connect(
+                    lambda _=False, w=wrap: self._split_line(w._meta["elem_index"]))
+            if can_merge:
+                merge.clicked.connect(
+                    lambda _=False, w=wrap:
+                    self._merge_spirals(w._meta["pi"], w._meta["pi_b"]))
             self._table.setCellWidget(row, COL_ACT, wrap)
 
     @staticmethod
@@ -652,6 +727,92 @@ class ElementTableDock(QWidget):
             return
         pid.omitted = omitted
         self._rebuild(span=(pi_index, pi_index))
+
+    def insert_pi_at_xy(self, point_xy) -> tuple[bool, str]:
+        """
+        Insert a PI at the OSM point nearest `point_xy` (projected coords —
+        the map-click pick mode; app.py projects lat/lon before calling
+        this). Returns (ok, message); logs and refreshes on success.
+        """
+        from geometry.candidates import insert_pi, nearest_xy_ref_index
+        if self._model is None:
+            return False, "No editable model."
+        j_ref = nearest_xy_ref_index(self._model, point_xy)
+        ok, msg = insert_pi(self._model, j_ref)
+        if ok:
+            self.log_message.emit(msg, "ok")
+            self._rebuild(regenerate=False)
+        else:
+            self.log_message.emit(f"Split at picked point: {msg}", "warn")
+        return ok, msg
+
+    def _split_line(self, elem_index: int):
+        from geometry.candidates import insert_pi, nearest_xy_ref_index
+        from PySide6.QtWidgets import QMessageBox
+        if self._model is None or elem_index >= len(self._elements):
+            return
+        el = self._elements[elem_index]
+        mid = [(el["start"][0] + el["end"][0]) / 2.0,
+               (el["start"][1] + el["end"][1]) / 2.0]
+        j_ref = nearest_xy_ref_index(self._model, mid)
+        ok, msg = insert_pi(self._model, j_ref)
+        if not ok:
+            self.log_message.emit(f"Split line: {msg}", "warn")
+            QMessageBox.information(self, "Cannot split here", msg)
+            return
+        self.log_message.emit(msg, "ok")
+        self._rebuild(regenerate=False)   # insert_pi already rebuilt
+
+    def _delete_pi(self, pi_index: int):
+        from geometry.candidates import delete_pi
+        from PySide6.QtWidgets import QMessageBox
+        if self._model is None:
+            return
+        reply = QMessageBox.question(
+            self, "Delete PI",
+            f"Physically remove PI {pi_index}? Its neighbouring curves "
+            "will connect directly.\n\nThis is different from Omit, which "
+            "keeps the vertex and can be restored.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = delete_pi(self._model, pi_index)
+        if not ok:
+            self.log_message.emit(f"Delete PI {pi_index}: {msg}", "warn")
+            QMessageBox.warning(self, "Cannot delete PI", msg)
+            return
+        self.log_message.emit(msg, "ok")
+        self._rebuild(regenerate=False)   # delete_pi already rebuilt
+
+    def _on_trim(self, which: str):
+        from geometry.candidates import trim_alignment, nearest_xy_ref_index
+        from PySide6.QtWidgets import QMessageBox
+        el = self._selected_single_element()
+        if self._model is None or el is None:
+            return
+        pt = el["start"] if which == "start" else el["end"]
+        j_ref = nearest_xy_ref_index(self._model, pt)
+        n = len(self._model.xy_ref)
+        j_start, j_end = (j_ref, n - 1) if which == "start" else (0, j_ref)
+        removed_pts = j_start + (n - 1 - j_end)
+        reply = QMessageBox.question(
+            self, f"Trim {which}",
+            f"Discard the alignment {'before' if which == 'start' else 'after'} "
+            f"the selected row?\n\n{removed_pts} of {n} OSM points will be "
+            "removed. This cannot be undone (other than reloading the "
+            "project or track).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = trim_alignment(self._model, j_start, j_end)
+        if not ok:
+            self.log_message.emit(f"Trim {which}: {msg}", "warn")
+            QMessageBox.warning(self, "Cannot trim", msg)
+            return
+        self.log_message.emit(msg, "ok")
+        self._rebuild(regenerate=False)   # trim_alignment already rebuilt
 
     def _merge_spirals(self, pi_a: int, pi_b: int):
         from geometry.candidates import merge_intermediate_line
@@ -852,6 +1013,9 @@ class ElementTableDock(QWidget):
         rows = self._table.selectionModel().selectedRows()
         self._range_btn.setEnabled(
             self._model is not None and self._selected_pi_range() is not None)
+        single_el = self._selected_single_element()
+        self._trim_start_btn.setEnabled(single_el is not None)
+        self._trim_end_btn.setEnabled(single_el is not None)
         ids = []
         for r in sorted(x.row() for x in rows):
             it = self._table.item(r, COL_ID)
@@ -861,6 +1025,23 @@ class ElementTableDock(QWidget):
             if meta.get("etype") not in (None, "omitted"):
                 ids.append(it.text())
         self.elements_selected.emit(ids)
+
+    def _selected_single_element(self) -> dict | None:
+        """The one selected row's element dict, or None (0/2+ selected,
+        or the selection is an omitted-PI row)."""
+        if self._model is None:
+            return None
+        rows = self._table.selectionModel().selectedRows()
+        if len(rows) != 1:
+            return None
+        it = self._table.item(rows[0].row(), COL_ID)
+        if it is None:
+            return None
+        meta = it.data(Qt.ItemDataRole.UserRole) or {}
+        i = meta.get("elem_index")
+        if i is None or not (0 <= i < len(self._elements)):
+            return None
+        return self._elements[i]
 
     # ------------------------------------------------------------------
     # Map click → table selection (Ctrl toggles into a multi-selection)

@@ -19,6 +19,7 @@ Algorithm IDs
 
 from __future__ import annotations
 
+import bisect
 import copy
 import math
 import time
@@ -4788,6 +4789,151 @@ def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
         b.merged_with_prev = False
     rebuild_pi_span(model, pi_a, k_hi)
     return True, "Merge undone."
+
+
+# ---------------------------------------------------------------------------
+# Split / delete / trim — direct edits to the tangent polygon
+# ---------------------------------------------------------------------------
+# insert_pi / delete_pi follow the merge_pi_range template (vertex array
+# edit + PI reindex + span rebuild); trim_alignment is rare enough that a
+# full rebuild is fine.
+
+def nearest_xy_ref_index(model: "PIAlignment", point_xy) -> int:
+    """Index into model.xy_ref of the OSM point closest to `point_xy`."""
+    xy = model.xy_ref
+    d2 = (xy[:, 0] - point_xy[0]) ** 2 + (xy[:, 1] - point_xy[1]) ** 2
+    return int(np.argmin(d2))
+
+
+def insert_pi(model: "PIAlignment", j_ref: int) -> tuple[bool, str]:
+    """
+    Insert a new PI at OSM point `xy_ref[j_ref]`, splitting whichever
+    tangent-polygon leg currently spans it. The new PI gets an auto radius
+    and spiral length — this is how a curve Douglas-Peucker smoothed away
+    inside a Line can be picked back up.
+
+    Returns (ok, message); on failure the model is unchanged.
+    """
+    m = len(model.V)
+    idx = model.idx
+    if not (0 <= j_ref < len(model.xy_ref)):
+        return False, "Point index out of bounds."
+    if j_ref <= idx[0] or j_ref >= idx[-1]:
+        return False, "Pick a point strictly between the alignment's endpoints."
+
+    # Locate the leg V[k] .. V[k+1] whose OSM range contains j_ref.
+    k = bisect.bisect_right(idx, j_ref) - 1
+    k = max(0, min(k, m - 2))
+    if idx[k] == j_ref or idx[k + 1] == j_ref:
+        return False, "That point already is a PI."
+
+    new_xy = model.xy_ref[j_ref]
+    old_pis = model.pis
+
+    model.V = np.vstack([model.V[:k + 1], new_xy[None, :], model.V[k + 1:]])
+    model.idx = model.idx[:k + 1] + [j_ref] + model.idx[k + 1:]
+
+    new_pis: list = []
+    for p in old_pis:
+        if p.index <= k:
+            new_pis.append(p)
+        else:
+            p.index += 1
+            new_pis.append(p)
+    new_pi = PIData(index=k + 1, xy=(float(new_xy[0]), float(new_xy[1])),
+                    deflection=_polygon_deflection(model.V, k + 1))
+    new_pis.insert(k, new_pi)
+    model.pis = new_pis
+
+    rebuild_pi_span(model, k + 1, k + 1, k_shift=1)
+    return True, f"PI {k + 1} inserted."
+
+
+def delete_pi(model: "PIAlignment", k: int) -> tuple[bool, str]:
+    """
+    Physically remove PI `k` — unlike `omit` (which keeps the vertex and
+    just skips its curve), the tangent polygon loses the vertex entirely
+    and its neighbours connect directly.
+
+    Returns (ok, message); on failure the model is unchanged.
+    """
+    m = len(model.V)
+    if not (1 <= k <= m - 2):
+        return False, "PI index out of bounds."
+    if m <= 3:
+        return False, "Cannot delete the only remaining PI."
+
+    old_pis = model.pis
+
+    model.V = np.vstack([model.V[:k], model.V[k + 1:]])
+    model.idx = model.idx[:k] + model.idx[k + 1:]
+
+    new_pis: list = []
+    for p in old_pis:
+        if p.index == k:
+            continue
+        if p.index > k:
+            p.index -= 1
+        new_pis.append(p)
+    model.pis = new_pis
+
+    rebuild_pi_span(model, k, k - 1, k_shift=-1)
+    return True, f"PI {k} deleted."
+
+
+def trim_alignment(model: "PIAlignment", j_start: int, j_end: int
+                   ) -> tuple[bool, str]:
+    """
+    Discard the alignment outside OSM points [j_start, j_end]: re-anchors
+    xy_ref/chainages_ref to the trimmed span and drops PIs outside it. Full
+    rebuild (trimming is a rare, deliberate action — no span path needed).
+
+    Returns (ok, message); on failure the model is unchanged.
+    """
+    from geometry.curvature import compute_chainages
+    import dataclasses as _dc
+
+    n = len(model.xy_ref)
+    if not (0 <= j_start < j_end < n):
+        return False, "Invalid trim range."
+
+    keep = [k for k in range(len(model.V))
+            if j_start <= model.idx[k] <= j_end]
+    if len(keep) < 2:
+        return False, "Trim range too small — no vertices remain."
+
+    old_V, old_idx, old_pis = model.V, model.idx, model.pis
+    old_xy, old_chain = model.xy_ref, model.chainages_ref
+
+    new_xy_ref = old_xy[j_start:j_end + 1].copy()
+    new_V = old_V[keep].copy()
+    new_idx = [old_idx[k] - j_start for k in keep]
+    new_V[0], new_V[-1] = new_xy_ref[0], new_xy_ref[-1]
+    new_idx[0], new_idx[-1] = 0, len(new_xy_ref) - 1
+
+    by_old_index = {p.index: p for p in old_pis}
+    new_pis: list = []
+    for new_k, old_k in enumerate(keep):
+        if new_k == 0 or new_k == len(new_V) - 1:
+            continue     # became an endpoint — no PIData
+        p = by_old_index.get(old_k)
+        if p is not None:
+            new_pis.append(_dc.replace(p, index=new_k))
+
+    model.xy_ref = new_xy_ref
+    model.chainages_ref = compute_chainages(new_xy_ref)
+    model.V = new_V
+    model.idx = new_idx
+    model.pis = new_pis
+
+    els = rebuild_from_pi_model(model)
+    if not els:
+        model.xy_ref, model.chainages_ref = old_xy, old_chain
+        model.V, model.idx, model.pis = old_V, old_idx, old_pis
+        rebuild_from_pi_model(model)
+        return False, "Trim produced an empty alignment — rolled back."
+    return True, (f"Trimmed to {len(new_xy_ref)} OSM points "
+                  f"(was {n}); {len(new_pis)} PIs remain.")
 
 
 # ---------------------------------------------------------------------------

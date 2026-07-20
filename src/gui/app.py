@@ -610,6 +610,8 @@ class App(QMainWindow):
         self.element_table.log_message.connect(self.log_panel.log)
         self.element_table.show_alignment_requested.connect(
             self._on_show_alignment_clicked)
+        self.element_table.split_pick_mode.connect(self._on_split_pick_mode)
+        self.map_widget.split_point_clicked.connect(self._on_split_point_clicked)
         # Map element click (Ctrl = toggle into multiselect) → table selection
         self.map_widget.element_clicked.connect(self.element_table.select_element)
 
@@ -1217,6 +1219,18 @@ class App(QMainWindow):
     def _on_element_rows_selected(self, element_ids: list):
         self.map_widget.highlight_elements(element_ids)
         self._refresh_toolbar_edit_actions()
+
+    def _on_split_pick_mode(self, on: bool):
+        self.map_widget.set_split_click_mode(on)
+        if on:
+            self.log_panel.log(
+                "Split-pick mode armed — click a point on the map to "
+                "insert a PI there.", "info")
+
+    def _on_split_point_clicked(self, lat: float, lon: float):
+        from geometry.projection import wgs84_to_projected
+        xy = wgs84_to_projected([(lat, lon)], self._work_epsg)[0]
+        self.element_table.insert_pi_at_xy(xy)
 
     def _on_show_alignment_clicked(self):
         """Re-draw the edited alignment + PI overlay (e.g. after map reload)."""

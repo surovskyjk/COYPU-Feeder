@@ -135,10 +135,11 @@ class DebugPage(QWebEnginePage):
 # ---------------------------------------------------------------------------
 
 class MapBridge(QObject):
-    bounds_ready    = Signal(float, float, float, float)
-    ready           = Signal()
-    map_clicked     = Signal(float, float)   # lat, lon (station-placement mode)
-    element_clicked = Signal(str, bool)      # element_id, ctrl held (multiselect)
+    bounds_ready       = Signal(float, float, float, float)
+    ready              = Signal()
+    map_clicked        = Signal(float, float)   # lat, lon (station-placement mode)
+    element_clicked    = Signal(str, bool)       # element_id, ctrl held (multiselect)
+    split_point_clicked = Signal(float, float)   # lat, lon (Refine split-pick mode)
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -156,16 +157,21 @@ class MapBridge(QObject):
     def on_element_clicked(self, element_id, ctrl):
         self.element_clicked.emit(element_id, ctrl)
 
+    @Slot(float, float)
+    def on_split_point_clicked(self, lat, lon):
+        self.split_point_clicked.emit(lat, lon)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
 # ---------------------------------------------------------------------------
 
 class MapWidget(QWidget):
-    bounds_ready    = Signal(float, float, float, float)
-    js_error        = Signal(str)
-    map_clicked     = Signal(float, float)   # lat, lon (station-placement mode)
-    element_clicked = Signal(str, bool)      # element_id, ctrl held (multiselect)
+    bounds_ready        = Signal(float, float, float, float)
+    js_error            = Signal(str)
+    map_clicked         = Signal(float, float)   # lat, lon (station-placement mode)
+    element_clicked     = Signal(str, bool)       # element_id, ctrl held (multiselect)
+    split_point_clicked = Signal(float, float)    # lat, lon (Refine split-pick mode)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -227,6 +233,7 @@ class MapWidget(QWidget):
         self._bridge.bounds_ready.connect(self.bounds_ready)
         self._bridge.map_clicked.connect(self.map_clicked)
         self._bridge.element_clicked.connect(self.element_clicked)
+        self._bridge.split_point_clicked.connect(self.split_point_clicked)
 
         # Serve gui/static/ (which contains map.html) over a local HTTP
         # server. Using http://127.0.0.1 as origin removes ALL cross-origin
@@ -432,6 +439,10 @@ class MapWidget(QWidget):
     def set_station_click_mode(self, on: bool):
         """Arm/disarm the click-to-place-station mode (crosshair cursor)."""
         self._run_js(f"setStationClickMode({'true' if on else 'false'})")
+
+    def set_split_click_mode(self, on: bool):
+        """Arm/disarm click-to-pick-a-split-point mode (crosshair cursor)."""
+        self._run_js(f"setSplitClickMode({'true' if on else 'false'})")
 
     def show_cross_section(self, left_pts: list, right_pts: list):
         """
