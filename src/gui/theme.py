@@ -157,6 +157,39 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
             QProgressBar { border:1px solid #555; border-radius:4px;
                            text-align:center; color:#fff; }
             QProgressBar::chunk { background-color:#2a82da; border-radius:3px; }
+
+            QToolBar#MainToolbar {
+                background-color: #2d2d30;
+                border-bottom: 1px solid #1a1a1c;
+                padding: 3px 4px;
+                spacing: 4px;
+            }
+            QToolBar#MainToolbar QToolButton {
+                background-color: #1565c0;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 11px;
+            }
+            QToolBar#MainToolbar QToolButton:hover {
+                background-color: #1e88e5;
+            }
+            QToolBar#MainToolbar QToolButton:pressed {
+                background-color: #0d47a1;
+            }
+            QToolBar#MainToolbar QToolButton:disabled {
+                background-color: #3a3a3d;
+                color: #666;
+            }
+            QToolBar#MainToolbar QLabel {
+                color: #e0e0e0;
+            }
+            QToolBar#MainToolbar::separator {
+                background-color: #4a4a4e;
+                width: 1px;
+                margin: 4px 6px;
+            }
         """)
     else:
         app.setStyleSheet("""
@@ -185,4 +218,37 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
 
             QProgressBar { border:1px solid #bbb; border-radius:4px; text-align:center; }
             QProgressBar::chunk { background-color:#1976d2; border-radius:3px; }
+
+            QToolBar#MainToolbar {
+                background-color: #eef1f5;
+                border-bottom: 1px solid #c8ccd2;
+                padding: 3px 4px;
+                spacing: 4px;
+            }
+            QToolBar#MainToolbar QToolButton {
+                background-color: #1976d2;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 11px;
+            }
+            QToolBar#MainToolbar QToolButton:hover {
+                background-color: #2196f3;
+            }
+            QToolBar#MainToolbar QToolButton:pressed {
+                background-color: #1565c0;
+            }
+            QToolBar#MainToolbar QToolButton:disabled {
+                background-color: #d0d0d0;
+                color: #888;
+            }
+            QToolBar#MainToolbar QLabel {
+                color: #202020;
+            }
+            QToolBar#MainToolbar::separator {
+                background-color: #c8ccd2;
+                width: 1px;
+                margin: 4px 6px;
+            }
         """)

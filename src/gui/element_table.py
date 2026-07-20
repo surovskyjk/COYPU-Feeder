@@ -674,6 +674,39 @@ class ElementTableDock(QWidget):
         self.log_message.emit(f"Merge at PI {pi_a} undone.", "info")
         self._rebuild(regenerate=False)   # undo already rebuilt the geometry
 
+    def selected_merge_pi(self) -> int | None:
+        """
+        The PI a toolbar "Undo merge" quick action would target: the single
+        selected row's own merge, or its partner's if it's the second half
+        of a pair. None if nothing selected/mergeable is selected.
+        """
+        if self._model is None:
+            return None
+        rows = self._table.selectionModel().selectedRows()
+        if len(rows) != 1:
+            return None
+        it = self._table.item(rows[0].row(), COL_ID)
+        if it is None:
+            return None
+        meta = it.data(Qt.ItemDataRole.UserRole) or {}
+        pi = meta.get("pi")
+        pid = next((p for p in self._model.pis if p.index == pi), None)
+        if pid is None:
+            return None
+        if pid.merged_with_next:
+            return pid.index
+        if pid.merged_with_prev:
+            return pid.merge_partner
+        return None
+
+    def undo_selected_merge(self) -> bool:
+        """Undo the merge targeted by `selected_merge_pi`. False if none."""
+        pi_a = self.selected_merge_pi()
+        if pi_a is None:
+            return False
+        self._undo_merge(pi_a)
+        return True
+
     # ------------------------------------------------------------------
     # Rebuild + metrics
     # ------------------------------------------------------------------

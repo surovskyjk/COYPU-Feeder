@@ -12,6 +12,7 @@ from PySide6.QtGui import QGuiApplication, QAction, QActionGroup
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
     QSizePolicy, QMessageBox, QApplication, QSplitter,
+    QToolBar, QLabel,
 )
 
 from .map_widget import MapWidget
@@ -60,6 +61,7 @@ class App(QMainWindow):
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
         self._current_step: int     = 0
+        self._suggested_step: int | None = None
         self._done_steps: set       = set()
         self._stale: set            = set()
         self._project_path          = None
@@ -70,10 +72,12 @@ class App(QMainWindow):
 
         self._build_layout()
         self._build_menu()
+        self._build_toolbar()
         self._wire_signals()
         self._connect_scheme_changes()
         self._apply_prefs()
         self._update_title()
+        self._step_label.setText(self._STEP_TIPS[S_FIND][0])
         self._refresh_nav()
 
     # ------------------------------------------------------------------
@@ -120,15 +124,18 @@ class App(QMainWindow):
         new_act.setShortcut("Ctrl+N")
         new_act.triggered.connect(self._on_new_project)
         file_menu.addAction(new_act)
+        self._act_file_new = new_act
         open_act = QAction("Open project…", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._on_open_project)
         file_menu.addAction(open_act)
+        self._act_file_open = open_act
         file_menu.addSeparator()
         save_act = QAction("Save project", self)
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self._on_save_project)
         file_menu.addAction(save_act)
+        self._act_file_save = save_act
         saveas_act = QAction("Save project as…", self)
         saveas_act.setShortcut("Ctrl+Shift+S")
         saveas_act.triggered.connect(self._on_save_project_as)
@@ -179,6 +186,91 @@ class App(QMainWindow):
         rel_act = QAction("Check for updates (Releases)…", self)
         rel_act.triggered.connect(self._open_releases)
         help_menu.addAction(rel_act)
+
+    # ------------------------------------------------------------------
+    # Toolbar — step navigation + file + quick edit actions
+    # ------------------------------------------------------------------
+
+    def _build_toolbar(self):
+        tb = QToolBar("Main", self)
+        tb.setObjectName("MainToolbar")
+        tb.setMovable(False)
+        self.addToolBar(tb)
+
+        self._act_back = QAction("◀ Back", self)
+        self._act_back.setToolTip("Go to the previous step")
+        self._act_back.triggered.connect(self._on_toolbar_back)
+        tb.addAction(self._act_back)
+
+        self._act_forward = QAction("Forward ▶", self)
+        self._act_forward.setToolTip("Go to the next suggested step")
+        self._act_forward.triggered.connect(self._on_toolbar_forward)
+        tb.addAction(self._act_forward)
+
+        self._step_label = QLabel("")
+        self._step_label.setStyleSheet("font-weight: bold; padding: 0 12px;")
+        tb.addWidget(self._step_label)
+
+        tb.addSeparator()
+        tb.addAction(self._act_file_new)
+        tb.addAction(self._act_file_open)
+        tb.addAction(self._act_file_save)
+
+        tb.addSeparator()
+        self._act_show_alignment = QAction("🗺 Show alignment", self)
+        self._act_show_alignment.setToolTip(
+            "Re-draw the edited alignment and PI overlay on the map.")
+        self._act_show_alignment.triggered.connect(
+            lambda: self.element_table.show_alignment_requested.emit())
+        tb.addAction(self._act_show_alignment)
+
+        self._act_merge_selection = QAction("⤺ Merge selection", self)
+        self._act_merge_selection.setToolTip(
+            "Merge PI range → single curve (select rows spanning\n"
+            "two or more curves in the element table first).")
+        self._act_merge_selection.triggered.connect(
+            lambda: self.element_table._on_merge_range())
+        tb.addAction(self._act_merge_selection)
+
+        self._act_undo_merge = QAction("↩ Undo merge", self)
+        self._act_undo_merge.setToolTip(
+            "Undo the merge for the selected curve (select its row first).")
+        self._act_undo_merge.triggered.connect(
+            lambda: self.element_table.undo_selected_merge())
+        tb.addAction(self._act_undo_merge)
+
+        # Back routing: each step's OWN back handler (some do overlay
+        # cleanup) keyed by the step it goes back FROM — mirrors exactly
+        # what that step's in-page "← Back" button does.
+        self._toolbar_back_map = {
+            S_SELECT:      lambda: self._goto_step(S_FIND),
+            S_CONFIG:      lambda: self._goto_step(S_SELECT),
+            S_CANDIDATES:  self._on_candidates_back,
+            S_REFINE:      self._on_refine_back,
+            S_CONSOLIDATE: lambda: self._goto_step(S_REFINE),
+            S_STATIONS:    lambda: self._goto_step(S_CONSOLIDATE),
+            S_CROSSSEC:    lambda: self._goto_step(S_STATIONS),
+            S_EXPORT:      lambda: self._goto_step(S_CROSSSEC),
+        }
+
+    def _on_toolbar_back(self):
+        handler = self._toolbar_back_map.get(self._current_step)
+        if handler:
+            handler()
+
+    def _on_toolbar_forward(self):
+        if self._suggested_step is not None:
+            self._goto_step(self._suggested_step)
+
+    def _refresh_toolbar_edit_actions(self):
+        et = self.element_table
+        in_edit_step = self._current_step in (S_REFINE, S_CONSOLIDATE)
+        self._act_show_alignment.setEnabled(
+            in_edit_step and self._pi_model is not None)
+        self._act_merge_selection.setEnabled(
+            in_edit_step and et._selected_pi_range() is not None)
+        self._act_undo_merge.setEnabled(
+            in_edit_step and et.selected_merge_pi() is not None)
 
     def _on_toggle_log(self, on: bool):
         self._prefs["show_log"] = bool(on)
@@ -660,6 +752,10 @@ class App(QMainWindow):
                 suggested = i
                 break
         self.sidebar.set_states(available, done, suggested, reasons)
+        self._suggested_step = suggested
+        self._act_back.setEnabled(self._current_step in self._toolbar_back_map)
+        self._act_forward.setEnabled(suggested is not None)
+        self._refresh_toolbar_edit_actions()
 
     def _goto_step(self, idx: int):
         # Refresh a downstream step from the current alignment if it went stale
@@ -671,10 +767,11 @@ class App(QMainWindow):
         self.sidebar.set_step(idx)
         # The element table belongs to the alignment-editing steps
         self.element_table.setVisible(idx in (S_REFINE, S_CONSOLIDATE))
-        self._refresh_nav()
         tip = self._STEP_TIPS.get(idx)
         if tip:
             self.log_panel.log_step(tip[0], tip[1])
+            self._step_label.setText(tip[0])
+        self._refresh_nav()
 
     def _mark_stale(self):
         """The alignment changed — downstream steps must re-read it."""
@@ -1119,6 +1216,7 @@ class App(QMainWindow):
 
     def _on_element_rows_selected(self, element_ids: list):
         self.map_widget.highlight_elements(element_ids)
+        self._refresh_toolbar_edit_actions()
 
     def _on_show_alignment_clicked(self):
         """Re-draw the edited alignment + PI overlay (e.g. after map reload)."""
