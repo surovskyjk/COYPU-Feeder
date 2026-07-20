@@ -154,3 +154,78 @@ def parse_tracks(overpass_data: dict) -> list[Track]:
 
 def get_track_names(tracks: list[Track]) -> list[str]:
     return [t.name for t in tracks]
+
+
+def _haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle distance between two (lat, lon) points, in metres."""
+    import math
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = (math.sin(dlat / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2)
+    return 2.0 * 6371000.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def chain_polylines(tracks: list[Track], gap_tol_m: float = 50.0) -> Track | None:
+    """
+    Chain 2+ tracks end-to-end into one continuous track, matching whichever
+    endpoints are geographically closest (reversing tracks as needed).
+    Order-independent — greedily extends from the first track, always
+    attaching whichever remaining track has the nearest endpoint to either
+    end of the growing chain.
+
+    Returns the merged Track, or None if some track couldn't be attached
+    within gap_tol_m (the caller can report the shortfall by re-checking
+    endpoint distances itself).
+    """
+    if len(tracks) < 2 or any(not t.nodes for t in tracks):
+        return None
+    remaining = list(tracks[1:])
+    chain = list(tracks[0].nodes)
+    way_ids = list(tracks[0].way_ids)
+    while remaining:
+        head, tail = chain[0], chain[-1]
+        best = None   # (dist, idx, attach_to, reverse)
+        for i, t in enumerate(remaining):
+            for attach_to, target in (("tail", tail), ("head", head)):
+                for reverse in (False, True):
+                    pt = t.nodes[-1] if reverse else t.nodes[0]
+                    d = _haversine_m(target, pt)
+                    if best is None or d < best[0]:
+                        best = (d, i, attach_to, reverse)
+        if best is None or best[0] > gap_tol_m:
+            return None
+        _, i, attach_to, reverse = best
+        t = remaining.pop(i)
+        nodes = list(reversed(t.nodes)) if reverse else list(t.nodes)
+        if attach_to == "tail":
+            chain.extend(nodes)
+        else:
+            chain = nodes + chain
+        way_ids.extend(t.way_ids)
+    names = " + ".join(t.name for t in tracks if t.name)
+    return Track(way_ids=way_ids, nodes=chain, tags={},
+                name=names or "merged track")
+
+
+def split_track(track: Track, at_index: int) -> tuple[Track, Track] | None:
+    """
+    Split `track` into two, sharing the boundary node at `at_index` so
+    there is no gap. None if the split would leave either half with fewer
+    than 2 nodes.
+    """
+    n = len(track.nodes)
+    if not (1 <= at_index <= n - 2):
+        return None
+    first = Track(way_ids=list(track.way_ids), nodes=track.nodes[:at_index + 1],
+                 tags=dict(track.tags), name=f"{track.name} (1/2)")
+    second = Track(way_ids=list(track.way_ids), nodes=track.nodes[at_index:],
+                  tags=dict(track.tags), name=f"{track.name} (2/2)")
+    return first, second
+
+
+def nearest_track_node_index(track: Track, latlon: tuple[float, float]) -> int:
+    """Index of the track node closest to `latlon` (haversine)."""
+    return min(range(len(track.nodes)),
+              key=lambda i: _haversine_m(track.nodes[i], latlon))

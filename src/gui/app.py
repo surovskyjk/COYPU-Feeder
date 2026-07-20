@@ -66,6 +66,7 @@ class App(QMainWindow):
         self._stale: set            = set()
         self._project_path          = None
         self._dirty                 = False
+        self._split_pick_target: str | None = None   # "line" | "track" | None
 
         self._qsettings = QSettings("COYPU", "COYPU-Feeder")
         self._prefs = self._load_prefs()
@@ -583,11 +584,14 @@ class App(QMainWindow):
         # Step 1 → fetch railway
         self.step1.railway_fetched.connect(self._on_railway_fetched)
 
-        # Step 2 → highlight / fit / confirm / back
+        # Step 2 → highlight / fit / confirm / back / track editing
         self.step2.highlight_changed.connect(self._on_highlight_changed)
         self.step2.fit_to_tracks_requested.connect(self._on_fit_to_tracks)
         self.step2.section_confirmed.connect(self._on_section_confirmed)
         self.step2.back_requested.connect(lambda: self._goto_step(S_FIND))
+        self.step2.log_message.connect(self.log_panel.log)
+        self.step2.tracks_changed.connect(self._on_step2_tracks_changed)
+        self.step2.split_pick_mode.connect(self._on_track_split_pick_mode)
 
         # Step 3 → config confirmed / back
         self.step3.config_confirmed.connect(self._on_config_confirmed)
@@ -1220,14 +1224,43 @@ class App(QMainWindow):
         self.map_widget.highlight_elements(element_ids)
         self._refresh_toolbar_edit_actions()
 
+    def _on_step2_tracks_changed(self, tracks: list):
+        """Step 2 split/merged/removed a track — the input data itself
+        changed, so anything already fitted from the old tracks is invalid."""
+        self._tracks = tracks
+        self.map_widget.show_tracks(tracks)
+        if self._selected_tracks or self._elements:
+            self.log_panel.log(
+                "Tracks changed — re-select and confirm the section before "
+                "continuing (previous fit is now stale).", "warn")
+        self._selected_tracks = []
+        self._settings = {}
+        self._elements = []
+        self._pi_model = None
+        self._xy_list = []
+        self._chainages_list = []
+        self._set_dirty(True)
+        self._refresh_nav()
+
     def _on_split_pick_mode(self, on: bool):
+        # Refine's "split a Line" and Step 2's "split a track" share the
+        # same JS click-mode/signal (the two are never armed at once — one
+        # per step's own UI); this flag decides who the next click is for.
+        self._split_pick_target = "line" if on else None
         self.map_widget.set_split_click_mode(on)
         if on:
             self.log_panel.log(
                 "Split-pick mode armed — click a point on the map to "
                 "insert a PI there.", "info")
 
+    def _on_track_split_pick_mode(self, on: bool):
+        self._split_pick_target = "track" if on else None
+        self.map_widget.set_split_click_mode(on)
+
     def _on_split_point_clicked(self, lat: float, lon: float):
+        if self._split_pick_target == "track":
+            self.step2.on_map_split_point(lat, lon)
+            return
         from geometry.projection import wgs84_to_projected
         xy = wgs84_to_projected([(lat, lon)], self._work_epsg)[0]
         self.element_table.insert_pi_at_xy(xy)
