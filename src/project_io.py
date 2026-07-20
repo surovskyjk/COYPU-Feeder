@@ -24,7 +24,7 @@ from lxml import etree
 
 import app_meta as meta
 
-FILE_VERSION = "1.0"
+FILE_VERSION = "1.1"   # 1.1 adds PI/@chainNext (high-angle chained merges)
 NUM = "{:.6f}"          # LandXML house style — user-facing values
 # Internal geometry (projected metres) is stored at nanometre precision so a
 # save/load round-trip reproduces the element chain exactly rather than to the
@@ -144,6 +144,7 @@ def save_project(filepath: str, state: dict) -> None:
             pe.set("mergedWithPrev", _b(p.merged_with_prev))
             pe.set("mergePartner", str(int(p.merge_partner)))
             pe.set("premergeSpiralLen", NUM_GEOM.format(float(p.premerge_spiral_len)))
+            pe.set("chainNext", _b(p.chain_next))
 
     # ── Stations ─────────────────────────────────────────────────────────
     sts = state.get("stations") or []
@@ -253,6 +254,7 @@ def load_project(filepath: str) -> dict:
                 merged_with_prev=_pb(pe.get("mergedWithPrev", "false")),
                 merge_partner=int(pe.get("mergePartner", "-1")),
                 premerge_spiral_len=float(pe.get("premergeSpiralLen", "-1")),
+                chain_next=_pb(pe.get("chainNext", "false")),
             ))
         model = PIAlignment(
             V=V, idx=idx, pis=pis, xy_ref=xy_ref, chainages_ref=chain,

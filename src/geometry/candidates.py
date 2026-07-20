@@ -79,6 +79,10 @@ class PIData:
     merged_with_prev: bool  = False       # set on the partner PI
     merge_partner:    int   = -1          # PI index of the merge partner
     premerge_spiral_len: float = -1.0     # value to restore on undo-merge
+    # High-angle chain: this PI's curve continues into the NEXT PI's curve
+    # on the same circle (no exit spiral here, no entry spiral there, zero
+    # connector). Set by _merge_pi_range_chained on all but the last member.
+    chain_next:       bool  = False
 
 
 @dataclass
@@ -3298,6 +3302,14 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
         if pi_data.omitted:
             continue          # self-healing: next curve absorbs the deflection
 
+        # High-angle chain flags: a chained side carries no spiral, shares
+        # no tangent margin, and joins the neighbour's arc on the same
+        # circle at the leg's tangency point (zero connector).
+        chained_next = bool(getattr(pi_data, "chain_next", False))
+        chained_prev = bool(k >= 2
+                            and getattr(model.pis[k - 2], "chain_next", False)
+                            and not model.pis[k - 2].omitted)
+
         PI, B = V[k], V[k + 1]
         # Incoming direction from the ACTUAL current position (not the
         # polygon segment): this makes the construction self-healing —
@@ -3321,11 +3333,12 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
         # Merged PI pairs are exempt from the sharing margins: their spiral
         # tangent lengths are solved to meet exactly (T_s,a + T_s,b = D).
         d_seg_out = float(np.hypot(*(B - PI)))
-        if pi_data.merged_with_next:
+        if pi_data.merged_with_next or chained_next:
             d_out = d_seg_out
         else:
             d_out = d_seg_out * (0.5 if k < m - 2 else 1.0) - 0.1
-        d_in_eff = d_in if pi_data.merged_with_prev else d_in - 0.1
+        d_in_eff = d_in if (pi_data.merged_with_prev or chained_prev) \
+            else d_in - 0.1
         T_max = min(d_in_eff, d_out)
         if T_max <= 0.5:
             continue    # no room at all — drop the curve (stay on tangent)
@@ -3341,8 +3354,11 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
                 L_target = float(model.spiral_default)
             else:                                # override (may be 0 = none)
                 L_target = float(pi_data.spiral_len)
+        if chained_prev and chained_next:
+            L_target = 0.0        # chain interior: pure arc on the circle
         L_res = L_target if L_target >= _PI_L_MIN else 0.0
-        is_merged = pi_data.merged_with_next or pi_data.merged_with_prev
+        is_merged = (pi_data.merged_with_next or pi_data.merged_with_prev
+                     or chained_prev or chained_next)
 
         # ── Radius: override or auto-estimate from the OSM points ────────
         if is_merged:
@@ -3433,19 +3449,90 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
         rot  = "ccw" if delta >= 0 else "cw"
 
         # ── Spiral length with graceful degradation ──────────────────────
+        chain_boundary = chained_prev != chained_next
         L = 0.0
         if L_target >= _PI_L_MIN:
             L = L_target
             # Arc must retain some angle: |δ| − L/R > EPS
             L = min(L, 0.9 * R * (abs(delta) - 0.01))
-            # Tangent must fit: T_s ≈ R·tan + L/2  ≤ T_max
-            # (merged pairs use the exact solved length — no safety factor)
-            slack = 1.0 if is_merged else 0.9
-            L = min(L, 2.0 * (T_max - R * half_tan) * slack)
+            if not chain_boundary:
+                # Tangent must fit: T_s ≈ R·tan + L/2  ≤ T_max
+                # (merged pairs use the exact solved length — no safety factor)
+                slack = 1.0 if is_merged else 0.9
+                L = min(L, 2.0 * (T_max - R * half_tan) * slack)
             if L < _PI_L_MIN:
                 L = 0.0     # no spiral — fall back to plain arc
 
-        if L > 0.0:
+        zone_ok = False
+        if L > 0.0 and chain_boundary:
+            # ── One-sided spiral at a chain end ──────────────────────────
+            # The chained side carries no spiral (the arc continues on the
+            # same circle at the leg's tangency point); the outer side gets
+            # the full transition. Unequal-tangent solution: the arc center
+            # sits at distance R+p from the spiral-side leg and R from the
+            # chained leg, giving
+            #   Ts(spiral side)  = k + (R − (R+p)·cosδ)/sinδ
+            #   Ts(chained side) =     (R + p − R·cosδ)/sinδ
+            x_sp, y_sp = _compute_clothoid_shift(L, R)
+            theta_s = L / (2.0 * R)
+            p_sh = y_sp - R * (1.0 - math.cos(theta_s))
+            k_ab = x_sp - R * math.sin(theta_s)
+            sin_d = math.sin(abs(delta))
+            cos_d = math.cos(abs(delta))
+            if sin_d > 1e-9 and abs(delta) - theta_s > 0.01:
+                if chained_next:      # spiral on the ENTRY side
+                    Ts1 = k_ab + (R - (R + p_sh) * cos_d) / sin_d
+                    Ts2 = (R + p_sh - R * cos_d) / sin_d
+                    L_in, L_out = L, 0.0
+                else:                 # spiral on the EXIT side
+                    Ts1 = (R + p_sh - R * cos_d) / sin_d
+                    Ts2 = k_ab + (R - (R + p_sh) * cos_d) / sin_d
+                    L_in, L_out = 0.0, L
+                if 0.0 < Ts1 <= d_in_eff + 1e-6 and 0.0 < Ts2 <= d_out + 1e-6:
+                    TC = PI - Ts1 * u_in
+                    zone = _compute_zone_geometry(TC, phi_in, delta, R,
+                                                  L_entry=L_in, L_exit=L_out)
+                    if zone is not None:
+                        zone_ok = True
+                        _append_line(cur_pt, TC, direction=phi_in)
+                        zas, zac, zae = (zone["arc_start"],
+                                         zone["arc_center"], zone["arc_end"])
+                        CT, z_arc_len = zone["CT"], zone["arc_len"]
+                        A_cl = math.sqrt(R * L)
+                        if L_in > 0.0:
+                            elements.append({
+                                "type": "Spiral", "sta_start": 0.0, "length": L,
+                                "start": TC.tolist(), "end": zas.tolist(),
+                                "radius_start": float("inf"), "radius_end": R,
+                                "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                            })
+                        elements.append({
+                            "type": "Arc", "sta_start": 0.0, "length": z_arc_len,
+                            "start": zas.tolist(), "end": zae.tolist(),
+                            "center": zac.tolist(), "radius": R, "rot": rot,
+                            "chord": float(np.hypot(*(zae - zas))),
+                            "_deflection": zone["arc_angle"] * sign, "_pi": k,
+                        })
+                        if L_out > 0.0:
+                            elements.append({
+                                "type": "Spiral", "sta_start": 0.0, "length": L,
+                                "start": zae.tolist(), "end": CT.tolist(),
+                                "radius_start": R, "radius_end": float("inf"),
+                                "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                            })
+                        stubs.append({
+                            "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
+                            "tc": TC.tolist(),
+                            "ct": np.array(CT, dtype=float).tolist(),
+                        })
+                        cur_pt = np.array(CT, dtype=float)
+            if not zone_ok:
+                L = 0.0               # degrade to a pure arc (C1 kept)
+
+        # Chain-boundary zone already built (or fell back to L=0 above) —
+        # the symmetric branches below are for the ordinary (non-chained)
+        # case only, and must not re-run against the chain result.
+        if L > 0.0 and not chain_boundary:
             # Exact Fresnel-based shift p and abscissa k
             x_sp, y_sp = _compute_clothoid_shift(L, R)
             theta_s = L / (2.0 * R)
@@ -3465,8 +3552,7 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
                 if T_s > T_max + 1e-6 or abs(delta) - L / R < 0.01:
                     L = 0.0
 
-        zone_ok = False
-        if L > 0.0:
+        if L > 0.0 and not chain_boundary:
             TC   = PI - T_s * u_in
             zone = _compute_zone_geometry(TC, phi_in, delta, R,
                                           L_entry=L, L_exit=L)
@@ -4316,8 +4402,279 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
     return True, f"Merged: spirals prolonged to {L_a_new:.1f} m / {L_b_new:.1f} m."
 
 
-def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int
-                   ) -> tuple[bool, str]:
+# ---------------------------------------------------------------------------
+# High-angle curve merging — chained PIs on one fitted circle
+# ---------------------------------------------------------------------------
+# A single PI cannot hold |δ| >= 180°: every deflection is wrapped to
+# (−π, π] (_wrap_pi), and the tangent-intersection construction diverges as
+# tan(δ/2) well before that. A merged run whose TOTAL turn exceeds
+# _CHAIN_DISPATCH_DEG is instead built as a chain of PIs sharing one fitted
+# radius, each turning at most _CHAIN_SUBTEND_DEG — every interior PI is an
+# ordinary plain arc between two tangent lines of the same circle, so no new
+# per-PI zone maths is needed (see _build_zone_range's chain_next handling).
+
+_CHAIN_DISPATCH_DEG = 90.0     # totals beyond this use the chained builder
+_CHAIN_SUBTEND_DEG  = 80.0     # max turn per chain member
+_MERGE_MAX_TOTAL_DEG = 350.0   # reject beyond this — not a real transition
+_CHAIN_NEAR_180_DEG  = 5.0     # per-vertex reading this close to 180° is
+                               # itself wrap-ambiguous (ask, don't guess)
+
+
+@dataclass
+class MergeCandidate:
+    total_deg: float
+    max_dev:   float | None      # None if the trial build failed
+    ok:        bool
+    reason:    str
+
+
+@dataclass
+class MergeChoice:
+    """Two plausible readings of an ambiguous range; GUI asks the user."""
+    candidates: list             # list[MergeCandidate], length 2
+    needs_choice: bool
+
+
+def _range_total_deflection(model: "PIAlignment", k_from: int, k_to: int
+                            ) -> tuple[float, bool, bool]:
+    """
+    Sum of the tangent-polygon's own per-vertex deflections across
+    [k_from, k_to] — the unwrapped truth for a same-rotation run (a single
+    _wrap_pi'd reading of the outer tangents alone loses turns >= 180°).
+
+    Returns (total_rad, same_sign, near_180_singleton):
+      same_sign          — every component shares the sign of the total
+                            (a mixed-sign range is a zigzag, not a single
+                            curve — callers fall back to the ordinary path)
+      near_180_singleton — some component is itself within
+                            _CHAIN_NEAR_180_DEG of +-180°, i.e. individually
+                            wrap-ambiguous
+    """
+    V = model.V
+    comps = [_polygon_deflection(V, k) for k in range(k_from, k_to + 1)]
+    total = sum(comps)
+    if abs(total) < 1e-9:
+        return total, True, False
+    sgn = 1.0 if total >= 0 else -1.0
+    same_sign = all(abs(d) < 1e-6 or (d >= 0) == (sgn >= 0) for d in comps)
+    near_180 = any(abs(abs(d) - math.pi) < math.radians(_CHAIN_NEAR_180_DEG)
+                   for d in comps)
+    return total, same_sign, near_180
+
+
+def _line_intersect(pa: np.ndarray, phi_a: float,
+                    pb: np.ndarray, phi_b: float) -> np.ndarray | None:
+    """Intersection of two lines given as (point, heading); None if parallel."""
+    sin_d = math.sin(phi_b - phi_a)
+    if abs(sin_d) < 1e-9:
+        return None
+    dx = float(pb[0] - pa[0]); dy = float(pb[1] - pa[1])
+    t = (dx * math.sin(phi_b) - dy * math.cos(phi_b)) / sin_d
+    return pa + t * np.array([math.cos(phi_a), math.sin(phi_a)])
+
+
+def _fit_run_circle(model: "PIAlignment", k_from: int, k_to: int
+                    ) -> tuple[float, float, float] | None:
+    """
+    Circle (cx, cy, R) for the whole [k_from, k_to] run: one Kasa fit on the
+    OSM window, masking out points close to the two OUTER tangent lines
+    (the entry/exit straights — everything between two consecutive small
+    same-rotation PIs of one physical curve is already close to the true
+    circle, so no interior masking is needed). Verified against synthetic
+    120/200/270 degree arcs: exact to the millimetre.
+
+    Do NOT average the run's existing per-PI arc radii instead — those come
+    from DP-fragment-sized windows (a curve run is typically many small
+    ~5-30 degree PIs after extraction) and are individually noisy; the
+    averaged radius was off by 10-25% in testing, enough to add
+    metres of deviation over a long sweep. Falls back to that average only
+    when the fit itself is degenerate (too few points).
+    """
+    from geometry.alignment import _fit_circle_kasa
+    V, idx, xy = model.V, model.idx, model.xy_ref
+    A, P1 = V[k_from - 1], V[k_from]
+    P2, B = V[k_to], V[k_to + 1]
+    phi_in  = math.atan2(P1[1] - A[1], P1[0] - A[0])
+    phi_out = math.atan2(B[1] - P2[1], B[0] - P2[0])
+
+    i_lo, i_hi = idx[k_from - 1], idx[k_to + 1]
+    if i_hi - i_lo >= 3:
+        seg = xy[i_lo:i_hi + 1]
+        rel_in  = seg - A
+        rel_out = seg - B
+        d_in  = np.abs(rel_in[:, 0]  * math.sin(phi_in)  - rel_in[:, 1]  * math.cos(phi_in))
+        d_out = np.abs(rel_out[:, 0] * math.sin(phi_out) - rel_out[:, 1] * math.cos(phi_out))
+        lim = max(2.0 * model.tol, 1.0)
+        mask = (d_in > lim) & (d_out > lim)
+        fit_pts = seg[mask] if int(mask.sum()) >= 5 else seg
+        cx, cy, r = _fit_circle_kasa(fit_pts)
+        if cx is not None and 10.0 < r < 1e6:
+            return cx, cy, r
+
+    radii = [float(e["radius"]) for e in model.elements
+             if e.get("type") == "Arc" and k_from <= (e.get("_pi") or -1) <= k_to]
+    if radii:
+        R = sum(radii) / len(radii)
+        sign = 1.0 if _wrap_pi(phi_out - phi_in) >= 0 else -1.0
+        perp = phi_in + sign * math.pi / 2.0
+        center = P1 + R * np.array([math.cos(perp), math.sin(perp)])
+        return float(center[0]), float(center[1]), R
+    return None
+
+
+def _merge_pi_range_chained(model: "PIAlignment", k_from: int, k_to: int,
+                            total_delta: float) -> tuple[bool, str]:
+    """
+    Replace the vertex range [k_from, k_to] with a CHAIN of PIs sharing one
+    fitted radius, each turning at most _CHAIN_SUBTEND_DEG, so the total
+    (unwrapped) deflection can exceed 180°. See the module comment above
+    _CHAIN_DISPATCH_DEG for why one PI cannot do this.
+
+    `total_delta` is the AUTHORITATIVE signed total (radians) — normally
+    the sum of the range's own polygon deflections, but a caller resolving
+    an ambiguous read (see MergeChoice) may pass either candidate.
+    """
+    m = len(model.V)
+    if not (1 <= k_from <= k_to <= m - 2):
+        return False, "PI range out of bounds."
+    if abs(math.degrees(total_delta)) > _MERGE_MAX_TOTAL_DEG:
+        return False, (f"Total deflection {math.degrees(total_delta):.0f}° "
+                       "is not a plausible single transition.")
+
+    fit = _fit_run_circle(model, k_from, k_to)
+    if fit is None:
+        return False, "Could not fit a radius to this range's OSM points."
+    cx, cy, R = fit
+    center = np.array([cx, cy])
+
+    A, P1 = model.V[k_from - 1], model.V[k_from]
+    phi_in = math.atan2(P1[1] - A[1], P1[0] - A[0])
+    sign = 1.0 if total_delta >= 0 else -1.0
+    n = max(2, math.ceil(abs(math.degrees(total_delta)) / _CHAIN_SUBTEND_DEG))
+    sub_delta = total_delta / n
+
+    headings = [phi_in + i * sub_delta for i in range(n + 1)]
+    tpts = []
+    for phi in headings:
+        perp = phi + sign * math.pi / 2.0
+        tpts.append(center - R * np.array([math.cos(perp), math.sin(perp)]))
+    new_V = []
+    for i in range(n):
+        v = _line_intersect(tpts[i], headings[i], tpts[i + 1], headings[i + 1])
+        if v is None:
+            return False, "Chain construction degenerated (near-parallel legs)."
+        new_V.append(v)
+
+    old_V, old_idx, old_pis = model.V.copy(), list(model.idx), model.pis
+    old_indices = [p.index for p in old_pis]
+
+    removed_old = k_to - k_from + 1
+    k_shift = n - removed_old
+    model.V = np.vstack([model.V[:k_from]] + [v[None, :] for v in new_V]
+                        + [model.V[k_to + 1:]])
+    new_idx_vals = [int(v) for v in np.linspace(
+        model.idx[k_from - 1], model.idx[k_to + 1], n + 2, dtype=int)[1:-1]]
+    model.idx = model.idx[:k_from] + new_idx_vals + model.idx[k_to + 1:]
+
+    new_pis: list = []
+    for p in old_pis:
+        if p.index < k_from:
+            new_pis.append(p)
+        elif p.index > k_to:
+            p.index += k_shift
+            new_pis.append(p)
+    for i, v in enumerate(new_V):
+        new_pis.insert(k_from - 1 + i, PIData(
+            index=k_from + i, xy=(float(v[0]), float(v[1])),
+            deflection=sub_delta, radius=float(R), chain_next=(i < n - 1)))
+    model.pis = new_pis
+
+    span_snap = rebuild_pi_span(model, k_from, k_from + n - 1,
+                                old_lo=k_from, old_hi=k_to, k_shift=k_shift)
+    elements = model.elements
+    n_arcs = sum(1 for e in elements if e.get("type") == "Arc"
+                and k_from <= (e.get("_pi") or -1) <= k_from + n - 1)
+    if n_arcs < n:
+        model.V, model.idx, model.pis = old_V, old_idx, old_pis
+        for p, i in zip(model.pis, old_indices):
+            p.index = i
+        if span_snap is not None:
+            restore_span_snapshot(model, span_snap)
+        else:
+            rebuild_from_pi_model(model)
+        return False, (f"The chained curve could not be constructed "
+                       f"({n_arcs}/{n} arcs fit) — rolled back.")
+    return True, (f"PIs {k_from}–{k_to} replaced by a {n}-curve chain "
+                  f"(δ={math.degrees(total_delta):+.1f}°, R≈{R:.0f} m).")
+
+
+def merge_range_ambiguity(model: "PIAlignment", k_from: int, k_to: int
+                          ) -> MergeChoice | None:
+    """
+    Read-only pre-check for the GUI: None if the range is unambiguous (the
+    overwhelmingly common case — just call merge_pi_range directly); a
+    MergeChoice with two trial-evaluated candidates when a per-vertex
+    reading is itself wrap-ambiguous (near +-180°) and the two
+    interpretations are not clearly distinguished by fit quality.
+    """
+    m = len(model.V)
+    if not (1 <= k_from <= k_to <= m - 2) or k_from == k_to:
+        return None
+    total, same_sign, near_180 = _range_total_deflection(model, k_from, k_to)
+    if not same_sign or not near_180:
+        return None
+
+    alt = total - (2.0 * math.pi if total >= 0 else -2.0 * math.pi)
+
+    def _trial(delta):
+        t = _light_copy(model)
+        ok, msg = merge_pi_range(t, k_from, k_to, prefer=delta)
+        dev = _group_max_dev(t, k_from) if ok else None
+        return MergeCandidate(math.degrees(delta), dev, ok, msg)
+
+    c1, c2 = _trial(total), _trial(alt)
+    if c1.ok and c2.ok and c1.max_dev is not None and c2.max_dev is not None:
+        lo, hi = sorted((c1.max_dev, c2.max_dev))
+        if hi > 3.0 * max(lo, 1e-6) and hi > model.tol:
+            return None       # one candidate is decisively worse — no ask
+    elif c1.ok != c2.ok:
+        return None            # only one candidate is even constructible
+    return MergeChoice(candidates=[c1, c2], needs_choice=True)
+
+
+def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int,
+                   prefer: float | None = None) -> tuple[bool, str]:
+    """
+    Replace the PIs in [k_from, k_to] with one curve (delegates to
+    `_merge_pi_range_single`) or, when the total deflection exceeds
+    `_CHAIN_DISPATCH_DEG`, a chain of PIs on one fitted circle (delegates to
+    `_merge_pi_range_chained`) — see the module comment above that constant.
+
+    `prefer` overrides the total deflection (radians) used for the decision
+    and the construction; only meaningful for genuinely ambiguous ranges
+    (see `merge_range_ambiguity`) — leave it None for the ordinary case.
+    """
+    m = len(model.V)
+    if not (1 <= k_from <= k_to <= m - 2):
+        return False, "PI range out of bounds."
+    if k_from == k_to:
+        return False, "Select a range spanning at least two PIs."
+
+    if prefer is not None:
+        total = prefer
+    else:
+        total, same_sign, _ = _range_total_deflection(model, k_from, k_to)
+        if not same_sign:
+            total = None   # zigzag — let the single-PI path use its own
+                           # outer-tangent-intersection reading, unchanged
+
+    if total is not None and abs(math.degrees(total)) > _CHAIN_DISPATCH_DEG:
+        return _merge_pi_range_chained(model, k_from, k_to, total)
+    return _merge_pi_range_single(model, k_from, k_to)
+
+
+def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int
+                           ) -> tuple[bool, str]:
     """
     Replace ALL PIs in the vertex range [k_from … k_to] with a single PI —
     the intersection of the outer tangents. The tangent before the first PI
@@ -4327,6 +4684,10 @@ def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int
 
     Edits on PIs outside the range are preserved (indices remapped).
     Returns (ok, message); on failure the model is unchanged.
+
+    Handles total deflections up to ~150°; `merge_pi_range` dispatches to
+    `_merge_pi_range_chained` above that (see its docstring for why a
+    single PI cannot represent a wider turn).
     """
     m = len(model.V)
     if not (1 <= k_from <= k_to <= m - 2):
@@ -4479,11 +4840,29 @@ def _curve_runs(model: "PIAlignment", max_straight_m: float) -> list[list[int]]:
     return runs
 
 
+def _merged_group_range(model: "PIAlignment", k_from: int) -> tuple[int, int]:
+    """
+    PI-index span [k_from, k_hi] of the curve built at `k_from` — a single
+    PI, or (after a chained high-angle merge) the whole chain, found by
+    walking chain_next links.
+    """
+    by_index = {p.index: p for p in model.pis}
+    k_hi = k_from
+    while by_index.get(k_hi) is not None and by_index[k_hi].chain_next:
+        k_hi += 1
+    return k_from, k_hi
+
+
+def _range_max_dev(model: "PIAlignment", k_lo: int, k_hi: int) -> float:
+    """Largest OSM deviation of the curve(s) tagged _pi in [k_lo, k_hi]."""
+    devs = [float(e.get("_max_dev", 0.0)) for e in model.elements
+            if e.get("_pi") is not None and k_lo <= e["_pi"] <= k_hi]
+    return max(devs) if devs else float("inf")
+
+
 def _group_max_dev(model: "PIAlignment", pi_index: int) -> float:
     """Largest OSM deviation of the curve built at `pi_index` (after a rebuild)."""
-    devs = [float(e.get("_max_dev", 0.0))
-            for e in model.elements if e.get("_pi") == pi_index]
-    return max(devs) if devs else float("inf")
+    return _range_max_dev(model, pi_index, pi_index)
 
 
 def find_consolidation_groups(
@@ -4533,7 +4912,11 @@ def find_consolidation_groups(
             out.append(rec)
             continue
         rec["radius_after"] = round(float(arcs[0]["radius"]), 1)
-        dev = _group_max_dev(trial, k_from)
+        # A high-angle merge builds a CHAIN (multiple PIs on one shared
+        # radius) rather than a single PI — the deviation check must cover
+        # every member, not just k_from.
+        _, k_hi_built = _merged_group_range(trial, k_from)
+        dev = _range_max_dev(trial, k_from, k_hi_built)
         rec["max_dev"] = round(dev, 3)
         if dev <= max_dev_m:
             rec["ok"] = True

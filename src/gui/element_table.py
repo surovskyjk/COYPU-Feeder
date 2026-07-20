@@ -756,7 +756,7 @@ class ElementTableDock(QWidget):
         return pis[0], pis[-1]
 
     def _on_merge_range(self):
-        from geometry.candidates import merge_pi_range
+        from geometry.candidates import merge_pi_range, merge_range_ambiguity
         from PySide6.QtWidgets import QMessageBox
         if self._model is None:
             return
@@ -767,13 +767,53 @@ class ElementTableDock(QWidget):
                 "Select rows spanning at least two curves first "
                 "(e.g. the first and last tangent of the section).")
             return
-        ok, msg = merge_pi_range(self._model, rng[0], rng[1])
+
+        prefer = None
+        choice = merge_range_ambiguity(self._model, rng[0], rng[1])
+        if choice is not None and choice.needs_choice:
+            prefer = self._ask_merge_choice(choice)
+            if prefer is None:
+                return   # user cancelled
+
+        ok, msg = merge_pi_range(self._model, rng[0], rng[1], prefer=prefer)
         if not ok:
             self.log_message.emit(f"Merge PI range {rng[0]}–{rng[1]}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot merge PI range", msg)
             return
         self.log_message.emit(msg, "ok")
         self._rebuild(regenerate=False)   # merge_pi_range already rebuilt
+
+    def _ask_merge_choice(self, choice) -> float | None:
+        """
+        A range's total turn is genuinely ambiguous (some PI's own reading
+        is itself near +-180 deg — see merge_range_ambiguity): let the user
+        pick which interpretation they mean. Returns the chosen total in
+        radians, or None if cancelled.
+        """
+        import math as _m
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Which turn did you mean?")
+        box.setIcon(QMessageBox.Icon.Question)
+        lines = ["This range's total turn can be read two ways:"]
+        buttons = []
+        for i, c in enumerate(choice.candidates):
+            dev_txt = f"{c.max_dev:.2f} m deviation" if c.ok and c.max_dev is not None \
+                else "could not be built"
+            label = f"{c.total_deg:+.0f}°  ({dev_txt})"
+            lines.append(f"  {i + 1}. {label}")
+            btn = box.addButton(label, QMessageBox.ButtonRole.ActionRole)
+            buttons.append((btn, c))
+        box.setText("\n".join(lines))
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel or clicked is None:
+            return None
+        for btn, c in buttons:
+            if btn is clicked:
+                return _m.radians(c.total_deg)
+        return None
 
     def _on_selection(self):
         rows = self._table.selectionModel().selectedRows()
