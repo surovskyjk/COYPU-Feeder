@@ -8,15 +8,16 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtGui import QGuiApplication, QAction, QActionGroup
+from PySide6.QtGui import QGuiApplication, QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget,
     QSizePolicy, QMessageBox, QApplication, QSplitter,
     QToolBar, QLabel,
 )
 
 from .map_widget import MapWidget
 from .element_table import ElementTableDock
+from .edit_history import EditHistory
 from .log_panel import LogPanel
 from .dialogs import AboutDialog, SettingsDialog
 from .step_sidebar import StepSidebar
@@ -54,6 +55,15 @@ class App(QMainWindow):
         # Consolidate edit the SAME PI model — so edits remain possible at any
         # point, including after consolidating or exporting.
         self._pi_model              = None    # PIAlignment | None (Level 1 → None)
+        # Undo/redo for alignment edits (merge, radius/spiral, omit, split,
+        # delete, trim, PI drag) — the toolbar Back/Forward buttons drain
+        # this first while in Refine/Consolidate before falling back to
+        # ordinary step navigation (see _on_toolbar_back/_on_toolbar_forward).
+        self._edit_history           = EditHistory()
+        # Freshly-fitted baseline stashed whenever a candidate is chosen or a
+        # project is loaded — "Restore default" reverts to this and wipes
+        # the undo/redo history (Part D).
+        self._refine_baseline        = None   # PIAlignment | None
         self._elements: list        = []
         self._level: str            = ""
         self._stations: list        = []
@@ -74,6 +84,7 @@ class App(QMainWindow):
         self._build_layout()
         self._build_menu()
         self._build_toolbar()
+        self._finish_menu_toolbar_wiring()
         self._wire_signals()
         self._connect_scheme_changes()
         self._apply_prefs()
@@ -91,7 +102,12 @@ class App(QMainWindow):
             "theme_mode": s.value("theme_mode", "auto", str),
             "font_pt":    int(s.value("font_pt", 9, int)),
             "show_log":   s.value("show_log", True, bool),
+            "show_toolbar": s.value("show_toolbar", True, bool),
             "confirm_start_over": s.value("confirm_start_over", True, bool),
+            # Original-alignment (OSM reference) appearance — Part E
+            "osm_ref_visible": s.value("osm_ref_visible", True, bool),
+            "osm_ref_color":   s.value("osm_ref_color", "#00e5ff", str),
+            "osm_ref_opacity": float(s.value("osm_ref_opacity", 0.85, float)),
         }
 
     def _save_prefs(self):
@@ -108,6 +124,9 @@ class App(QMainWindow):
         apply_font_size(app, self._prefs["font_pt"])
         self.map_widget.set_theme(dark)
         self.log_panel.setVisible(self._prefs["show_log"])
+        self.map_widget.set_osm_reference_style(
+            self._prefs["osm_ref_visible"], self._prefs["osm_ref_color"],
+            self._prefs["osm_ref_opacity"])
 
     # ------------------------------------------------------------------
     # Layout
@@ -120,19 +139,25 @@ class App(QMainWindow):
     def _build_menu(self):
         mb = self.menuBar()
 
+        style = self.style()
         file_menu = mb.addMenu("&File")
-        new_act = QAction("New project", self)
+        new_act = QAction(style.standardIcon(style.StandardPixmap.SP_FileIcon),
+                          "New project", self)
         new_act.setShortcut("Ctrl+N")
         new_act.triggered.connect(self._on_new_project)
         file_menu.addAction(new_act)
         self._act_file_new = new_act
-        open_act = QAction("Open project…", self)
+        open_act = QAction(
+            style.standardIcon(style.StandardPixmap.SP_DialogOpenButton),
+            "Open project…", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._on_open_project)
         file_menu.addAction(open_act)
         self._act_file_open = open_act
         file_menu.addSeparator()
-        save_act = QAction("Save project", self)
+        save_act = QAction(
+            style.standardIcon(style.StandardPixmap.SP_DialogSaveButton),
+            "Save project", self)
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self._on_save_project)
         file_menu.addAction(save_act)
@@ -159,8 +184,12 @@ class App(QMainWindow):
         reset_act = QAction("Reset panel layout", self)
         reset_act.triggered.connect(self._reset_layout)
         view_menu.addAction(reset_act)
+        self._view_menu = view_menu   # "Show toolbar" is appended once the
+                                       # toolbar itself exists — see _finish_menu_toolbar_wiring
 
         settings_menu = mb.addMenu("&Settings")
+        self._settings_menu = settings_menu   # anchor for inserting the Edit
+                                               # menu once toolbar actions exist
         prefs_act = QAction("Preferences…", self)
         prefs_act.triggered.connect(self._open_settings)
         settings_menu.addAction(prefs_act)
@@ -193,39 +222,70 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_toolbar(self):
+        from PySide6.QtCore import QSize
+        from .toolbar_icons import make_icon
         tb = QToolBar("Main", self)
         tb.setObjectName("MainToolbar")
         tb.setMovable(False)
+        # Compact two-row buttons (icon above text) — denser than the
+        # previous single-row icon-beside-text layout.
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        tb.setIconSize(QSize(18, 18))
         self.addToolBar(tb)
+        self._toolbar = tb   # View menu's "Show toolbar" uses tb.toggleViewAction()
 
-        self._act_back = QAction("◀ Back", self)
+        style = self.style()
+        icon_color = self.palette().color(self.foregroundRole())
+
+        brand = QLabel("COYPU Feeder")
+        brand.setObjectName("brandLabel")
+        tb.addWidget(brand)
+        tb.addSeparator()
+
+        # Undo / Redo are dual-purpose: inside Refine/Consolidate they drain
+        # the edit-history stack first; everywhere else (and once history is
+        # empty) they fall back to ordinary step navigation — see
+        # _on_toolbar_back/_on_toolbar_forward and _refresh_nav's dynamic
+        # tooltip. Always labelled Undo/Redo since step navigation is also
+        # freely reachable from the sidebar.
+        self._act_back = QAction(make_icon("undo", icon_color), "Undo", self)
         self._act_back.setToolTip("Go to the previous step")
+        self._act_back.setShortcut(QKeySequence.StandardKey.Undo)   # Ctrl+Z
         self._act_back.triggered.connect(self._on_toolbar_back)
         tb.addAction(self._act_back)
 
-        self._act_forward = QAction("Forward ▶", self)
+        self._act_forward = QAction(make_icon("redo", icon_color), "Redo", self)
         self._act_forward.setToolTip("Go to the next suggested step")
+        self._act_forward.setShortcut(QKeySequence.StandardKey.Redo)  # Ctrl+Y
         self._act_forward.triggered.connect(self._on_toolbar_forward)
         tb.addAction(self._act_forward)
 
         self._step_label = QLabel("")
-        self._step_label.setStyleSheet("font-weight: bold; padding: 0 12px;")
+        self._step_label.setStyleSheet("font-weight: bold; padding: 0 10px;")
         tb.addWidget(self._step_label)
 
         tb.addSeparator()
         tb.addAction(self._act_file_new)
         tb.addAction(self._act_file_open)
         tb.addAction(self._act_file_save)
+        # These three are self-explanatory even icon-only — saves width for
+        # the domain-specific actions that need their text label.
+        for _act in (self._act_file_new, self._act_file_open, self._act_file_save):
+            _btn = tb.widgetForAction(_act)
+            if _btn is not None:
+                _btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
         tb.addSeparator()
-        self._act_show_alignment = QAction("🗺 Show alignment", self)
+        self._act_show_alignment = QAction(
+            make_icon("show_alignment", icon_color), "Show alignment", self)
         self._act_show_alignment.setToolTip(
             "Re-draw the edited alignment and PI overlay on the map.")
         self._act_show_alignment.triggered.connect(
             lambda: self.element_table.show_alignment_requested.emit())
         tb.addAction(self._act_show_alignment)
 
-        self._act_merge_selection = QAction("⤺ Merge selection", self)
+        self._act_merge_selection = QAction(
+            make_icon("merge", icon_color), "Merge selection", self)
         self._act_merge_selection.setToolTip(
             "Merge PI range → single curve (select rows spanning\n"
             "two or more curves in the element table first).")
@@ -233,12 +293,42 @@ class App(QMainWindow):
             lambda: self.element_table._on_merge_range())
         tb.addAction(self._act_merge_selection)
 
-        self._act_undo_merge = QAction("↩ Undo merge", self)
+        self._act_undo_merge = QAction(
+            make_icon("undo", icon_color), "Undo merge", self)
         self._act_undo_merge.setToolTip(
             "Undo the merge for the selected curve (select its row first).")
         self._act_undo_merge.triggered.connect(
             lambda: self.element_table.undo_selected_merge())
         tb.addAction(self._act_undo_merge)
+
+        self._act_restore_default = QAction(
+            style.standardIcon(style.StandardPixmap.SP_DialogResetButton),
+            "Restore default", self)
+        self._act_restore_default.setToolTip(
+            "Discard every edit made in Refine/Consolidate and return to\n"
+            "the freshly-fitted alignment for the selected candidate.")
+        self._act_restore_default.triggered.connect(self._on_restore_default)
+        tb.addAction(self._act_restore_default)
+
+        tb.addSeparator()
+        self._act_edit_mode = QAction(make_icon("edit", icon_color), "Edit mode", self)
+        self._act_edit_mode.setCheckable(True)
+        self._act_edit_mode.setToolTip(
+            "Default mode keeps the tangent polygon locked (radius, spiral,\n"
+            "merge, omit, split and delete all still work). Edit mode also\n"
+            "lets you drag PI markers on the map to reshape the alignment.")
+        self._act_edit_mode.toggled.connect(self._on_edit_mode_toggled)
+        tb.addAction(self._act_edit_mode)
+
+        tb.addSeparator()
+        self._build_original_appearance_action(tb, style)
+
+        # Map settings (Part J): owned/wired by MapWidget itself, laid out
+        # here instead of a separate row above the map.
+        tb.addSeparator()
+        tb.addWidget(QLabel("Map:"))
+        tb.addWidget(self.map_widget._provider_combo)
+        tb.addWidget(self.map_widget._rail_chk)
 
         # Back routing: each step's OWN back handler (some do overlay
         # cleanup) keyed by the step it goes back FROM — mirrors exactly
@@ -254,14 +344,231 @@ class App(QMainWindow):
             S_EXPORT:      lambda: self._goto_step(S_CROSSSEC),
         }
 
+    def _finish_menu_toolbar_wiring(self):
+        """
+        A handful of menu entries mirror toolbar actions or control the
+        toolbar itself, so they can only be wired up once `_build_toolbar`
+        has run (it depends on `_build_menu`'s File actions, so it always
+        runs second — this is the follow-up third step).
+        """
+        mb = self.menuBar()
+
+        # "&Edit" — mirrors the toolbar's domain-specific actions using the
+        # SAME QAction objects, so enabled/checked state stays in sync
+        # automatically wherever they appear. Inserted before Settings
+        # (rather than appended after Help via addMenu) for a conventional
+        # File/View/Edit/Settings/Help ordering.
+        from PySide6.QtWidgets import QMenu
+        edit_menu = QMenu("&Edit", self)
+        mb.insertMenu(self._settings_menu.menuAction(), edit_menu)
+        for act in (self._act_show_alignment, self._act_merge_selection,
+                   self._act_undo_merge, self._act_restore_default,
+                   self._act_edit_mode, self._act_original_appearance):
+            edit_menu.addAction(act)
+
+        # "Show toolbar" — Qt gives every QToolBar a ready-made, visibility-
+        # synced checkable action; just relabel and persist it.
+        self._act_show_toolbar = self._toolbar.toggleViewAction()
+        self._act_show_toolbar.setText("Show toolbar")
+        self._act_show_toolbar.setChecked(self._prefs["show_toolbar"])
+        self._toolbar.setVisible(self._prefs["show_toolbar"])
+        self._act_show_toolbar.toggled.connect(self._on_toggle_toolbar)
+        self._view_menu.addAction(self._act_show_toolbar)
+
+    def _on_toggle_toolbar(self, on: bool):
+        self._prefs["show_toolbar"] = bool(on)
+        self._save_prefs()
+
+    def _build_original_appearance_action(self, tb, style):
+        """
+        Part E: a small popover (visible / opacity / colour) controlling the
+        original (OSM reference) alignment overlay. Applied to the map via
+        `set_osm_reference_style` (restyles the current layers, no redraw)
+        and persisted in `_prefs` like the theme settings.
+        """
+        from PySide6.QtWidgets import (
+            QMenu, QWidgetAction, QCheckBox, QSlider, QPushButton, QLabel,
+        )
+        from PySide6.QtGui import QColor
+
+        act = QAction(
+            style.standardIcon(style.StandardPixmap.SP_DesktopIcon),
+            "Original…", self)
+        act.setToolTip(
+            "Visibility, opacity and colour of the original OSM alignment\n"
+            "overlay (the dashed reference line).")
+
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(6)
+
+        chk = QCheckBox("Show original alignment")
+        chk.setChecked(bool(self._prefs["osm_ref_visible"]))
+        v.addWidget(chk)
+
+        op_row = QHBoxLayout()
+        op_row.addWidget(QLabel("Opacity:"))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(5, 100)
+        slider.setValue(int(round(float(self._prefs["osm_ref_opacity"]) * 100)))
+        slider.setFixedWidth(120)
+        op_row.addWidget(slider)
+        v.addLayout(op_row)
+
+        color_btn = QPushButton("Colour…")
+        color_btn.setFixedHeight(24)
+
+        def _swatch(hex_color: str):
+            color_btn.setStyleSheet(
+                f"background-color: {hex_color}; color: #000;")
+
+        _swatch(self._prefs["osm_ref_color"])
+        v.addWidget(color_btn)
+
+        def apply_style():
+            self._prefs["osm_ref_visible"] = chk.isChecked()
+            self._prefs["osm_ref_opacity"] = slider.value() / 100.0
+            self._save_prefs()
+            self.map_widget.set_osm_reference_style(
+                self._prefs["osm_ref_visible"], self._prefs["osm_ref_color"],
+                self._prefs["osm_ref_opacity"])
+
+        def pick_color():
+            from PySide6.QtWidgets import QColorDialog
+            c = QColorDialog.getColor(
+                QColor(self._prefs["osm_ref_color"]), self,
+                "Original alignment colour")
+            if c.isValid():
+                self._prefs["osm_ref_color"] = c.name()
+                _swatch(c.name())
+                apply_style()
+
+        chk.toggled.connect(apply_style)
+        slider.valueChanged.connect(apply_style)
+        color_btn.clicked.connect(pick_color)
+
+        menu = QMenu(self)
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(panel)
+        menu.addAction(wa)
+        act.setMenu(menu)
+        tb.addAction(act)
+        btn = tb.widgetForAction(act)
+        if btn is not None:
+            btn.setPopupMode(btn.ToolButtonPopupMode.InstantPopup)
+        self._act_original_appearance = act
+
+    def _history_push(self, label: str):
+        """Called by the element table just before it mutates the PI model —
+        snapshots the pre-edit state for the toolbar's Back/Forward undo."""
+        self._edit_history.push(self._pi_model, label)
+
+    def _make_baseline(self, model):
+        if model is None:
+            return None
+        from geometry.candidates import _light_copy
+        return _light_copy(model)
+
+    def _on_restore_default(self):
+        if self._pi_model is None or self._refine_baseline is None:
+            return
+        reply = QMessageBox.question(
+            self, "Restore default",
+            "Discard every edit made in Refine/Consolidate and return to "
+            "the alignment as it was when this candidate was selected (or "
+            "the project was opened)?\n\nThis clears the undo/redo history too.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        from gui.edit_history import apply_model_snapshot
+        apply_model_snapshot(self._pi_model, self._refine_baseline)
+        self._edit_history.clear()
+        self._refine_baseline = self._make_baseline(self._pi_model)
+        self._on_consolidation_model_changed()
+        self.log_panel.log("Alignment restored to its default (unedited) state.", "ok")
+
+    def _on_edit_mode_toggled(self, on: bool):
+        self.map_widget.set_pi_edit_mode(on)
+        self.log_panel.log(
+            "Edit mode ON — drag PI markers on the map to move them."
+            if on else "Edit mode off — PI markers are locked again.",
+            "info")
+
+    def _on_pi_dragged(self, pi_index: int, lat: float, lon: float):
+        """A PI marker was dragged to (lat, lon) in edit mode."""
+        from geometry.candidates import move_pi
+        from geometry.projection import wgs84_to_projected
+        if self._pi_model is None:
+            return
+        xy = wgs84_to_projected([(lat, lon)], self._work_epsg)[0]
+        self._history_push(f"move PI {pi_index}")
+        ok, msg = move_pi(self._pi_model, pi_index, xy)
+        if not ok:
+            self._edit_history.discard_last_push()
+            self.log_panel.log(f"Move PI {pi_index}: {msg}", "warn")
+            return
+        self._on_consolidation_model_changed()
+        self.log_panel.log(msg, "ok")
+
+    def _on_pi_restore(self, pi_index: int):
+        """The map's restore badge (Part H) asked to snap PI `pi_index`
+        back to its position in `_refine_baseline`."""
+        from geometry.candidates import move_pi
+        if self._pi_model is None or self._refine_baseline is None:
+            return
+        # Restoring a single PI's position only makes sense if no merge/
+        # insert/delete has changed the vertex topology since the baseline
+        # was stashed — those renumber indices, and a drag/restore never
+        # does, so a length mismatch means index k no longer refers to the
+        # same PI in both models.
+        if len(self._pi_model.V) != len(self._refine_baseline.V):
+            self.log_panel.log(
+                "Restore is only available when the PI layout hasn't "
+                "changed since fitting (no merges/inserts/deletes) — use "
+                "Restore default to revert everything instead.", "warn")
+            return
+        target_xy = self._refine_baseline.V[pi_index]
+        self._history_push(f"restore PI {pi_index}")
+        ok, msg = move_pi(self._pi_model, pi_index, target_xy)
+        if not ok:
+            self._edit_history.discard_last_push()
+            self.log_panel.log(f"Restore PI {pi_index}: {msg}", "warn")
+            return
+        self._on_consolidation_model_changed()
+        self.log_panel.log(f"PI {pi_index} restored to its fitted position.", "ok")
+
     def _on_toolbar_back(self):
+        """In an editing step, Back drains the undo stack first (like a
+        normal program's Ctrl+Z) before falling back to step navigation —
+        so it only leaves Refine/Consolidate once there's nothing left to
+        undo."""
+        if (self._current_step in (S_REFINE, S_CONSOLIDATE)
+                and self._edit_history.can_undo()):
+            label = self._edit_history.undo(self._pi_model)
+            self._after_history_change("Undid", label)
+            return
         handler = self._toolbar_back_map.get(self._current_step)
         if handler:
             handler()
 
     def _on_toolbar_forward(self):
+        if (self._current_step in (S_REFINE, S_CONSOLIDATE)
+                and self._edit_history.can_redo()):
+            label = self._edit_history.redo(self._pi_model)
+            self._after_history_change("Redid", label)
+            return
         if self._suggested_step is not None:
             self._goto_step(self._suggested_step)
+
+    def _after_history_change(self, verb: str, label: str | None):
+        """Undo/redo restores the PI model's V/idx/pis/elements/stats
+        in place — refresh exactly like a Consolidate-driven model change
+        (same shared-model rebind, no rebuild needed)."""
+        self._on_consolidation_model_changed()
+        msg = f"{verb}: {label}." if label else f"{verb} last edit."
+        self.log_panel.log(msg, "info")
 
     def _refresh_toolbar_edit_actions(self):
         et = self.element_table
@@ -272,6 +579,11 @@ class App(QMainWindow):
             in_edit_step and et._selected_pi_range() is not None)
         self._act_undo_merge.setEnabled(
             in_edit_step and et.selected_merge_pi() is not None)
+        self._act_edit_mode.setEnabled(
+            in_edit_step and self._pi_model is not None)
+        self._act_restore_default.setEnabled(
+            in_edit_step and self._pi_model is not None
+            and self._refine_baseline is not None)
 
     def _on_toggle_log(self, on: bool):
         self._prefs["show_log"] = bool(on)
@@ -460,6 +772,7 @@ class App(QMainWindow):
         self._elements        = st["elements"]
         self._stations        = st["stations"]
         self._project_path    = path
+        self._refine_baseline = self._make_baseline(self._pi_model)
 
         # Repopulate the steps that own UI state
         self.step2.populate(self._tracks)
@@ -615,7 +928,11 @@ class App(QMainWindow):
         self.element_table.show_alignment_requested.connect(
             self._on_show_alignment_clicked)
         self.element_table.split_pick_mode.connect(self._on_split_pick_mode)
+        self.element_table.on_before_edit = self._history_push
+        self.element_table.on_edit_failed = self._edit_history.discard_last_push
         self.map_widget.split_point_clicked.connect(self._on_split_point_clicked)
+        self.map_widget.pi_dragged.connect(self._on_pi_dragged)
+        self.map_widget.pi_restore_requested.connect(self._on_pi_restore)
         # Map element click (Ctrl = toggle into multiselect) → table selection
         self.map_widget.element_clicked.connect(self.element_table.select_element)
 
@@ -759,8 +1076,18 @@ class App(QMainWindow):
                 break
         self.sidebar.set_states(available, done, suggested, reasons)
         self._suggested_step = suggested
-        self._act_back.setEnabled(self._current_step in self._toolbar_back_map)
-        self._act_forward.setEnabled(suggested is not None)
+        in_edit_step = self._current_step in (S_REFINE, S_CONSOLIDATE)
+        can_undo = in_edit_step and self._edit_history.can_undo()
+        can_redo = in_edit_step and self._edit_history.can_redo()
+        self._act_back.setEnabled(
+            can_undo or self._current_step in self._toolbar_back_map)
+        self._act_back.setToolTip(
+            f"Undo: {self._edit_history.peek_undo_label()}" if can_undo
+            else "Go to the previous step")
+        self._act_forward.setEnabled(can_redo or suggested is not None)
+        self._act_forward.setToolTip(
+            f"Redo: {self._edit_history.peek_redo_label()}" if can_redo
+            else "Go to the next suggested step")
         self._refresh_toolbar_edit_actions()
 
     def _goto_step(self, idx: int):
@@ -773,6 +1100,8 @@ class App(QMainWindow):
         self.sidebar.set_step(idx)
         # The element table belongs to the alignment-editing steps
         self.element_table.setVisible(idx in (S_REFINE, S_CONSOLIDATE))
+        if idx not in (S_REFINE, S_CONSOLIDATE) and self._act_edit_mode.isChecked():
+            self._act_edit_mode.setChecked(False)   # also disarms map dragging
         tip = self._STEP_TIPS.get(idx)
         if tip:
             self.log_panel.log_step(tip[0], tip[1])
@@ -1057,6 +1386,8 @@ class App(QMainWindow):
         self._pi_model = getattr(candidate, "pi_model", None)
         self._elements = list(getattr(candidate, "elements", []) or [])
         self._level    = getattr(candidate, "algorithm_id", "")
+        self._edit_history.clear()   # fresh working alignment — no prior edits to undo
+        self._refine_baseline = self._make_baseline(self._pi_model)
         self._mark_stale()
         # Clear candidate overlays; Step 5 will show the chosen one as
         # per-element coloured alignment with hover tooltips.
@@ -1239,6 +1570,7 @@ class App(QMainWindow):
         self._pi_model = None
         self._xy_list = []
         self._chainages_list = []
+        self._edit_history.clear()
         self._set_dirty(True)
         self._refresh_nav()
 
@@ -1413,6 +1745,8 @@ class App(QMainWindow):
         self._chainages_list     = []
         self._done_steps         = set()
         self._stale              = set()
+        self._edit_history.clear()
+        self._refine_baseline    = None
         self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
         self.element_table.clear()
         self.step6_stations.reset()

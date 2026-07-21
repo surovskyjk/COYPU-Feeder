@@ -24,7 +24,7 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QWidget, QVBoxLayout,
     QComboBox, QCheckBox, QSizePolicy,
 )
 
@@ -140,6 +140,8 @@ class MapBridge(QObject):
     map_clicked        = Signal(float, float)   # lat, lon (station-placement mode)
     element_clicked    = Signal(str, bool)       # element_id, ctrl held (multiselect)
     split_point_clicked = Signal(float, float)   # lat, lon (Refine split-pick mode)
+    pi_dragged         = Signal(int, float, float)  # pi index, lat, lon (edit mode)
+    pi_restore_requested = Signal(int)           # pi index (edit-mode restore badge)
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -161,6 +163,14 @@ class MapBridge(QObject):
     def on_split_point_clicked(self, lat, lon):
         self.split_point_clicked.emit(lat, lon)
 
+    @Slot(int, float, float)
+    def on_pi_dragged(self, pi_index, lat, lon):
+        self.pi_dragged.emit(pi_index, lat, lon)
+
+    @Slot(int)
+    def on_pi_restore_requested(self, pi_index):
+        self.pi_restore_requested.emit(pi_index)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
@@ -172,6 +182,8 @@ class MapWidget(QWidget):
     map_clicked         = Signal(float, float)   # lat, lon (station-placement mode)
     element_clicked     = Signal(str, bool)       # element_id, ctrl held (multiselect)
     split_point_clicked = Signal(float, float)    # lat, lon (Refine split-pick mode)
+    pi_dragged          = Signal(int, float, float)  # pi index, lat, lon (edit mode)
+    pi_restore_requested = Signal(int)            # pi index (edit-mode restore badge)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -186,33 +198,24 @@ class MapWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── Toolbar ───────────────────────────────────────────────────
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(4, 2, 4, 2)
-        toolbar.setSpacing(6)
-
-        toolbar.addWidget(QLabel("Map:"))
+        # ── Map settings widgets ─────────────────────────────────────
+        # Owned by MapWidget (it wires their signals and reads them back
+        # in _apply_current_provider/set_theme), but laid out on the main
+        # window's toolbar instead of a dedicated row here (Part J) — App
+        # reaches into self.map_widget._provider_combo/_rail_chk when
+        # building the toolbar, once this widget exists.
         self._provider_combo = QComboBox()
         for p in TILE_PROVIDERS:
             self._provider_combo.addItem(p["label"])
         self._provider_combo.setCurrentIndex(_DEFAULT_PROVIDER)
         self._provider_combo.setToolTip("Choose base map tile provider")
         self._provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        self._provider_combo.setFixedWidth(200)
-        toolbar.addWidget(self._provider_combo)
+        self._provider_combo.setFixedWidth(160)
 
         self._rail_chk = QCheckBox("🚂 Railway overlay")
         self._rail_chk.setChecked(True)
         self._rail_chk.setToolTip("Show OpenRailwayMap overlay on top of base tiles")
         self._rail_chk.toggled.connect(self._on_rail_overlay_toggled)
-        toolbar.addWidget(self._rail_chk)
-
-        toolbar.addStretch()
-
-        toolbar_widget = QWidget()
-        toolbar_widget.setLayout(toolbar)
-        toolbar_widget.setFixedHeight(30)
-        layout.addWidget(toolbar_widget)
 
         # ── Web view ──────────────────────────────────────────────────
         page = DebugPage()
@@ -234,6 +237,8 @@ class MapWidget(QWidget):
         self._bridge.map_clicked.connect(self.map_clicked)
         self._bridge.element_clicked.connect(self.element_clicked)
         self._bridge.split_point_clicked.connect(self.split_point_clicked)
+        self._bridge.pi_dragged.connect(self.pi_dragged)
+        self._bridge.pi_restore_requested.connect(self.pi_restore_requested)
 
         # Serve gui/static/ (which contains map.html) over a local HTTP
         # server. Using http://127.0.0.1 as origin removes ALL cross-origin
@@ -334,12 +339,23 @@ class MapWidget(QWidget):
         self._run_js("flyToTracks()")
 
     def show_osm_reference(self, alignments: list):
-        """Draw the raw OSM polyline as a dashed cyan reference overlay."""
+        """Draw the raw OSM polyline as a dashed reference overlay (colour/
+        opacity/visibility as last set by `set_osm_reference_style`)."""
         payload = [{"nodes": nodes} for nodes in alignments]
         self._run_js(f"showOSMReference({json.dumps(payload)})")
 
     def clear_osm_reference(self):
         self._run_js("clearOSMReference()")
+
+    def set_osm_reference_style(self, visible: bool, color: str, opacity: float):
+        """
+        Part E: user control of the original (OSM) alignment's appearance.
+        Restyles the CURRENTLY drawn overlay in place (setStyle / add-remove
+        — no redraw) and remembers the choice for the next showOSMReference.
+        """
+        self._run_js(
+            f"setOSMReferenceStyle({'true' if visible else 'false'}, "
+            f"{json.dumps(color)}, {float(opacity)})")
 
     def show_alignment(self, alignments: list):
         payload = [{"nodes": nodes} for nodes in alignments]
@@ -443,6 +459,16 @@ class MapWidget(QWidget):
     def set_split_click_mode(self, on: bool):
         """Arm/disarm click-to-pick-a-split-point mode (crosshair cursor)."""
         self._run_js(f"setSplitClickMode({'true' if on else 'false'})")
+
+    def set_pi_edit_mode(self, on: bool):
+        """
+        Toggle "Edit mode" (Part C): PI markers become draggable when on —
+        dragend fires `pi_dragged(index, lat, lon)`. The PI overlay is
+        redrawn with the new marker type, so call this before/after
+        `show_pi_overlay` as convenient; either order ends up consistent
+        because `showPIOverlay` itself reads the current mode.
+        """
+        self._run_js(f"setPIEditMode({'true' if on else 'false'})")
 
     def show_cross_section(self, left_pts: list, right_pts: list):
         """

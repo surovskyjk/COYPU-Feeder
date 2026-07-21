@@ -23,6 +23,7 @@ import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QProgressBar,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QColor, QFont
@@ -62,7 +63,23 @@ class ElementTableDock(QWidget):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(300)
         self._debounce.timeout.connect(self._apply_pending)
+        # Set by App: on_before_edit(label) is called just BEFORE every
+        # model mutation below, so the toolbar's Back/Forward undo/redo
+        # (Part B) has a snapshot of the pre-edit state; on_edit_failed()
+        # discards that snapshot when the attempted edit turned out to be a
+        # no-op (the mutator reported failure). Both None outside an
+        # editing step.
+        self.on_before_edit = None
+        self.on_edit_failed = None
         self._build()
+
+    def _push_history(self, label: str):
+        if self.on_before_edit is not None and self._model is not None:
+            self.on_before_edit(label)
+
+    def _discard_history(self):
+        if self.on_edit_failed is not None:
+            self.on_edit_failed()
 
     # ------------------------------------------------------------------
     # Layout
@@ -120,6 +137,16 @@ class ElementTableDock(QWidget):
         self._range_btn.setEnabled(False)
         self._range_btn.clicked.connect(self._on_merge_range)
         header.addWidget(self._range_btn)
+
+        # Merges are near-instant (span-local rebuild), so a full progress
+        # worker isn't warranted — this indeterminate bar just keeps a rare
+        # slow case (a very long alignment) from reading as a frozen UI.
+        self._merge_busy_bar = QProgressBar()
+        self._merge_busy_bar.setRange(0, 0)
+        self._merge_busy_bar.setTextVisible(False)
+        self._merge_busy_bar.setFixedSize(60, 12)
+        self._merge_busy_bar.setVisible(False)
+        header.addWidget(self._merge_busy_bar)
 
         self._trim_start_btn = QPushButton("✂ Trim start")
         self._trim_start_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
@@ -686,6 +713,7 @@ class ElementTableDock(QWidget):
     def _apply_pending(self):
         if self._model is None or not self._pending:
             return
+        self._push_history("radius/spiral change")
         by_index = {p.index: p for p in self._model.pis}
         labels = {"radius": "radius", "spiral_len": "spiral length"}
         for pi_idx, changes in self._pending.items():
@@ -714,6 +742,7 @@ class ElementTableDock(QWidget):
         pid = next((p for p in self._model.pis if p.index == pi_index), None)
         if pid is None:
             return
+        self._push_history(f"reset PI {pi_index}")
         pid.radius = -1.0
         pid.spiral_len = -1.0
         pid.merged_with_next = False
@@ -725,6 +754,7 @@ class ElementTableDock(QWidget):
         pid = next((p for p in self._model.pis if p.index == pi_index), None)
         if pid is None:
             return
+        self._push_history(f"{'omit' if omitted else 'restore'} PI {pi_index}")
         pid.omitted = omitted
         self._rebuild(span=(pi_index, pi_index))
 
@@ -738,11 +768,13 @@ class ElementTableDock(QWidget):
         if self._model is None:
             return False, "No editable model."
         j_ref = nearest_xy_ref_index(self._model, point_xy)
+        self._push_history("split at map point")
         ok, msg = insert_pi(self._model, j_ref)
         if ok:
             self.log_message.emit(msg, "ok")
             self._rebuild(regenerate=False)
         else:
+            self._discard_history()
             self.log_message.emit(f"Split at picked point: {msg}", "warn")
         return ok, msg
 
@@ -755,8 +787,10 @@ class ElementTableDock(QWidget):
         mid = [(el["start"][0] + el["end"][0]) / 2.0,
                (el["start"][1] + el["end"][1]) / 2.0]
         j_ref = nearest_xy_ref_index(self._model, mid)
+        self._push_history("split line")
         ok, msg = insert_pi(self._model, j_ref)
         if not ok:
+            self._discard_history()
             self.log_message.emit(f"Split line: {msg}", "warn")
             QMessageBox.information(self, "Cannot split here", msg)
             return
@@ -777,8 +811,10 @@ class ElementTableDock(QWidget):
             QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
+        self._push_history(f"delete PI {pi_index}")
         ok, msg = delete_pi(self._model, pi_index)
         if not ok:
+            self._discard_history()
             self.log_message.emit(f"Delete PI {pi_index}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot delete PI", msg)
             return
@@ -801,13 +837,16 @@ class ElementTableDock(QWidget):
             f"Discard the alignment {'before' if which == 'start' else 'after'} "
             f"the selected row?\n\n{removed_pts} of {n} OSM points will be "
             "removed. This cannot be undone (other than reloading the "
-            "project or track).",
+            "project or track) — except via the toolbar's Back button, "
+            "which still works like any other edit.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
+        self._push_history(f"trim {which}")
         ok, msg = trim_alignment(self._model, j_start, j_end)
         if not ok:
+            self._discard_history()
             self.log_message.emit(f"Trim {which}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot trim", msg)
             return
@@ -819,8 +858,10 @@ class ElementTableDock(QWidget):
         from PySide6.QtWidgets import QMessageBox
         if self._model is None:
             return
+        self._push_history(f"merge spirals PI {pi_a}+{pi_b}")
         ok, msg = merge_intermediate_line(self._model, pi_a, pi_b)
         if not ok:
+            self._discard_history()
             self.log_message.emit(f"Merge spirals PI {pi_a}+{pi_b}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot merge spirals", msg)
             return
@@ -831,7 +872,10 @@ class ElementTableDock(QWidget):
         from geometry.candidates import undo_merge
         if self._model is None:
             return
-        undo_merge(self._model, pi_a)
+        self._push_history(f"undo spiral merge PI {pi_a}")
+        ok, _ = undo_merge(self._model, pi_a)
+        if not ok:
+            self._discard_history()
         self.log_message.emit(f"Merge at PI {pi_a} undone.", "info")
         self._rebuild(regenerate=False)   # undo already rebuilt the geometry
 
@@ -951,7 +995,7 @@ class ElementTableDock(QWidget):
 
     def _on_merge_range(self):
         from geometry.candidates import merge_pi_range, merge_range_ambiguity
-        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import QMessageBox, QApplication
         if self._model is None:
             return
         rng = self._selected_pi_range()
@@ -969,8 +1013,15 @@ class ElementTableDock(QWidget):
             if prefer is None:
                 return   # user cancelled
 
-        ok, msg = merge_pi_range(self._model, rng[0], rng[1], prefer=prefer)
+        self._push_history(f"merge PIs {rng[0]}–{rng[1]}")
+        self._merge_busy_bar.setVisible(True)
+        QApplication.processEvents()   # let the bar actually paint before the call
+        try:
+            ok, msg = merge_pi_range(self._model, rng[0], rng[1], prefer=prefer)
+        finally:
+            self._merge_busy_bar.setVisible(False)
         if not ok:
+            self._discard_history()
             self.log_message.emit(f"Merge PI range {rng[0]}–{rng[1]}: {msg}", "warn")
             QMessageBox.warning(self, "Cannot merge PI range", msg)
             return

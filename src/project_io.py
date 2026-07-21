@@ -24,7 +24,8 @@ from lxml import etree
 
 import app_meta as meta
 
-FILE_VERSION = "1.1"   # 1.1 adds PI/@chainNext (high-angle chained merges)
+FILE_VERSION = "1.2"   # 1.1 added PI/@chainNext (legacy, read-only now);
+                        # 1.2 adds PI/@mergedTurn (single-PI reflex merges)
 NUM = "{:.6f}"          # LandXML house style — user-facing values
 # Internal geometry (projected metres) is stored at nanometre precision so a
 # save/load round-trip reproduces the element chain exactly rather than to the
@@ -144,7 +145,10 @@ def save_project(filepath: str, state: dict) -> None:
             pe.set("mergedWithPrev", _b(p.merged_with_prev))
             pe.set("mergePartner", str(int(p.merge_partner)))
             pe.set("premergeSpiralLen", NUM_GEOM.format(float(p.premerge_spiral_len)))
-            pe.set("chainNext", _b(p.chain_next))
+            pe.set("chainNext", _b(p.chain_next))   # legacy 1.1 field; never
+                                                     # set true by current code
+            if p.merged_turn is not None:
+                pe.set("mergedTurn", NUM_GEOM.format(float(p.merged_turn)))
 
     # ── Stations ─────────────────────────────────────────────────────────
     sts = state.get("stations") or []
@@ -255,6 +259,8 @@ def load_project(filepath: str) -> dict:
                 merge_partner=int(pe.get("mergePartner", "-1")),
                 premerge_spiral_len=float(pe.get("premergeSpiralLen", "-1")),
                 chain_next=_pb(pe.get("chainNext", "false")),
+                merged_turn=(float(pe.get("mergedTurn"))
+                            if pe.get("mergedTurn") is not None else None),
             ))
         model = PIAlignment(
             V=V, idx=idx, pis=pis, xy_ref=xy_ref, chainages_ref=chain,

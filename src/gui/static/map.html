@@ -15,6 +15,29 @@
     line-height: 1.4;
   }
   .aln-tip b { color: #ffd54f; }
+
+  /* PI edit-mode markers (Part H): hover "bounce" invites interaction;
+     locked PIs must be unlocked (click the lock badge) before they can be
+     dragged; unlocked PIs also show a small restore-to-baseline badge. */
+  @keyframes pi-bounce {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.35); }
+  }
+  .pi-drag-icon .pi-dot {
+    position: absolute; left: 4px; top: 4px;
+    width: 10px; height: 10px; border-radius: 50%;
+    transform-origin: center;
+  }
+  .pi-drag-icon .pi-dot:hover { animation: pi-bounce 0.6s ease-in-out infinite; }
+  .pi-drag-icon .pi-badge {
+    position: absolute; width: 11px; height: 11px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8px; line-height: 1; cursor: pointer;
+    border: 1px solid rgba(0,0,0,0.4); box-shadow: 0 0 2px rgba(0,0,0,0.6);
+  }
+  .pi-drag-icon .pi-lock-badge    { right: -2px; bottom: -2px; background: #757575; color: #fff; }
+  .pi-drag-icon .pi-lock-badge.unlocked { background: #43a047; }
+  .pi-drag-icon .pi-restore-badge { right: -2px; top: -2px; background: #1e88e5; color: #fff; }
 </style>
 <link rel="stylesheet" href="leaflet.css"/>
 <script src="leaflet.js"></script>
@@ -24,7 +47,15 @@
 <div id="map"></div>
 <script>
 "use strict";
-var map = L.map('map', {zoomControl: true}).setView([50.05, 14.42], 7);
+/* fadeAnimation:false kills Leaflet's default tile cross-fade (the old tile
+   layer fading out while the new one fades in is the main source of the
+   "blink" reported on zoom); zoomAnimation stays on for a smooth zoom feel
+   — the canvas renderer padding bump below (see _alnRenderer/_glowRenderer)
+   is what keeps OUR polylines from visibly popping/clipping during that
+   animated transition. */
+var map = L.map('map', {
+  zoomControl: true, fadeAnimation: false, markerZoomAnimation: true,
+}).setView([50.05, 14.42], 7);
 
 /* Custom panes for z-ordering */
 map.createPane('tracksPane').style.zIndex      = '410';
@@ -38,9 +69,15 @@ map.createPane('stationPane').style.zIndex     = '660';
 
 /* Canvas renderers for the alignment: a long line has hundreds of elements,
    and one SVG path per element makes pan/zoom crawl. Canvas draws them all
-   into a single element while keeping mouse events and tooltips working. */
-var _alnRenderer  = L.canvas({ pane: 'alignmentPane',     padding: 0.5 });
-var _glowRenderer = L.canvas({ pane: 'alignmentGlowPane', padding: 0.5 });
+   into a single element while keeping mouse events and tooltips working.
+   padding is how far beyond the viewport the canvas buffer extends; at the
+   old 0.5 a pan or the CSS-transformed mid-zoom-animation frame could show
+   the buffer's clipped edge before the next redraw caught up (visible as a
+   blink/pop). 2.0 keeps a couple of extra viewports' worth rendered so that
+   edge is essentially never on screen, at the cost of a larger offscreen
+   canvas — negligible next to the per-element draw cost this already pays. */
+var _alnRenderer  = L.canvas({ pane: 'alignmentPane',     padding: 2.0 });
+var _glowRenderer = L.canvas({ pane: 'alignmentGlowPane', padding: 2.0 });
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -61,10 +98,18 @@ var _hoverPopup     = null;
 var _stationClickMode = false;
 var _splitClickMode = false;   // click-to-pick a Line-split point (Refine)
 
+/* keepBuffer keeps extra rows/cols of tiles loaded outside the viewport so
+   a pan doesn't show blank tiles while new ones fetch; updateWhenZooming:
+   false defers loading new-zoom tiles until the zoom gesture settles
+   instead of mid-animation, which is the other half (with fadeAnimation:
+   false above) of removing the zoom "blink". */
+var _TILE_ANTI_FLICKER = { keepBuffer: 4, updateWhenZooming: false };
+
 /* ── Tile provider ─────────────────────────────────────────────── */
 function setTileProvider(url, subs, attr, maxZoom) {
   if (baseLayer) { map.removeLayer(baseLayer); baseLayer = null; }
-  var opts = { attribution: attr, maxZoom: maxZoom || 19 };
+  var opts = Object.assign(
+    { attribution: attr, maxZoom: maxZoom || 19 }, _TILE_ANTI_FLICKER);
   if (subs) opts.subdomains = subs;
   baseLayer = L.tileLayer(url, opts).addTo(map);
   /* Keep rail overlay on top if active */
@@ -78,8 +123,9 @@ function setRailOverlay(show) {
     if (!railOverlay) {
       railOverlay = L.tileLayer(
         'https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
-        { subdomains:'abc', maxZoom:19, opacity:0.8,
-          attribution:'© <a href="https://www.openrailwaymap.org/">OpenRailwayMap</a>' }
+        Object.assign({ subdomains:'abc', maxZoom:19, opacity:0.8,
+          attribution:'© <a href="https://www.openrailwaymap.org/">OpenRailwayMap</a>' },
+          _TILE_ANTI_FLICKER)
       ).addTo(map);
     }
   } else {
@@ -141,16 +187,24 @@ function flyToTracks() {
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8, maxZoom:14}); } catch(e){}
 }
 
-/* ── OSM reference overlay (dashed cyan) ────────────────────────  */
+/* ── OSM reference overlay (dashed, user-configurable) ──────────  */
+/* Part E: visibility/opacity/colour are user-editable (toolbar "Original…"
+   popover) and persisted in Python prefs — applied here via setStyle on
+   the existing layers (no redraw) and remembered so a later showOSMReference
+   rebuild (new track / project load) picks the same look back up. */
+var _osmRefStyle = {visible: true, color: '#00e5ff', opacity: 0.85};
+
 function showOSMReference(alns) {
   clearOSMReference();
+  var st = _osmRefStyle;
   alns.forEach(function(aln) {
     var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
     if (latlngs.length < 2) return;
     var pl = L.polyline(latlngs, {
-      color: '#00e5ff', weight: 3, opacity: 0.85,
+      color: st.color, weight: 3, opacity: st.opacity,
       dashArray: '8 6', pane: 'osmRefPane'
-    }).addTo(map);
+    });
+    if (st.visible) pl.addTo(map);
     osmRefLayers.push(pl);
   });
 }
@@ -158,6 +212,18 @@ function showOSMReference(alns) {
 function clearOSMReference() {
   osmRefLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
   osmRefLayers = [];
+}
+
+/* Applied to the CURRENT layers via setStyle/add-remove — no redraw — and
+   remembered for the next showOSMReference() rebuild. */
+function setOSMReferenceStyle(visible, color, opacity) {
+  _osmRefStyle = {visible: !!visible, color: color, opacity: opacity};
+  osmRefLayers.forEach(function(pl) {
+    pl.setStyle({color: color, opacity: opacity});
+    var onMap = map.hasLayer(pl);
+    if (visible && !onMap) pl.addTo(map);
+    else if (!visible && onMap) map.removeLayer(pl);
+  });
 }
 
 /* ── Fitted alignment overlay (solid red) ───────────────────────  */
@@ -443,8 +509,37 @@ function highlightElement(elementId) {
 }
 
 /* ── PI overlay: markers + dashed virtual tangent extensions ───── */
+var _piEditMode = false;   // Part C: draggable PIs in Refine/Consolidate
+var _lastPIPayload = null; // re-rendered by setPIEditMode without a Python round-trip
+/* Part H: per-PI lock state, id -> bool. Absent/true = locked (default —
+   every re-entry into Edit mode starts fully locked, see setPIEditMode).
+   Only an UNLOCKED PI is actually draggable; locked ones still bounce on
+   hover (pure CSS) as a "this is interactive, unlock me" affordance. */
+var _piLocked = {};
+
+/* Small divIcon standing in for a draggable marker — Leaflet's CircleMarker
+   has no built-in drag support, only L.marker does. Composed of a dot (the
+   plain non-edit-mode look), a lock/unlock badge (click to toggle — this is
+   what actually gates dragging), and — only while unlocked — a restore
+   badge that snaps the PI back to the fitted-alignment baseline. */
+function _piDragIcon(omitted, locked) {
+  var border = omitted ? '#9e9e9e' : '#37474f';
+  var fill   = omitted ? 'transparent' : '#ffffff';
+  var html = '<div class="pi-dot" style="border:2px solid ' + border +
+             ';background:' + fill + ';cursor:' + (locked ? 'default' : 'grab') + ';"></div>' +
+             '<div class="pi-badge pi-lock-badge' + (locked ? '' : ' unlocked') +
+             '" title="' + (locked ? 'Locked — click to unlock' : 'Unlocked — click to lock') +
+             '">' + (locked ? '🔒' : '🔓') + '</div>';
+  if (!locked) {
+    html += '<div class="pi-badge pi-restore-badge" title="Restore to fitted position">↺</div>';
+  }
+  return L.divIcon({ className: 'pi-drag-icon', html: html,
+                     iconSize: [22, 22], iconAnchor: [11, 11] });
+}
+
 function showPIOverlay(payload) {
   clearPIOverlay();
+  _lastPIPayload = payload || null;
   if (!payload) return;
   (payload.tangents || []).forEach(function(t) {
     var pl = L.polyline([t.from, t.to], {
@@ -455,16 +550,52 @@ function showPIOverlay(payload) {
   });
   (payload.pis || []).forEach(function(pi) {
     var omitted = !!pi.omitted;
-    var mk = L.circleMarker(pi.latlon, {
-      radius: 5,
-      color:   omitted ? '#9e9e9e' : '#37474f',
-      weight:  2,
-      fillColor: omitted ? 'transparent' : '#ffffff',
-      fillOpacity: omitted ? 0.0 : 0.9,
-      pane: 'piPane'
-    }).addTo(map);
     var d = (pi.defl_deg === undefined || pi.defl_deg === null)
             ? "" : " · δ=" + Number(pi.defl_deg).toFixed(1) + "°";
+    var mk;
+    if (_piEditMode) {
+      var locked = _piLocked[pi.id] !== false;
+      var tip = "PI " + pi.id + d + (omitted ? " (omitted)" : "") +
+                (locked ? " — click the lock to unlock" : " — drag to move");
+      mk = L.marker(pi.latlon, {
+        icon: _piDragIcon(omitted, locked), draggable: !locked,
+        pane: 'piPane', autoPan: true,
+      }).addTo(map);
+      mk.on('dragend', function() {
+        var ll = mk.getLatLng();
+        if (backend && backend.on_pi_dragged)
+          backend.on_pi_dragged(pi.id, ll.lat, ll.lng);
+      });
+      mk.bindTooltip(tip, {direction: 'top', className: 'aln-tip'});
+      var el = mk.getElement();
+      if (el) {
+        var lockBadge = el.querySelector('.pi-lock-badge');
+        if (lockBadge) {
+          L.DomEvent.disableClickPropagation(lockBadge);
+          L.DomEvent.on(lockBadge, 'click', function(ev) {
+            L.DomEvent.stop(ev);
+            _piLocked[pi.id] = !locked;   // toggle
+            showPIOverlay(_lastPIPayload);
+          });
+        }
+        var restoreBadge = el.querySelector('.pi-restore-badge');
+        if (restoreBadge) {
+          L.DomEvent.disableClickPropagation(restoreBadge);
+          L.DomEvent.on(restoreBadge, 'click', function(ev) {
+            L.DomEvent.stop(ev);
+            if (backend && backend.on_pi_restore_requested)
+              backend.on_pi_restore_requested(pi.id);
+          });
+        }
+      }
+      piLayers.push(mk);
+      return;
+    }
+    mk = L.circleMarker(pi.latlon, {
+      radius: 5, color: omitted ? '#9e9e9e' : '#37474f', weight: 2,
+      fillColor: omitted ? 'transparent' : '#ffffff',
+      fillOpacity: omitted ? 0.0 : 0.9, pane: 'piPane',
+    }).addTo(map);
     mk.bindTooltip("PI " + pi.id + d + (omitted ? " (omitted)" : ""),
                    {direction: 'top', className: 'aln-tip'});
     piLayers.push(mk);
@@ -474,6 +605,15 @@ function showPIOverlay(payload) {
 function clearPIOverlay() {
   piLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
   piLayers = [];
+}
+
+/* Toggling edit mode re-renders the CURRENT PI set with the appropriate
+   marker type — no need to re-fetch from Python. Leaving edit mode resets
+   every PI back to locked, so re-entering it always starts safe. */
+function setPIEditMode(on) {
+  _piEditMode = !!on;
+  if (!on) _piLocked = {};
+  if (_lastPIPayload) showPIOverlay(_lastPIPayload);
 }
 
 /* ── Station markers + click-to-place mode ─────────────────────── */

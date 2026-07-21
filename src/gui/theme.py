@@ -161,16 +161,16 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
             QToolBar#MainToolbar {
                 background-color: #2d2d30;
                 border-bottom: 1px solid #1a1a1c;
-                padding: 3px 4px;
-                spacing: 4px;
+                padding: 2px 3px;
+                spacing: 3px;
             }
             QToolBar#MainToolbar QToolButton {
                 background-color: #1565c0;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 11px;
+                padding: 2px 5px;
+                font-size: 9px;
             }
             QToolBar#MainToolbar QToolButton:hover {
                 background-color: #1e88e5;
@@ -182,13 +182,31 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
                 background-color: #3a3a3d;
                 color: #666;
             }
+            /* Checked (Edit mode ON, or any future checkable toolbar
+               action) gets a distinct amber "glow" instead of the plain
+               blue pill, so its on-state reads at a glance. */
+            QToolBar#MainToolbar QToolButton:checked {
+                background-color: #ffb300;
+                color: #1a1a1c;
+                border: 2px solid #ffe082;
+                padding: 0px 3px;
+            }
+            QToolBar#MainToolbar QToolButton:checked:hover {
+                background-color: #ffc233;
+            }
             QToolBar#MainToolbar QLabel {
                 color: #e0e0e0;
+            }
+            QToolBar#MainToolbar QLabel#brandLabel {
+                color: #64b5f6;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0 10px;
             }
             QToolBar#MainToolbar::separator {
                 background-color: #4a4a4e;
                 width: 1px;
-                margin: 4px 6px;
+                margin: 3px 5px;
             }
         """)
     else:
@@ -222,16 +240,16 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
             QToolBar#MainToolbar {
                 background-color: #eef1f5;
                 border-bottom: 1px solid #c8ccd2;
-                padding: 3px 4px;
-                spacing: 4px;
+                padding: 2px 3px;
+                spacing: 3px;
             }
             QToolBar#MainToolbar QToolButton {
                 background-color: #1976d2;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 11px;
+                padding: 2px 5px;
+                font-size: 9px;
             }
             QToolBar#MainToolbar QToolButton:hover {
                 background-color: #2196f3;
@@ -243,12 +261,27 @@ def _apply_stylesheet(app: QApplication, dark: bool) -> None:
                 background-color: #d0d0d0;
                 color: #888;
             }
+            QToolBar#MainToolbar QToolButton:checked {
+                background-color: #ffa000;
+                color: #1a1a1c;
+                border: 2px solid #ffca28;
+                padding: 0px 3px;
+            }
+            QToolBar#MainToolbar QToolButton:checked:hover {
+                background-color: #ffb300;
+            }
             QToolBar#MainToolbar QLabel {
                 color: #202020;
+            }
+            QToolBar#MainToolbar QLabel#brandLabel {
+                color: #1565c0;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0 10px;
             }
             QToolBar#MainToolbar::separator {
                 background-color: #c8ccd2;
                 width: 1px;
-                margin: 4px 6px;
+                margin: 3px 5px;
             }
         """)

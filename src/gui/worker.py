@@ -719,3 +719,75 @@ class ExportWorker(QThread):
         self.stage_changed.emit("Writing file…")
         write_landxml(root, self._filepath)
         return work_epsg
+
+
+# ---------------------------------------------------------------------------
+# Consolidate step workers (Part L) — Scan and Apply were synchronous on the
+# GUI thread; a long scan/apply on a large alignment made the "progress"
+# label a no-op (Qt never got a chance to repaint mid-call) and froze the UI.
+# ---------------------------------------------------------------------------
+
+class ConsolidationScanWorker(QThread):
+    """
+    Runs `find_consolidation_groups` off the GUI thread.
+
+    Signals
+    -------
+    progress(done: int, total: int)  — runs evaluated so far
+    finished(groups: list)
+    failed(error: str)
+    """
+
+    progress = Signal(int, int)
+    finished = Signal(list)
+    failed   = Signal(str)
+
+    def __init__(self, model, max_straight_m: float, max_dev_m: float, parent=None):
+        super().__init__(parent)
+        self._model = model
+        self._max_straight_m = max_straight_m
+        self._max_dev_m = max_dev_m
+
+    def run(self):
+        try:
+            from geometry.candidates import find_consolidation_groups
+            groups = find_consolidation_groups(
+                self._model, max_straight_m=self._max_straight_m,
+                max_dev_m=self._max_dev_m,
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+            )
+            self.finished.emit(groups)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ConsolidationApplyWorker(QThread):
+    """
+    Runs `apply_consolidation` off the GUI thread.
+
+    Signals
+    -------
+    progress(done: int, total: int)  — groups applied so far
+    finished(applied: int, messages: list)
+    failed(error: str)
+    """
+
+    progress = Signal(int, int)
+    finished = Signal(int, list)
+    failed   = Signal(str)
+
+    def __init__(self, model, groups: list, parent=None):
+        super().__init__(parent)
+        self._model = model
+        self._groups = groups
+
+    def run(self):
+        try:
+            from geometry.candidates import apply_consolidation
+            applied, msgs = apply_consolidation(
+                self._model, self._groups,
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+            )
+            self.finished.emit(applied, msgs)
+        except Exception as exc:
+            self.failed.emit(str(exc))

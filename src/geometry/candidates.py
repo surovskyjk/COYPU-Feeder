@@ -82,8 +82,15 @@ class PIData:
     premerge_spiral_len: float = -1.0     # value to restore on undo-merge
     # High-angle chain: this PI's curve continues into the NEXT PI's curve
     # on the same circle (no exit spiral here, no entry spiral there, zero
-    # connector). Set by _merge_pi_range_chained on all but the last member.
+    # connector). Legacy field: no longer SET by any current merge (which
+    # always builds a single PI — see merged_turn below); kept read-only so
+    # a pre-release .coypu 1.1 file with chainNext still loads and rebuilds.
     chain_next:       bool  = False
+    # Set by merge_pi_range on the single PI it creates: the SIGNED,
+    # UNWRAPPED total turn (radians) the merged curve must sweep — may
+    # exceed +-180 deg (a reflex/major arc). None for an ordinary PI, where
+    # the wrapped polygon deflection (always <= 180 deg) is authoritative.
+    merged_turn:      float | None = None
 
 
 @dataclass
@@ -3200,6 +3207,12 @@ _PI_L_MIN       = 2.0     # minimum useful spiral length
 _PI_EPS_ANG     = 1e-4    # deflections below this are treated as straight
 _PI_MIN_TANGENT = 60.0    # Lines shorter than this between same-sense arcs
                           # trigger a PI merge (one physical curve)
+_REFLEX_SINGULAR_DEG = 2.0   # a merged turn this close to +-180 deg is
+                              # geometrically singular for ANY single circular
+                              # PI (the two boundary tangents are near-
+                              # parallel and never meet at a finite point) —
+                              # refuse cleanly instead of building a runaway
+                              # curve.
 
 
 def _polygon_deflection(V: np.ndarray, k: int) -> float:
@@ -3327,8 +3340,147 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
         phi_out = math.atan2(float(u_out[1]), float(u_out[0]))
         delta   = _wrap_pi(phi_out - phi_in)
 
+        # A merge stores the SIGNED, UNWRAPPED total turn on merged_turn —
+        # for |total| <= 180 deg this is numerically identical to the
+        # wrapped delta above (both derived from the same PI/A/B), so the
+        # override is a no-op there; for a reflex/major-arc merge (>180 deg)
+        # it carries information the wrapped reading cannot (see
+        # _build_pi_zone module docs / merge_pi_range).
+        is_reflex = False
+        if pi_data.merged_turn is not None:
+            mt = float(pi_data.merged_turn)
+            if abs(abs(mt) - math.pi) < math.radians(_REFLEX_SINGULAR_DEG):
+                model.log.append(
+                    f"⚠ PI {k}: merged turn {math.degrees(mt):+.1f}° is too "
+                    "close to 180° — the boundary tangents are nearly "
+                    "parallel and never meet at a finite point; curve "
+                    "dropped.")
+                continue
+            delta = mt
+            is_reflex = abs(mt) > math.pi
+
         if abs(delta) < _PI_EPS_ANG:
             continue    # collinear: tangents merge into one line
+
+        if is_reflex:
+            # Dedicated construction for turns > 180 deg: the ordinary
+            # tangent-sharing / T_max clamping below assumes
+            # tan(|delta|/2) > 0, which inverts sign past 180 deg. Radius
+            # comes from a run-wide circle fit (or an explicit override);
+            # entry/exit spirals attach via the same asymmetric
+            # _compute_zone_geometry used everywhere else — it needs only a
+            # start point/heading and the (unrestricted-magnitude) signed
+            # delta, so it generalises to a reflex sweep with no changes.
+            sign      = 1.0 if delta >= 0 else -1.0
+            abs_delta = abs(delta)
+            half_tan  = math.tan(abs_delta / 2.0)   # negative — expected
+
+            d_out_room = float(np.hypot(*(B - PI)))
+            d_in_room  = d_in
+
+            if pi_data.radius > 0:
+                R = float(pi_data.radius)
+            else:
+                fit = _fit_run_circle(model, k, k)
+                if fit is None:
+                    model.log.append(
+                        f"⚠ PI {k}: could not fit a radius for the "
+                        f"{math.degrees(delta):+.1f}° merged curve — "
+                        "dropped.")
+                    continue
+                R = max(min_radius, float(fit[2]))
+                pi_data.radius_auto = R
+
+            L_target = 0.0
+            if use_spirals:
+                L_target = (float(model.spiral_default)
+                           if pi_data.spiral_len < 0
+                           else float(pi_data.spiral_len))
+            L = L_target if L_target >= _PI_L_MIN else 0.0
+
+            def _reflex_tangent(R_try, L_try):
+                ht = math.tan(abs_delta / 2.0)
+                if L_try > 0.0:
+                    theta_s = L_try / (2.0 * R_try)
+                    if abs_delta - 2.0 * theta_s < 0.01:
+                        return None
+                    x_sp, y_sp = _compute_clothoid_shift(L_try, R_try)
+                    p_sh = y_sp - R_try * (1.0 - math.cos(theta_s))
+                    k_ab = x_sp - R_try * math.sin(theta_s)
+                    T_try = (R_try + p_sh) * ht + k_ab
+                else:
+                    T_try = R_try * ht
+                if abs(T_try) <= min(d_in_room, d_out_room) - 0.5:
+                    return T_try
+                return None
+
+            T_s = _reflex_tangent(R, L)
+            if T_s is None and L > 0.0:
+                L = 0.0
+                T_s = _reflex_tangent(R, L)
+            if T_s is None:
+                # Do NOT silently shrink R to make it fit — that would
+                # build a curve that no longer matches the OSM points the
+                # radius was fitted to. A reflex/major-arc curve genuinely
+                # needs tangent room on the order of R*|tan(turn/2)|; if
+                # the fixed boundary tangents are too short for the fitted
+                # radius, that's a real infeasibility to report, not paper
+                # over.
+                need = abs(R * math.tan(abs_delta / 2.0))
+                model.log.append(
+                    f"⚠ PI {k}: a {math.degrees(delta):+.1f}° curve at "
+                    f"R={R:.0f} m needs about {need:.0f} m of straight "
+                    f"tangent on each side; only "
+                    f"{min(d_in_room, d_out_room):.0f} m is available here "
+                    "— dropped.")
+                continue
+
+            TC   = PI - T_s * u_in
+            zone = _compute_zone_geometry(TC, phi_in, delta, R,
+                                          L_entry=L, L_exit=L)
+            if zone is None:
+                model.log.append(
+                    f"⚠ PI {k}: reflex curve construction failed — "
+                    "dropped.")
+                continue
+            _append_line(cur_pt, TC, direction=phi_in)
+            zas, zac, zae = (zone["arc_start"], zone["arc_center"],
+                             zone["arc_end"])
+            CT, z_arc_len = zone["CT"], zone["arc_len"]
+            rot = "ccw" if delta >= 0 else "cw"
+            if L > 0.0:
+                A_cl = math.sqrt(R * L)
+                elements.append({
+                    "type": "Spiral", "sta_start": 0.0, "length": L,
+                    "start": TC.tolist(), "end": zas.tolist(),
+                    "radius_start": float("inf"), "radius_end": R,
+                    "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                })
+            elements.append({
+                "type": "Arc", "sta_start": 0.0, "length": z_arc_len,
+                "start": zas.tolist(), "end": zae.tolist(),
+                "center": zac.tolist(), "radius": R, "rot": rot,
+                "chord": float(np.hypot(*(zae - zas))),
+                "_deflection": zone["arc_angle"] * sign, "_pi": k,
+            })
+            if L > 0.0:
+                elements.append({
+                    "type": "Spiral", "sta_start": 0.0, "length": L,
+                    "start": zae.tolist(), "end": CT.tolist(),
+                    "radius_start": R, "radius_end": float("inf"),
+                    "clothoid_A": A_cl, "rot": rot, "_pi": k,
+                })
+            stubs.append({
+                "pi": k, "pi_xy": [float(PI[0]), float(PI[1])],
+                "tc": TC.tolist(), "ct": np.array(CT, dtype=float).tolist(),
+            })
+            cur_pt = np.array(CT, dtype=float)
+            pi_data.radius = R
+            if use_spirals:
+                pi_data.spiral_len = L
+                if pi_data.spiral_len_auto <= 0.0 and L > 0.0:
+                    pi_data.spiral_len_auto = L
+            continue
 
         # Available beyond the PI: share the next segment with the next PI.
         # Merged PI pairs are exempt from the sharing margins: their spiral
@@ -4404,18 +4556,17 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
 
 
 # ---------------------------------------------------------------------------
-# High-angle curve merging — chained PIs on one fitted circle
+# High-angle curve merging — always a single Spiral-Arc-Spiral PI
 # ---------------------------------------------------------------------------
-# A single PI cannot hold |δ| >= 180°: every deflection is wrapped to
-# (−π, π] (_wrap_pi), and the tangent-intersection construction diverges as
-# tan(δ/2) well before that. A merged run whose TOTAL turn exceeds
-# _CHAIN_DISPATCH_DEG is instead built as a chain of PIs sharing one fitted
-# radius, each turning at most _CHAIN_SUBTEND_DEG — every interior PI is an
-# ordinary plain arc between two tangent lines of the same circle, so no new
-# per-PI zone maths is needed (see _build_zone_range's chain_next handling).
+# A merge keeps BOTH boundary tangents fixed and replaces everything between
+# them with exactly one Line-Spiral-Arc-Spiral-Line — never a chain of
+# curves. The new PI's turn is the range's own unwrapped total (the sum of
+# its member deflections), which may exceed +-180 deg (a reflex/major arc);
+# `PIData.merged_turn` carries that signed value and `_build_zone_range`'s
+# reflex branch constructs it directly from a run-wide circle fit (see
+# _fit_run_circle below) instead of the ordinary tan(delta/2) tangent-length
+# formula, which is only valid up to +-180 deg.
 
-_CHAIN_DISPATCH_DEG = 90.0     # totals beyond this use the chained builder
-_CHAIN_SUBTEND_DEG  = 80.0     # max turn per chain member
 _MERGE_MAX_TOTAL_DEG = 350.0   # reject beyond this — not a real transition
 _CHAIN_NEAR_180_DEG  = 5.0     # per-vertex reading this close to 180° is
                                # itself wrap-ambiguous (ask, don't guess)
@@ -4523,24 +4674,33 @@ def _fit_run_circle(model: "PIAlignment", k_from: int, k_to: int
     return None
 
 
-def _merge_pi_range_chained(model: "PIAlignment", k_from: int, k_to: int,
-                            total_delta: float) -> tuple[bool, str]:
+def _merge_pi_range_singular_aux(model: "PIAlignment", k_from: int,
+                                 k_to: int, total_turn: float
+                                 ) -> tuple[bool, str]:
     """
-    Replace the vertex range [k_from, k_to] with a CHAIN of PIs sharing one
-    fitted radius, each turning at most _CHAIN_SUBTEND_DEG, so the total
-    (unwrapped) deflection can exceed 180°. See the module comment above
-    _CHAIN_DISPATCH_DEG for why one PI cannot do this.
+    Fallback for a total turn within `_REFLEX_SINGULAR_DEG` of +-180° —
+    the single-PI tangent-line intersection genuinely has no finite
+    solution there (the two boundary tangents are near-parallel). Instead
+    of refusing, insert ONE auxiliary PI so the range still reads as a
+    single continuous "curve" experience: two arcs sharing one fitted
+    radius, meeting at a zero-length connector on the shared circle.
 
-    `total_delta` is the AUTHORITATIVE signed total (radians) — normally
-    the sum of the range's own polygon deflections, but a caller resolving
-    an ambiguous read (see MergeChoice) may pass either candidate.
+    This reuses the pre-single-PI chain-merge construction (fit one circle
+    to the run's OSM points, take tangent points at evenly-spaced headings
+    around it, intersect consecutive tangent lines for the new vertices),
+    constrained to exactly 2 sub-curves — always enough, since the total
+    is never more than ~2 deg past 180°, so each half is a comfortable
+    ~90 deg, nowhere near singular. `PIData.chain_next` (legacy field,
+    still fully honoured by `_build_zone_range`'s chain-boundary branch)
+    marks the join so the existing zero-connector construction picks it
+    up with no further changes needed there.
+
+    Returns (ok, message); on failure the model is unchanged and the
+    caller falls back to its own "too close to 180°" refusal message.
     """
     m = len(model.V)
-    if not (1 <= k_from <= k_to <= m - 2):
+    if not (1 <= k_from <= k_to <= m - 2) or k_from == k_to:
         return False, "PI range out of bounds."
-    if abs(math.degrees(total_delta)) > _MERGE_MAX_TOTAL_DEG:
-        return False, (f"Total deflection {math.degrees(total_delta):.0f}° "
-                       "is not a plausible single transition.")
 
     fit = _fit_run_circle(model, k_from, k_to)
     if fit is None:
@@ -4550,9 +4710,9 @@ def _merge_pi_range_chained(model: "PIAlignment", k_from: int, k_to: int,
 
     A, P1 = model.V[k_from - 1], model.V[k_from]
     phi_in = math.atan2(P1[1] - A[1], P1[0] - A[0])
-    sign = 1.0 if total_delta >= 0 else -1.0
-    n = max(2, math.ceil(abs(math.degrees(total_delta)) / _CHAIN_SUBTEND_DEG))
-    sub_delta = total_delta / n
+    sign = 1.0 if total_turn >= 0 else -1.0
+    n = 2
+    sub_delta = total_turn / n
 
     headings = [phi_in + i * sub_delta for i in range(n + 1)]
     tpts = []
@@ -4563,7 +4723,7 @@ def _merge_pi_range_chained(model: "PIAlignment", k_from: int, k_to: int,
     for i in range(n):
         v = _line_intersect(tpts[i], headings[i], tpts[i + 1], headings[i + 1])
         if v is None:
-            return False, "Chain construction degenerated (near-parallel legs)."
+            return False, "Auxiliary-PI construction degenerated (near-parallel legs)."
         new_V.append(v)
 
     old_V, old_idx, old_pis = model.V.copy(), list(model.idx), model.pis
@@ -4603,10 +4763,12 @@ def _merge_pi_range_chained(model: "PIAlignment", k_from: int, k_to: int,
             restore_span_snapshot(model, span_snap)
         else:
             rebuild_from_pi_model(model)
-        return False, (f"The chained curve could not be constructed "
-                       f"({n_arcs}/{n} arcs fit) — rolled back.")
-    return True, (f"PIs {k_from}–{k_to} replaced by a {n}-curve chain "
-                  f"(δ={math.degrees(total_delta):+.1f}°, R≈{R:.0f} m).")
+        return False, (f"The auxiliary-PI curve could not be constructed "
+                       f"({n_arcs}/{n} arcs fit).")
+    return True, (f"PIs {k_from}–{k_to} replaced by two curves sharing one "
+                  f"radius via an auxiliary PI (δ={math.degrees(total_turn):+.1f}°, "
+                  f"R≈{R:.0f} m) — the total turn is too close to 180° for "
+                  "a single PI.")
 
 
 def merge_range_ambiguity(model: "PIAlignment", k_from: int, k_to: int
@@ -4646,14 +4808,16 @@ def merge_range_ambiguity(model: "PIAlignment", k_from: int, k_to: int
 def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int,
                    prefer: float | None = None) -> tuple[bool, str]:
     """
-    Replace the PIs in [k_from, k_to] with one curve (delegates to
-    `_merge_pi_range_single`) or, when the total deflection exceeds
-    `_CHAIN_DISPATCH_DEG`, a chain of PIs on one fitted circle (delegates to
-    `_merge_pi_range_chained`) — see the module comment above that constant.
+    Replace the PIs in [k_from, k_to] with ONE PI — always a single
+    Spiral-Arc-Spiral, both boundary tangents kept fixed — via
+    `_merge_pi_range_single`. The new PI's turn is the range's own
+    unwrapped total deflection (the sum of its member deflections), which
+    may exceed +-180 deg; that's a reflex/major arc, not a chain of curves
+    (see `PIData.merged_turn` / `_build_zone_range`'s reflex branch).
 
-    `prefer` overrides the total deflection (radians) used for the decision
-    and the construction; only meaningful for genuinely ambiguous ranges
-    (see `merge_range_ambiguity`) — leave it None for the ordinary case.
+    `prefer` overrides the total deflection (radians) used for the
+    construction; only meaningful for genuinely ambiguous ranges (see
+    `merge_range_ambiguity`) — leave it None for the ordinary case.
     """
     m = len(model.V)
     if not (1 <= k_from <= k_to <= m - 2):
@@ -4666,29 +4830,34 @@ def merge_pi_range(model: "PIAlignment", k_from: int, k_to: int,
     else:
         total, same_sign, _ = _range_total_deflection(model, k_from, k_to)
         if not same_sign:
-            total = None   # zigzag — let the single-PI path use its own
-                           # outer-tangent-intersection reading, unchanged
+            total = None   # zigzag — let the construction fall back to its
+                           # own outer-tangent-intersection (wrapped) reading
 
-    if total is not None and abs(math.degrees(total)) > _CHAIN_DISPATCH_DEG:
-        return _merge_pi_range_chained(model, k_from, k_to, total)
-    return _merge_pi_range_single(model, k_from, k_to)
+    if total is not None and abs(math.degrees(total)) > _MERGE_MAX_TOTAL_DEG:
+        return False, (f"Total deflection {math.degrees(total):.0f}° is not "
+                       "a plausible single transition.")
+    return _merge_pi_range_single(model, k_from, k_to, total_turn=total)
 
 
-def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int
+def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int,
+                           total_turn: float | None = None
                            ) -> tuple[bool, str]:
     """
     Replace ALL PIs in the vertex range [k_from … k_to] with a single PI —
-    the intersection of the outer tangents. The tangent before the first PI
-    and the tangent after the last PI are kept; everything between becomes
-    one Spiral–Arc–Spiral (Level 3) or one Arc (Level 2), with the radius
-    auto-estimated from the OSM points of the whole range.
+    the intersection of the outer tangent LINES (both kept fixed). The
+    tangent before the first PI and the tangent after the last PI are kept;
+    everything between becomes one Spiral–Arc–Spiral (Level 3) or one Arc
+    (Level 2), for any total turn — including a reflex/major arc >180 deg.
+
+    `total_turn` is the signed, UNWRAPPED total (radians) the curve must
+    sweep; None falls back to the wrapped outer-tangent reading (a mixed-
+    sign/zigzag range, where "total across members" isn't meaningful).
+    Note the outer-tangent LINE intersection used for the new PI's position
+    is the same point regardless of interpretation — only the arc's radius/
+    sweep differ — so this is computed once, unaffected by total_turn.
 
     Edits on PIs outside the range are preserved (indices remapped).
     Returns (ok, message); on failure the model is unchanged.
-
-    Handles total deflections up to ~150°; `merge_pi_range` dispatches to
-    `_merge_pi_range_chained` above that (see its docstring for why a
-    single PI cannot represent a wider turn).
     """
     m = len(model.V)
     if not (1 <= k_from <= k_to <= m - 2):
@@ -4709,19 +4878,48 @@ def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int
         return False, ("The outer tangents are parallel — no single curve "
                        "can connect them.")
 
-    # Intersection: P1 + t·û_in = P2 − s·û_out  (t ahead of P1, s behind P2)
+    # Intersection: P1 + t·û_in = P2 − s·û_out  (t ahead of P1, s behind P2).
+    # This is the unique intersection of the two tangent LINES — it does not
+    # depend on which arc (minor or reflex) will be swept through it, so the
+    # feasibility check below (which side of P1/P2 a valid PI must fall on)
+    # is regime-dependent — see the reflex branch below.
     dx = float(P2[0] - P1[0]); dy = float(P2[1] - P1[1])
     t  = (dx * math.sin(phi_out) - dy * math.cos(phi_out)) / sin_d
     s  = (dy * math.cos(phi_in)  - dx * math.sin(phi_in))  / sin_d
-    if t <= 0 or s <= 0:
-        return False, ("The tangents do not intersect ahead of the selected "
-                       "range — these PIs cannot be replaced by one curve "
-                       "(check the total deflection).")
-    PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
 
-    if abs(delta) > math.radians(150.0):
-        return False, (f"Total deflection {math.degrees(abs(delta)):.0f}° is "
-                       "too large for a single curve.")
+    turn = delta if total_turn is None else total_turn
+    if abs(abs(turn) - math.pi) < math.radians(_REFLEX_SINGULAR_DEG):
+        # No single PI has a finite solution this close to 180 deg — fall
+        # back to one auxiliary PI (two arcs, one shared radius, C1 join)
+        # instead of refusing outright.
+        ok, msg = _merge_pi_range_singular_aux(model, k_from, k_to, turn)
+        if ok:
+            return True, msg
+        return False, (f"Total turn {math.degrees(turn):+.1f}° is too close "
+                       "to 180° — the boundary tangents are nearly parallel "
+                       "and never meet at a finite curve.")
+    if abs(math.degrees(turn)) > _MERGE_MAX_TOTAL_DEG:
+        return False, (f"Total turn {math.degrees(turn):.0f}° is not a "
+                       "plausible single transition.")
+
+    # For a minor arc (|turn| <= 180 deg) the crossing point must be ahead
+    # of P1 and before P2 — the ordinary, intuitive configuration. Past
+    # 180 deg the SAME two lines cross on the far side instead (t and s
+    # both flip negative together — verified against tan(delta/2)'s own
+    # sign flip through the singularity): that is the CORRECT reflex
+    # configuration, not a failure.
+    if abs(turn) <= math.pi:
+        if t <= 0 or s <= 0:
+            return False, ("The tangents do not intersect ahead of the "
+                           "selected range — these PIs cannot be replaced "
+                           "by one curve (check the total deflection).")
+    else:
+        if t >= 0 or s >= 0:
+            return False, ("The tangents intersect on the wrong side for a "
+                           "reflex/major-arc curve here — this range's "
+                           "total turn is not achievable as a single curve "
+                           "with the available boundary tangents.")
+    PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
 
     # Snapshot for rollback (indices get remapped in place below)
     old_V, old_idx = model.V.copy(), list(model.idx)
@@ -4747,7 +4945,9 @@ def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int
         # PIs inside the range are dropped
     merged_pi = PIData(index=k_from,
                        xy=(float(PI_new[0]), float(PI_new[1])),
-                       deflection=delta)
+                       deflection=delta,
+                       merged_turn=(total_turn if total_turn is not None
+                                    else delta))
     new_pis.insert(k_from - 1, merged_pi)
     model.pis = new_pis
 
@@ -4767,7 +4967,7 @@ def _merge_pi_range_single(model: "PIAlignment", k_from: int, k_to: int
         return False, ("The merged curve could not be constructed (no room "
                        "for a tangent-fitting radius) — rolled back.")
     return True, (f"PIs {k_from}–{k_to} replaced by a single curve "
-                  f"(δ={math.degrees(delta):+.1f}°).")
+                  f"(δ={math.degrees(turn):+.1f}°).")
 
 
 def undo_merge(model: "PIAlignment", pi_a: int) -> tuple[bool, str]:
@@ -4847,6 +5047,36 @@ def insert_pi(model: "PIAlignment", j_ref: int) -> tuple[bool, str]:
 
     rebuild_pi_span(model, k + 1, k + 1, k_shift=1)
     return True, f"PI {k + 1} inserted."
+
+
+def move_pi(model: "PIAlignment", k: int, xy_proj) -> tuple[bool, str]:
+    """
+    Drag PI `k` to a new position (projected coords) — the "edit mode" map
+    interaction (Part C). Unlike merge/insert/delete this never changes the
+    vertex count: only `V[k]` and its OSM anchor `idx[k]` move.
+
+    `idx[k]` is re-snapped to the nearest OSM point, then clamped to stay
+    strictly between `idx[k-1]` and `idx[k+1]` — dragging past a neighbour's
+    anchor would invert the monotonic OSM-index ordering the deviation-
+    window code (`_build_zone_range`'s masked Kasa fit, span rebuild) relies
+    on. A PI dragged onto (near-)collinear with its neighbours simply loses
+    its curve, like any other tiny-deflection PI — not a failure.
+
+    Returns (ok, message); on failure the model is unchanged.
+    """
+    m = len(model.V)
+    if not (1 <= k <= m - 2):
+        return False, "PI index out of bounds."
+
+    model.V[k] = np.asarray(xy_proj, dtype=float)
+
+    j = nearest_xy_ref_index(model, xy_proj)
+    lo, hi = model.idx[k - 1], model.idx[k + 1]
+    j = max(lo + 1, min(hi - 1, j)) if hi - lo > 1 else lo
+    model.idx[k] = j
+
+    rebuild_pi_span(model, k, k)
+    return True, f"PI {k} moved."
 
 
 def delete_pi(model: "PIAlignment", k: int) -> tuple[bool, str]:
@@ -5028,12 +5258,18 @@ def find_consolidation_groups(
     Returns one dict per run:
       {k_from, k_to, n_curves, radii_before, radius_after, max_dev, ok, reason}
     Rejected runs are returned too (ok=False + reason) so the UI can show why.
+
+    `progress_cb(n_done, total)` (numeric, matching the convention used by
+    every other progress callback in this codebase — e.g.
+    `geometry.cross_section.compute_cross_section`) is called once per run
+    evaluated; the caller formats its own status text / ETA from the two
+    numbers.
     """
     runs = _curve_runs(model, max_straight_m)
     out: list[dict] = []
     for n_done, run in enumerate(runs, start=1):
         if progress_cb:
-            progress_cb(f"Evaluating group {n_done}/{len(runs)} (PIs {run[0]}–{run[-1]})…")
+            progress_cb(n_done, len(runs))
         k_from, k_to = run[0], run[-1]
         radii_before = [
             round(float(e["radius"]), 1)
@@ -5058,9 +5294,9 @@ def find_consolidation_groups(
             out.append(rec)
             continue
         rec["radius_after"] = round(float(arcs[0]["radius"]), 1)
-        # A high-angle merge builds a CHAIN (multiple PIs on one shared
-        # radius) rather than a single PI — the deviation check must cover
-        # every member, not just k_from.
+        # Every merge — including high-angle/reflex ones — now builds a
+        # single PI; _merged_group_range degenerates to (k_from, k_from)
+        # unless a legacy .coypu 1.1 file's chain_next links are present.
         _, k_hi_built = _merged_group_range(trial, k_from)
         dev = _range_max_dev(trial, k_from, k_hi_built)
         rec["max_dev"] = round(dev, 3)
@@ -5074,8 +5310,8 @@ def find_consolidation_groups(
     return out
 
 
-def apply_consolidation(model: "PIAlignment", groups: list[dict]
-                        ) -> tuple[int, list[str]]:
+def apply_consolidation(model: "PIAlignment", groups: list[dict],
+                        progress_cb=None) -> tuple[int, list[str]]:
     """
     Apply the accepted `groups` to `model`.
 
@@ -5083,17 +5319,22 @@ def apply_consolidation(model: "PIAlignment", groups: list[dict]
     merged range, so working from the last group backwards keeps the earlier
     groups' indices valid.
 
+    `progress_cb(n_done, total)` (numeric — see `find_consolidation_groups`)
+    is called once per group applied.
+
     Returns (n_applied, messages).
     """
     msgs: list[str] = []
     todo = sorted([g for g in groups if g.get("ok")],
                   key=lambda g: g["k_from"], reverse=True)
     applied = 0
-    for g in todo:
+    for n_done, g in enumerate(todo, start=1):
         ok, msg = merge_pi_range(model, g["k_from"], g["k_to"])
         msgs.append(f"PIs {g['k_from']}–{g['k_to']}: {msg}")
         if ok:
             applied += 1
+        if progress_cb:
+            progress_cb(n_done, len(todo))
     return applied, msgs
 
 

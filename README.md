@@ -34,12 +34,16 @@ No Python installation required.
 - **Track editing** — split a track at a map point, merge two or more tracks end-to-end (endpoints matched and reversed automatically), or remove a track from the selection — all before fitting
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
 - **Clothoid transition curves** — entry/exit spirals at every arc, exact Fresnel-based tangent placement
-- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore/delete PIs, split a Line by inserting a new PI, trim the alignment's start/end, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with one curve — including turns past 90° and even past 180°, built as a chain of curves sharing one radius
-- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose; handles high-angle runs the same way
-- **Toolbar** — ◀ Back / ▶ Forward step navigation, quick access to New/Open/Save and the most-used Refine actions
+- **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore/delete PIs, split a Line by inserting a new PI, trim the alignment's start/end, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with **one** curve — both boundary tangents kept fixed, always exactly Spiral–Arc–Spiral (or a plain Arc), for any turn including a reflex/major arc past 180°. A total turn within ~2° of exactly 180° (geometrically singular for any single circular PI) automatically falls back to one auxiliary PI — two arcs sharing the same fitted radius, joined with a zero-length, fully C1-continuous connector — instead of refusing.
+- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose; handles high-angle and near-180° runs (via the same auxiliary-PI fallback) the same way. Scan and Apply run in the background with a progress bar and a time-remaining estimate, so the UI stays responsive on long alignments.
+- **Toolbar** — a compact, two-row (icon-above-text) bar: the app name, icon-only New/Open/Save, ↩ Undo / ↪ Redo (doubling as step navigation — see below), ↺ Restore default, the most-used Refine actions, and the map's tile-provider/railway-overlay controls, all in one place. Minimize it from View ▸ Show toolbar; several of its actions are mirrored in a new **Edit** menu too.
+- **Undo/redo** — every alignment edit (merge, radius/spiral, omit, split, delete, trim, PI drag/restore) can be undone with the toolbar's ↩ Undo button (or Ctrl+Z) and redone with ↪ Redo (Ctrl+Y); Undo only falls through to step navigation once there's nothing left to undo
+- **Edit modes** — default mode keeps the tangent polygon locked (radius, spiral, merge, omit, split and delete all still work); toggle **✏ Edit mode** to unlock individual PIs for dragging. Each PI starts locked (🔒) and bounces on hover as an "unlock me" cue; click its lock badge to unlock (🔓) and drag it, then use the small restore badge (↺) to snap it back to the fitted position, or re-lock when done.
+- **Restore default** — one click (↺ in the toolbar) discards every edit made in Refine/Consolidate and returns to the freshly-fitted alignment, clearing the undo history
+- **Original-alignment appearance** — the toolbar's "Original…" popover controls the OSM reference overlay's visibility, opacity and colour, applied instantly and remembered across sessions
 - **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
 - **Project files (`.coypu`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
-- **PI display** — Points of Intersection as markers, virtual tangent extensions dashed light-grey
+- **PI display** — Points of Intersection as markers (lockable/draggable in Edit mode), virtual tangent extensions dashed light-grey
 - **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
 - **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
 - **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
@@ -55,13 +59,14 @@ No Python installation required.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ File  View  Settings  Help                                           │
+│ File  Edit  View  Settings  Help                                     │
 ├──────────────────────────────────────────────────────────────────────┤
-│ ◀ Back  ▶ Forward   Step 5 · Refine   │ New Open Save │ 🗺 ⤺ ↩       │
+│COYPU │ ↩  ↪  │New│Open│Save│ 🗺  ⤺  ↩  ↺ │ ✏  │ 🎨  │Map:[OSM ▾]🚂│
+│Feeder│Undo Redo Step 5·Refine  Show Merge Undo Rst  Edit Orig.       │
 ├───────────────────┬────────────────────────────────────────┬─────────┤
 │ [1] Find Railway  │        Interactive Leaflet Map         │  Step   │
-│ [2] Select        │  (tile provider selector + railway     │  panel  │
-│ [3] Configure     │   overlay toggle)                      │ 340 px  │
+│ [2] Select        │                                        │  panel  │
+│ [3] Configure     │                                        │ 340 px  │
 │ [4] Candidates    │                                        │         │
 │ [5] Refine        ├──────────────┬─────────────────────────┤         │
 │ [6] Consolidate   │   Log        │  Element table:         │         │
@@ -72,7 +77,11 @@ No Python installation required.
 └───────────────────┴──────────────┴─────────────────────────┴─────────┘
 ```
 
-The toolbar under the menu bar gives quick access to step navigation (◀ Back / ▶ Forward, matching what the current step's own Back button and the sidebar's suggested-next step would do), the File actions, and — while in Refine or Consolidate — the alignment's most-used edit actions (🗺 Show alignment, ⤺ Merge selection, ↩ Undo merge), enabled only when the current selection supports them.
+The toolbar is a single compact, two-row (icon-above-text) bar: the app name, then step navigation, the File actions (icon-only — New/Open/Save are self-explanatory), the alignment's most-used edit actions, and — folded in from what used to be a separate row above the map — the tile-provider selector and railway-overlay checkbox. It's enabled only where the current selection supports it, and can be hidden entirely from **View ▸ Show toolbar** (the preference persists across restarts). A new **Edit** menu mirrors its domain-specific actions (Show alignment, Merge selection, Undo merge, Restore default, Edit mode, Original…) using the exact same actions, so their enabled/checked state always matches the toolbar.
+
+**↩ Undo / ↪ Redo** are dual-purpose: inside Refine or Consolidate they first drain the undo/redo history (Ctrl+Z / Ctrl+Y both work), so repeatedly pressing ↩ Undo walks each alignment edit backwards one at a time before falling through to ordinary step navigation (matching what the current step's own Back button and the sidebar's suggested-next step would do). Their tooltip always says which it will do next ("Undo: merge PIs 4–7" vs "Go to the previous step").
+
+Editing actions: **🗺 Show alignment** re-draws the edited alignment and PI overlay; **⤺ Merge selection** replaces the selected PI range with one curve (see Step 5 below); **↩ Undo merge** reverts the spiral-merge feature for the selected curve; **↺ Restore default** discards every edit and returns to the freshly-fitted alignment (with a confirmation, since it also clears the undo history); **✏ Edit mode** enables per-PI lock/unlock dragging on the map (all other edits work in both modes — see Step 5 below); **🎨 Original…** opens a small popover to control the OSM reference overlay's visibility, opacity and colour. Toggling **✏ Edit mode**, and hovering/clicking a checkable action, gives it a distinct amber glow so its on-state reads at a glance.
 
 ---
 
@@ -166,8 +175,10 @@ The full **element table** appears under the map: every Line, Arc and Spiral wit
 - **✂ Split here** on a Line row inserts a new PI at that line's midpoint — useful when Douglas-Peucker simplified away a real curve. **📍 Pick split point** arms a map click-to-insert mode instead, so you can choose the exact location.
 - **✂ Trim start / Trim end** discard everything before/after the selected row — the alignment starts or ends fresh at that point.
 - **Merge spirals ↔** appears on short straights (< 30 m) sandwiched between two transition curves: the straight is removed by prolonging the adjacent spirals, and the spirals on the far side of each circular curve prolong identically so both curves stay **symmetrical**. *Undo merge* restores the previous state.
-- **Merge PI range → single curve** replaces every PI between the two selected tangents with one curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button. Totals up to 90° become one curve as before; **beyond 90° — even past 180° — the range becomes a chain of curves sharing one radius**, built from a circle fitted to the OSM points, so long sweeping curves are no longer capped. In the rare case where the total turn is genuinely ambiguous (a single PI's own reading sits within a few degrees of ±180°), you're asked which interpretation you meant, each with its resulting deviation; the common case never asks.
+- **Merge PI range → single curve** replaces every PI between the two selected tangents with **one** curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button. Both boundary tangents are kept fixed — the new PI sits at their intersection — and the result is always exactly one Spiral–Arc–Spiral (or a plain Arc), never a chain: for turns past 180° the arc becomes a reflex/major arc, its radius fitted to the OSM points of the whole range. A total turn within ~2° of exactly 180° is geometrically singular for a *single* PI (the boundary tangents are near-parallel and never meet at a finite point) — instead of refusing, this automatically falls back to **one auxiliary PI**: two arcs sharing the same fitted radius, meeting at a zero-length, fully C1-continuous connector, so the range still reads as one smooth curve. In the rarer case where the total turn is genuinely ambiguous (a single PI's own reading sits within a few degrees of ±180°), you're asked which interpretation you meant, each with its resulting deviation; the common case never asks.
 - The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element, or click an element on the map to select its row (Ctrl+click multi-selects); hover an element for 3 s to see its ID and deviation statistics.
+- **✏ Edit mode** lets you drag PIs directly on the map instead. Every PI starts **locked** (🔒) for safety; hovering one makes it bounce to signal it's interactive, and clicking its lock badge unlocks it (🔓) so you can drag it — the neighbouring curves rebuild live as you drop it. While unlocked, a small **↺ restore** badge appears next to it to snap that one PI back to its fitted-alignment position; click the badge again to re-lock. Leaving and re-entering Edit mode re-locks everything.
+- Every edit here (including a PI drag/restore) can be undone with the toolbar's ↩ Undo (or Ctrl+Z) and redone with ↪ Redo (Ctrl+Y); **↺ Restore default** discards all of them at once and returns to the freshly-fitted alignment.
 
 Click **Accept →** when the geometry is final — though you can return here and keep editing at any later point.
 
@@ -182,9 +193,9 @@ Level 2/3 sometimes split one physical curve into a run of consecutive curves. T
 | Max intermediate straight | 30 m | Curves separated by a longer straight are left alone (0 = only curves that touch directly) |
 | Max deviation from OSM | 2.0 m | The merged curve must stay within this of the OSM polyline, otherwise the run is rejected |
 
-**🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — or **↩ Undo** to restore. Selecting a row highlights that run on the map.
+**🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — or **↩ Undo** to restore. Selecting a row highlights that run on the map. Both Scan and Apply run in the background with a progress bar and a "~Xs left" estimate, so the window stays responsive on a long alignment with many candidate runs.
 
-> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself. Long runs whose total turn exceeds 90° are handled the same way as in Refine's Merge PI range — one shared radius fitted from the OSM points, split across as many curves as the turn needs.
+> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself. Long runs (even past 180°, and the same auxiliary-PI fallback right at 180°) are handled the same way as in Refine's Merge PI range — one curve (or one auxiliary-PI pair), radius fitted from the OSM points, reflex arc if the total turn needs it.
 
 ---
 
@@ -354,12 +365,15 @@ COYPU-Feeder/
     │   ├── app.py                # QMainWindow, signal wiring
     │   ├── map_widget.py         # Leaflet map via QWebEngineView + local HTTP server
     │   ├── element_table.py      # Editable element table (bottom dock)
+    │   ├── edit_history.py       # Undo/redo snapshot stack (toolbar Undo/Redo)
+    │   ├── toolbar_icons.py      # Procedurally-drawn toolbar icons (no bundled assets)
+    │   ├── progress_util.py      # format_eta / ElapsedTimer for progress bars
 │   ├── log_panel.py         # Timestamped activity log (bottom-left)
 │   ├── branding.py          # App icon + splash artwork (painted)
 │   ├── dialogs.py           # About / Settings dialogs
     │   ├── step_sidebar.py       # Numbered step sidebar
     │   ├── theme.py              # Dark/light Fusion palette + stylesheet
-    │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Stations, Export)
+    │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Stations, Consolidate, Export)
     │   ├── static/               # Leaflet 1.9.4 JS + CSS (served locally)
     │   └── steps/
     │       ├── step1_find.py     # Search / In View / Czech Railways tabs

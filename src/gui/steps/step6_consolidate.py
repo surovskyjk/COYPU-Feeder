@@ -16,12 +16,10 @@ Scan → tick/untick rows → Apply. One Undo restores the pre-Apply model.
 
 from __future__ import annotations
 
-import copy
-
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox,
     QFormLayout, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView,
+    QAbstractItemView, QProgressBar,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QColor
@@ -43,6 +41,8 @@ class Step6Consolidate(QWidget):
         self._model = None
         self._groups: list = []
         self._undo_snapshot = None
+        self._worker = None    # ConsolidationScanWorker | ConsolidationApplyWorker | None
+        self._timer  = None    # ElapsedTimer, started when the current worker began
         self._build()
 
     # ------------------------------------------------------------------
@@ -114,6 +114,11 @@ class Step6Consolidate(QWidget):
         btns.addWidget(self._undo_btn)
         v.addLayout(btns)
 
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setTextVisible(True)
+        v.addWidget(self._progress_bar)
+
         self._status_lbl = QLabel("Press Scan to look for mergeable runs.")
         self._status_lbl.setStyleSheet("color: #888; font-size: 10px;")
         self._status_lbl.setWordWrap(True)
@@ -157,6 +162,7 @@ class Step6Consolidate(QWidget):
         self._undo_btn.setEnabled(False)
         self._apply_btn.setEnabled(False)
         self._table.setRowCount(0)
+        self._progress_bar.setVisible(False)
         if pi_model is None:
             self._status_lbl.setText(
                 "This level has no editable PI model (Level 1 is the raw "
@@ -171,24 +177,37 @@ class Step6Consolidate(QWidget):
     # ------------------------------------------------------------------
 
     def _on_scan(self):
-        from geometry.candidates import find_consolidation_groups
-        if self._model is None:
+        from gui.worker import ConsolidationScanWorker
+        from gui.progress_util import ElapsedTimer
+        if self._model is None or self._worker is not None:
             return
         self._scan_btn.setEnabled(False)
+        self._apply_btn.setEnabled(False)
+        self._progress_bar.setRange(0, 0)   # indeterminate until the first progress tick
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
         self._status_lbl.setText("Scanning…")
-        try:
-            self._groups = find_consolidation_groups(
-                self._model,
-                max_straight_m=self._straight_spin.value(),
-                max_dev_m=self._dev_spin.value(),
-                progress_cb=lambda m: self._status_lbl.setText(m),
-            )
-        except Exception as exc:
-            self._status_lbl.setText(f"⚠ Scan failed: {exc}")
-            self.log_message.emit(f"Consolidate scan failed: {exc}", "error")
-            self._scan_btn.setEnabled(True)
-            return
+        self._timer = ElapsedTimer()
+        self._worker = ConsolidationScanWorker(
+            self._model, self._straight_spin.value(), self._dev_spin.value(), self)
+        self._worker.progress.connect(self._on_scan_progress)
+        self._worker.finished.connect(self._on_scan_finished)
+        self._worker.failed.connect(self._on_scan_failed)
+        self._worker.start()
+
+    def _on_scan_progress(self, done: int, total: int):
+        from gui.progress_util import format_eta
+        if self._progress_bar.maximum() == 0 and total > 0:
+            self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(done)
+        elapsed = self._timer.elapsed() if self._timer else 0.0
+        self._status_lbl.setText(f"Scanning… {format_eta(elapsed, done, total)}")
+
+    def _on_scan_finished(self, groups: list):
+        self._worker = None
+        self._progress_bar.setVisible(False)
         self._scan_btn.setEnabled(True)
+        self._groups = groups
         self._populate()
         n_ok = sum(1 for g in self._groups if g["ok"])
         msg = (f"{len(self._groups)} run(s) found, {n_ok} within tolerance."
@@ -197,6 +216,13 @@ class Step6Consolidate(QWidget):
         self._status_lbl.setText(msg)
         self.log_message.emit(f"Consolidate scan: {msg}", "info")
         self._apply_btn.setEnabled(n_ok > 0)
+
+    def _on_scan_failed(self, error: str):
+        self._worker = None
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setText(f"⚠ Scan failed: {error}")
+        self.log_message.emit(f"Consolidate scan failed: {error}", "error")
+        self._scan_btn.setEnabled(True)
 
     def _populate(self):
         self._table.setRowCount(0)
@@ -255,27 +281,63 @@ class Step6Consolidate(QWidget):
         return out
 
     def _on_apply(self):
-        from geometry.candidates import apply_consolidation
-        if self._model is None:
+        from geometry.candidates import _light_copy
+        from gui.worker import ConsolidationApplyWorker
+        from gui.progress_util import ElapsedTimer
+        if self._model is None or self._worker is not None:
             return
         chosen = self._selected_groups()
         if not chosen:
             self._status_lbl.setText("No rows ticked.")
             return
-        self._undo_snapshot = copy.deepcopy(self._model)
-        n, msgs = apply_consolidation(self._model, chosen)
+        # merge_pi_range (all apply_consolidation ever calls) never touches
+        # xy_ref/chainages_ref, so the same cheap _light_copy the scan's own
+        # trials use is a safe, much lighter undo snapshot than a full
+        # copy.deepcopy on a large alignment.
+        self._undo_snapshot = _light_copy(self._model)
+        self._apply_btn.setEnabled(False)
+        self._scan_btn.setEnabled(False)
+        self._progress_bar.setRange(0, len(chosen))
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._status_lbl.setText("Applying…")
+        self._timer = ElapsedTimer()
+        self._worker = ConsolidationApplyWorker(self._model, chosen, self)
+        self._worker.progress.connect(self._on_apply_progress)
+        self._worker.finished.connect(
+            lambda applied, msgs: self._on_apply_finished(applied, msgs, len(chosen)))
+        self._worker.failed.connect(self._on_apply_failed)
+        self._worker.start()
+
+    def _on_apply_progress(self, done: int, total: int):
+        from gui.progress_util import format_eta
+        self._progress_bar.setValue(done)
+        elapsed = self._timer.elapsed() if self._timer else 0.0
+        self._status_lbl.setText(f"Applying… {format_eta(elapsed, done, total)}")
+
+    def _on_apply_finished(self, n: int, msgs: list, n_chosen: int):
+        self._worker = None
+        self._progress_bar.setVisible(False)
+        self._scan_btn.setEnabled(True)
         for m in msgs:
             self.log_message.emit(f"Consolidate: {m}", "ok")
         self._undo_btn.setEnabled(n > 0)
-        self._apply_btn.setEnabled(False)
         self._status_lbl.setText(
-            f"Applied {n} of {len(chosen)} run(s). Re-scan to look for more.")
+            f"Applied {n} of {n_chosen} run(s). Re-scan to look for more.")
         self.log_message.emit(
             f"Consolidate: applied {n} run(s); "
             f"{len(self._model.elements)} elements now.", "ok")
         self._groups = []
         self._table.setRowCount(0)
         self.model_changed.emit()
+
+    def _on_apply_failed(self, error: str):
+        self._worker = None
+        self._progress_bar.setVisible(False)
+        self._scan_btn.setEnabled(True)
+        self._undo_snapshot = None
+        self._status_lbl.setText(f"⚠ Apply failed: {error}")
+        self.log_message.emit(f"Consolidate apply failed: {error}", "error")
 
     def _on_undo(self):
         if self._undo_snapshot is None or self._model is None:
