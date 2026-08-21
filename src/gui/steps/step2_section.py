@@ -16,8 +16,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
 
-class Step2Section(QWidget):
+
+class Step2Section(ThemedPanel, QWidget):
     section_confirmed       = Signal(list)   # selected Track objects
     highlight_changed       = Signal(int)    # track index  (-1 = reset all)
     fit_to_tracks_requested = Signal()
@@ -37,14 +40,14 @@ class Step2Section(QWidget):
         layout.setSpacing(8)
 
         lbl = QLabel("Select tracks to export:")
-        lbl.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
+        self.bolded(lbl, 3)
         layout.addWidget(lbl)
 
         hint = QLabel(
             "Click a track to highlight it on the map.\n"
             "Hold Ctrl/Shift to select multiple tracks."
         )
-        hint.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(hint, sk.muted_label)
         layout.addWidget(hint)
 
         self._list = QListWidget()
@@ -90,7 +93,7 @@ class Step2Section(QWidget):
 
         # ── Track editing: split / merge / remove ───────────────────────
         edit_lbl = QLabel("Edit tracks:")
-        edit_lbl.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(edit_lbl, sk.muted_label)
         layout.addWidget(edit_lbl)
 
         self._split_track_btn = QPushButton("📍 Split at map point")
@@ -128,7 +131,7 @@ class Step2Section(QWidget):
 
         self._next_btn = QPushButton("Next →  Configure")
         self._next_btn.setMinimumHeight(38)
-        self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
+        self.bolded(self._next_btn, 3)
         self._next_btn.clicked.connect(self._on_next)
         nav_row.addWidget(self._next_btn)
         layout.addLayout(nav_row)

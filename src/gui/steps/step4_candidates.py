@@ -28,12 +28,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QColor
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+from gui.palette import LEVEL_COLORS, contrast_text
+
 
 # ---------------------------------------------------------------------------
 # CandidateCard
 # ---------------------------------------------------------------------------
 
-class CandidateCard(QGroupBox):
+class CandidateCard(ThemedPanel, QGroupBox):
     """A single algorithm result card with progress indicator, metrics and Select button."""
     select_clicked = Signal(str)        # algorithm_id
     hover_changed  = Signal(str, bool)  # algorithm_id, hovering
@@ -69,7 +73,7 @@ class CandidateCard(QGroupBox):
         if self._description:
             desc = QLabel(self._description)
             desc.setWordWrap(True)
-            desc.setStyleSheet("color: #888; font-size: 10px;")
+            self.themed(desc, sk.muted_label)
             layout.addWidget(desc)
 
         # ── Per-card progress bar (indeterminate) ─────────────────────
@@ -77,16 +81,17 @@ class CandidateCard(QGroupBox):
         self._progress_bar.setRange(0, 0)   # indeterminate mode
         self._progress_bar.setFixedHeight(6)
         self._progress_bar.setTextVisible(False)
-        self._progress_bar.setStyleSheet(
-            f"QProgressBar {{ background: #333; border-radius: 3px; }}"
-            f"QProgressBar::chunk {{ background: {self._color}; border-radius: 3px; }}"
-        )
+        self.themed(self._progress_bar, lambda t: (
+            f"QProgressBar {{ background:{t['alternateBase']};"
+            f" border:1px solid {t['border']}; border-radius:3px; }}"
+            f"QProgressBar::chunk {{ background:{self._color};"
+            f" border-radius:3px; }}"))
         self._progress_bar.setVisible(False)
         layout.addWidget(self._progress_bar)
 
         # ── Live status label ─────────────────────────────────────────
         self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet("color: #666; font-size: 9px; font-style: italic;")
+        self.themed(self._status_lbl, lambda t: sk.muted_label(t, 9) + " font-style: italic;")
         self._status_lbl.setWordWrap(True)
         self._status_lbl.setVisible(False)
         layout.addWidget(self._status_lbl)
@@ -98,7 +103,7 @@ class CandidateCard(QGroupBox):
         dev_row = QHBoxLayout()
         dev_row.addWidget(QLabel("Max deviation:"))
         self._dev_lbl = QLabel("—")
-        self._dev_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._dev_lbl, "value")
         dev_row.addWidget(self._dev_lbl)
         dev_row.addStretch()
         gform.addLayout(dev_row)
@@ -106,7 +111,7 @@ class CandidateCard(QGroupBox):
         rmse_row = QHBoxLayout()
         rmse_row.addWidget(QLabel("RMSE:"))
         self._rmse_lbl = QLabel("—")
-        self._rmse_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._rmse_lbl, "value")
         rmse_row.addWidget(self._rmse_lbl)
         rmse_row.addStretch()
         gform.addLayout(rmse_row)
@@ -114,7 +119,7 @@ class CandidateCard(QGroupBox):
         n_row = QHBoxLayout()
         n_row.addWidget(QLabel("Elements:"))
         self._n_lbl = QLabel("—")
-        self._n_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._n_lbl, "value")
         n_row.addWidget(self._n_lbl)
         n_row.addStretch()
         gform.addLayout(n_row)
@@ -127,7 +132,7 @@ class CandidateCard(QGroupBox):
         )
         jump_row.addWidget(jump_lbl)
         self._jump_lbl = QLabel("—")
-        self._jump_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._jump_lbl, "value")
         jump_row.addWidget(self._jump_lbl)
         jump_row.addStretch()
         gform.addLayout(jump_row)
@@ -137,12 +142,13 @@ class CandidateCard(QGroupBox):
         # ── Select button ─────────────────────────────────────────────
         self._btn = QPushButton("Select This")
         self._btn.setEnabled(False)
-        self._btn.setStyleSheet(
-            f"QPushButton {{ background: {self._color}; color: #000; border-radius: 4px; "
-            f"font-weight: bold; padding: 4px 8px; }}"
-            f"QPushButton:hover {{ opacity: 0.9; }}"
-            f"QPushButton:disabled {{ background: #444; color: #777; }}"
-        )
+        self.themed(self._btn, lambda t: (
+            f"QPushButton {{ background:{self._color};"
+            f" color:{contrast_text(self._color)};"
+            " border:1px solid transparent; border-radius:3px;"
+            f" font-weight:600; padding:4px 8px; }}"
+            f"QPushButton:disabled {{ background:{t['alternateBase']};"
+            f" color:{t['disabledText']}; border-color:{t['border']}; }}"))
         self._btn.clicked.connect(lambda: self.select_clicked.emit(self._algo_id))
         layout.addWidget(self._btn)
 
@@ -153,11 +159,11 @@ class CandidateCard(QGroupBox):
     def set_pending(self):
         """Reset card to 'waiting to start' state."""
         self._dev_lbl.setText("—")
-        self._dev_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._dev_lbl, "value")
         self._rmse_lbl.setText("—")
         self._n_lbl.setText("—")
         self._jump_lbl.setText("—")
-        self._jump_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._jump_lbl, "value")
         self._btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._status_lbl.setVisible(False)
@@ -166,7 +172,7 @@ class CandidateCard(QGroupBox):
     def set_running(self, message: str = "Starting…"):
         """Mark card as actively computing."""
         self._dev_lbl.setText("computing…")
-        self._dev_lbl.setStyleSheet("color: #888;")
+        sk.set_role(self._dev_lbl, "muted")
         self._progress_bar.setVisible(True)
         self._status_lbl.setText(message)
         self._status_lbl.setVisible(True)
@@ -183,30 +189,30 @@ class CandidateCard(QGroupBox):
         """Show preliminary metrics while the algorithm is still running."""
         if candidate.n_elements > 0:
             self._n_lbl.setText(f"{candidate.n_elements}  (preliminary)")
-            self._n_lbl.setStyleSheet("color: #888;")
+            sk.set_role(self._n_lbl, "muted")
         # max_deviation is 0 in preview CandidateAlignment objects (not computed yet)
         # so only show it if it's non-zero
         if candidate.max_deviation > 0:
             self._dev_lbl.setText(f"{candidate.max_deviation:.2f} m  ⟳")
-            self._dev_lbl.setStyleSheet("color: #888;")
+            sk.set_role(self._dev_lbl, "muted")
 
     def set_result(self, candidate):
         """Update card with completed CandidateAlignment metrics."""
         self._dev_lbl.setText(f"{candidate.max_deviation:.2f} m")
-        self._dev_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._dev_lbl, "value")
         self._rmse_lbl.setText(f"{candidate.rmse:.2f} m")
-        self._rmse_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._rmse_lbl, "value")
         self._n_lbl.setText(str(candidate.n_elements))
-        self._n_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._n_lbl, "value")
         # Heading-jump (C1 sanity): green if < 0.1°, amber if < 1°, red otherwise
         jump = float(getattr(candidate, "max_heading_jump_deg", 0.0) or 0.0)
         self._jump_lbl.setText(f"{jump:.3f}°")
         if jump < 0.1:
-            self._jump_lbl.setStyleSheet("color: #66bb6a;")
+            sk.set_role(self._jump_lbl, "ok")
         elif jump < 1.0:
-            self._jump_lbl.setStyleSheet("color: #ffca28;")
+            sk.set_role(self._jump_lbl, "warn")
         else:
-            self._jump_lbl.setStyleSheet("color: #ef5350;")
+            sk.set_role(self._jump_lbl, "error")
         self._btn.setEnabled(len(candidate.elements) > 0)
         self._progress_bar.setVisible(False)
         self._status_lbl.setVisible(False)
@@ -214,11 +220,11 @@ class CandidateCard(QGroupBox):
     def set_error(self):
         """Mark card as failed."""
         self._dev_lbl.setText("error")
-        self._dev_lbl.setStyleSheet("color: #e57373;")
+        sk.set_role(self._dev_lbl, "error")
         self._rmse_lbl.setText("—")
         self._n_lbl.setText("—")
         self._jump_lbl.setText("—")
-        self._jump_lbl.setStyleSheet("color: #aaa;")
+        sk.set_role(self._jump_lbl, "value")
         self._btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._status_lbl.setVisible(False)
@@ -228,7 +234,7 @@ class CandidateCard(QGroupBox):
 # Step4Candidates
 # ---------------------------------------------------------------------------
 
-class Step4Candidates(QWidget):
+class Step4Candidates(ThemedPanel, QWidget):
     candidate_selected   = Signal(object)     # CandidateAlignment
     candidate_map_update = Signal(list)       # list[CandidateAlignment] for map overlay
     candidate_hovered    = Signal(str)        # algo_id being hovered ("" = none)
@@ -236,13 +242,13 @@ class Step4Candidates(QWidget):
 
     # (algo_id, card title, colour, description)
     ALGO_DEFS = [
-        ("level1", "Level 1 — OSM Polyline", "#e040fb",
+        ("level1", "Level 1 — OSM Polyline", LEVEL_COLORS["level1"],
          "The raw OSM geometry, one Line per vertex pair. "
          "Exact but not a design alignment (no C1 continuity)."),
-        ("level2", "Level 2 — Lines + Arcs", "#ff9800",
+        ("level2", "Level 2 — Lines + Arcs", LEVEL_COLORS["level2"],
          "Tangent polygon from the OSM line; a circular curve tangent "
          "to both tangents at every PI. Fully C1-continuous."),
-        ("level3", "Level 3 — Lines + Spirals + Arcs", "#26c6da",
+        ("level3", "Level 3 — Lines + Spirals + Arcs", LEVEL_COLORS["level3"],
          "As Level 2, plus clothoid transition spirals at every curve. "
          "Spiral radius matches the arc exactly; C1-continuous."),
     ]
@@ -263,7 +269,7 @@ class Step4Candidates(QWidget):
 
         # Title
         title = QLabel("Candidate Alignments")
-        title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
+        self.bolded(title, 4)
         layout.addWidget(title)
 
         # Overall progress bar (determinate: 0 → number of algorithms)
@@ -276,7 +282,7 @@ class Step4Candidates(QWidget):
         layout.addWidget(self._progress)
 
         self._status_lbl = QLabel("Configure settings and proceed from Step 3.")
-        self._status_lbl.setStyleSheet("color: #888; font-size: 10px;")
+        self.themed(self._status_lbl, sk.muted_label)
         self._status_lbl.setWordWrap(True)
         layout.addWidget(self._status_lbl)
 

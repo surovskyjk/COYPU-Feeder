@@ -14,12 +14,18 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QDoubleSpinBox, QGroupBox, QProgressBar, QFileDialog, QSizePolicy,
+    QComboBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+from gui import icons
+from gui.theme import current_tokens
 
-class Step6CrossSection(QWidget):
+
+class Step6CrossSection(ThemedPanel, QWidget):
     """
     Cross-Section Elevation Analysis step.
 
@@ -58,8 +64,8 @@ class Step6CrossSection(QWidget):
 
         # Title
         title = QLabel("Cross-Section Analysis")
-        title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
-        title.setStyleSheet("color: #2a82da;")
+        self.bolded(title, 4)
+        sk.set_role(title, "title")
         root.addWidget(title)
 
         sub = QLabel(
@@ -67,18 +73,14 @@ class Step6CrossSection(QWidget):
             "where large embankments or cuttings would be needed."
         )
         sub.setWordWrap(True)
-        sub.setStyleSheet("color: #999; font-size: 10px;")
+        self.themed(sub, sk.muted_label)
         root.addWidget(sub)
 
         root.addWidget(_hline())
 
         # ── Parameters ──────────────────────────────────────────────────
         params = QGroupBox("Parameters")
-        params.setStyleSheet(
-            "QGroupBox { font-weight:bold; color:#ccc; border:1px solid #555;"
-            " border-radius:5px; margin-top:8px; padding-top:8px; }"
-            "QGroupBox::title { subcontrol-origin:margin; left:8px; }"
-        )
+        params.setStyleSheet("QGroupBox { font-weight:600; }")
         pg = QVBoxLayout(params)
         pg.setSpacing(6)
 
@@ -90,6 +92,13 @@ class Step6CrossSection(QWidget):
             pg, "Colour threshold:", 0.1, 100.0, 2.0, " m",
             "Elevation differences below this value appear green; "
             "above it — increasingly red.",
+        )
+        self._elev_source_combo = _labeled_combo(
+            pg, "Elevation source:",
+            ["ČÚZK DMR 5G (CZ, ~0.2 m accuracy)", "OpenTopoData (EU-DEM/SRTM, ~25–30 m)"],
+            "Source for terrain elevation at each station and offset point.\n"
+            "ČÚZK DMR 5G: Czech national lidar terrain model, © ČÚZK – on-line.\n"
+            "Falls back to OpenTopoData for any point outside its coverage.",
         )
         root.addWidget(params)
 
@@ -104,20 +113,14 @@ class Step6CrossSection(QWidget):
 
         self._run_btn = QPushButton("Run Analysis")
         self._run_btn.setFixedHeight(34)
-        self._run_btn.setStyleSheet(
-            "QPushButton { background:#2a82da; color:#fff; border-radius:5px; }"
-            "QPushButton:hover { background:#3a9af0; }"
-            "QPushButton:disabled { background:#555; color:#888; }"
-        )
+        self._run_btn.setIcon(icons.makeIcon("run"))
+        self.themed(self._run_btn, sk.secondary_button)
         self._run_btn.clicked.connect(self._start_analysis)
         btn_row.addWidget(self._run_btn)
 
         self._skip_btn = QPushButton("Skip →")
         self._skip_btn.setFixedHeight(34)
-        self._skip_btn.setStyleSheet(
-            "QPushButton { background:#555; color:#ddd; border-radius:5px; }"
-            "QPushButton:hover { background:#666; }"
-        )
+        self.themed(self._skip_btn, sk.secondary_button)
         self._skip_btn.clicked.connect(self._skip)
         btn_row.addWidget(self._skip_btn)
 
@@ -125,7 +128,7 @@ class Step6CrossSection(QWidget):
 
         # ── Progress ─────────────────────────────────────────────────────
         self._status_lbl = QLabel("Ready.")
-        self._status_lbl.setStyleSheet("color:#999; font-size:10px;")
+        self.themed(self._status_lbl, sk.muted_label)
         root.addWidget(self._status_lbl)
 
         self._progress_bar = QProgressBar()
@@ -133,11 +136,7 @@ class Step6CrossSection(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
         self._progress_bar.setFixedHeight(16)
-        self._progress_bar.setStyleSheet(
-            "QProgressBar { border:1px solid #555; border-radius:4px; "
-            "background:#2a2a2a; text-align:center; font-size:9px; }"
-            "QProgressBar::chunk { background:#2a82da; border-radius:3px; }"
-        )
+        self.themed(self._progress_bar, sk.progress_bar)
         self._progress_bar.hide()
         root.addWidget(self._progress_bar)
 
@@ -145,11 +144,7 @@ class Step6CrossSection(QWidget):
 
         # ── Results summary ──────────────────────────────────────────────
         self._results_box = QGroupBox("Results")
-        self._results_box.setStyleSheet(
-            "QGroupBox { font-weight:bold; color:#ccc; border:1px solid #555;"
-            " border-radius:5px; margin-top:8px; padding-top:8px; }"
-            "QGroupBox::title { subcontrol-origin:margin; left:8px; }"
-        )
+        self._results_box.setStyleSheet("QGroupBox { font-weight:600; }")
         rg = QVBoxLayout(self._results_box)
         rg.setSpacing(4)
 
@@ -176,11 +171,7 @@ class Step6CrossSection(QWidget):
         self._continue_btn = QPushButton("Continue to Export →")
         self._continue_btn.setFixedHeight(32)
         self._continue_btn.setEnabled(False)
-        self._continue_btn.setStyleSheet(
-            "QPushButton { background:#2e5e2e; color:#8bc34a; border-radius:5px; }"
-            "QPushButton:hover { background:#3a7a3a; }"
-            "QPushButton:disabled { background:#2a2a2a; color:#555; }"
-        )
+        self.themed(self._continue_btn, sk.confirm_button)
         self._continue_btn.clicked.connect(self._continue)
         bot.addWidget(self._continue_btn)
 
@@ -235,8 +226,11 @@ class Step6CrossSection(QWidget):
         from gui.worker import CrossSectionWorker
 
         offset_m  = self._offset_spin.value()
+        elevation_source = ("cuzk_dmr5g"
+                             if self._elev_source_combo.currentIndex() == 0
+                             else "opentopodata")
         self._set_busy(True)
-        self._status_lbl.setText("Querying OpenTopoData…")
+        self._status_lbl.setText("Querying elevation data…")
         self._progress_bar.setValue(0)
 
         self._worker = CrossSectionWorker(
@@ -244,6 +238,7 @@ class Step6CrossSection(QWidget):
             self._work_epsg,
             offset_m,
             interval_m=5.0,
+            elevation_source=elevation_source,
             parent=self,
         )
         self._worker.progress.connect(self._on_progress)
@@ -302,8 +297,9 @@ class Step6CrossSection(QWidget):
             dl = r.get("diff_left")
             dr = r.get("diff_right")
 
-            color_l = diff_to_color(abs(dl), threshold) if dl is not None else "#888888"
-            color_r = diff_to_color(abs(dr), threshold) if dr is not None else "#888888"
+            muted = current_tokens()["disabledText"]
+            color_l = diff_to_color(abs(dl), threshold) if dl is not None else muted
+            color_r = diff_to_color(abs(dr), threshold) if dr is not None else muted
 
             left_pts.append([r["lat_left"],  r["lon_left"],  color_l])
             right_pts.append([r["lat_right"], r["lon_right"], color_r])
@@ -340,7 +336,7 @@ def _hline() -> QFrame:
     f = QFrame()
     f.setFrameShape(QFrame.Shape.HLine)
     f.setFrameShadow(QFrame.Shadow.Sunken)
-    f.setStyleSheet("color: #444;")
+    sk.set_role(f, "separator")
     return f
 
 
@@ -376,18 +372,44 @@ def _labeled_spin(
     return spin
 
 
+def _labeled_combo(
+    layout: QVBoxLayout,
+    label: str,
+    items: list[str],
+    tooltip: str = "",
+) -> QComboBox:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+
+    lbl = QLabel(label)
+    lbl.setFixedWidth(130)
+    lbl.setStyleSheet("font-size: 11px;")
+    row.addWidget(lbl)
+
+    combo = QComboBox()
+    combo.addItems(items)
+    combo.setFixedHeight(26)
+    if tooltip:
+        combo.setToolTip(tooltip)
+    row.addWidget(combo)
+    row.addStretch()
+
+    layout.addLayout(row)
+    return combo
+
+
 def _stat_row(layout: QVBoxLayout, label: str) -> QLabel:
     """Add a two-column (label : value) row; return the value label."""
     row = QHBoxLayout()
     row.setSpacing(6)
 
     lbl = QLabel(label)
-    lbl.setStyleSheet("font-size: 10px; color:#aaa;")
+    sk.set_role(lbl, "muted", " font-size:10px;")
     lbl.setFixedWidth(155)
     row.addWidget(lbl)
 
     val = QLabel("—")
-    val.setStyleSheet("font-size: 10px; color:#ddd;")
+    sk.set_role(val, "value", " font-size:10px;")
     row.addWidget(val)
     row.addStretch()
 

@@ -21,6 +21,9 @@ from PySide6.QtGui import QFont
 from geometry.projection import CRS_PRESETS
 from gui.worker import FinalExportWorker
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+
 STAGE_PCT = {
     "Reconstruct": 10,
     "Querying":    40,
@@ -29,7 +32,7 @@ STAGE_PCT = {
 }
 
 
-class Step7Export(QWidget):
+class Step7Export(ThemedPanel, QWidget):
     # Emitted after successful export
     export_finished            = Signal(str, int)  # filepath, output_epsg
     osm_track_ready            = Signal(list)      # raw OSM [[lat,lon],...] per track
@@ -56,7 +59,7 @@ class Step7Export(QWidget):
         layout.setSpacing(10)
 
         lbl = QLabel("Export LandXML")
-        lbl.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
+        self.bolded(lbl, 4)
         layout.addWidget(lbl)
 
         # ── Output CRS ────────────────────────────────────────────────
@@ -106,11 +109,11 @@ class Step7Export(QWidget):
         layout.addWidget(self._progress)
 
         self._stage_lbl = QLabel("Ready.")
-        self._stage_lbl.setStyleSheet("color:#aaa; font-size:11px;")
+        self.themed(self._stage_lbl, lambda t: sk.muted_label(t, 11))
         layout.addWidget(self._stage_lbl)
 
         self._station_lbl = QLabel("")
-        self._station_lbl.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(self._station_lbl, sk.muted_label)
         layout.addWidget(self._station_lbl)
 
         layout.addStretch()
@@ -124,7 +127,7 @@ class Step7Export(QWidget):
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#555;")
+        sk.set_role(sep, "separator")
         pv.addWidget(sep)
 
         ok_lbl = QLabel(
@@ -132,7 +135,7 @@ class Step7Export(QWidget):
             "  🔴 Red solid  — fitted LandXML alignment\n"
             "  🔵 Cyan dashed — original OSM polyline"
         )
-        ok_lbl.setStyleSheet("color:#8bc34a; font-size:10px;")
+        self.themed(ok_lbl, sk.ok_label)
         ok_lbl.setWordWrap(True)
         pv.addWidget(ok_lbl)
 
@@ -141,7 +144,7 @@ class Step7Export(QWidget):
         self._fit_aln_btn.clicked.connect(self.fit_to_alignment_requested.emit)
 
         self._restart_btn = QPushButton("🔄  Export Another Railway")
-        self._restart_btn.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(self._restart_btn, 2)
         self._restart_btn.clicked.connect(self.start_over_requested.emit)
 
         post_btn_row.addWidget(self._fit_aln_btn)
@@ -169,12 +172,8 @@ class Step7Export(QWidget):
 
         self._start_btn = QPushButton("▶  Start Export")
         self._start_btn.setMinimumHeight(44)
-        self._start_btn.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
-        self._start_btn.setStyleSheet(
-            "QPushButton { background:#27ae60; color:#fff; border-radius:6px; }"
-            "QPushButton:hover { background:#2ecc71; }"
-            "QPushButton:disabled { background:#444; color:#777; }"
-        )
+        self.bolded(self._start_btn, 4)
+        self.themed(self._start_btn, sk.confirm_button)
         self._start_btn.clicked.connect(self._start_export)
         layout.addWidget(self._start_btn)
 
@@ -295,7 +294,7 @@ class Step7Export(QWidget):
             "The vertical <Profile> is computed from DEM data during the "
             "actual export and is not shown here."
         )
-        note.setStyleSheet("color: #999; font-size: 10px;")
+        self.themed(note, sk.muted_label)
         note.setWordWrap(True)
         lay.addWidget(note)
         txt = QPlainTextEdit()

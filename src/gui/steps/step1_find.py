@@ -24,6 +24,10 @@ from PySide6.QtGui import QFont
 
 from gui.worker import SearchWorker, FetchWorker
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+from gui import icons
+
 # OSM relation ID for the Czech Railways collection
 CZ_RAILWAYS_RELATION = 2332889
 
@@ -59,7 +63,7 @@ def _friendly_error(raw: str) -> str:
     return first_line if first_line else raw
 
 
-class Step1Find(QWidget):
+class Step1Find(ThemedPanel, QWidget):
     railway_fetched          = Signal(object, dict)   # (overpass_data, info)
     search_in_view_requested = Signal()               # → App requests map bounds
 
@@ -92,9 +96,7 @@ class Step1Find(QWidget):
 
         # Shared fetch-status bar (visible only while a FetchWorker is running)
         self._fetch_status_lbl = QLabel("")
-        self._fetch_status_lbl.setStyleSheet(
-            "color:#aaa; font-size:10px; padding:2px 4px;"
-        )
+        self.themed(self._fetch_status_lbl, lambda t: sk.muted_label(t) + " padding:2px 4px;")
         self._fetch_status_lbl.setWordWrap(True)
         self._fetch_status_lbl.setVisible(False)
         layout.addWidget(self._fetch_status_lbl)
@@ -108,7 +110,7 @@ class Step1Find(QWidget):
         v.setSpacing(6)
 
         mode_lbl = QLabel("Search by:")
-        mode_lbl.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(mode_lbl, 2)
         v.addWidget(mode_lbl)
 
         self._mode_group = QButtonGroup(self)
@@ -124,7 +126,7 @@ class Step1Find(QWidget):
             "Searches the number inside the name field.\n"
             "e.g. '212' → '212 – Čerčany – Světlá nad Sázavou'"
         )
-        self._num_hint.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(self._num_hint, sk.muted_label)
         self._num_hint.setVisible(False)
         v.addWidget(self._num_hint)
         self._radio_num.toggled.connect(self._num_hint.setVisible)
@@ -156,12 +158,12 @@ class Step1Find(QWidget):
         # Divider
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#555;")
+        sk.set_role(sep, "separator")
         v.addWidget(sep)
 
         # Direct relation ID
         rel_lbl = QLabel("By relation ID:")
-        rel_lbl.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(rel_lbl, 2)
         v.addWidget(rel_lbl)
 
         rel_row = QHBoxLayout()
@@ -191,28 +193,25 @@ class Step1Find(QWidget):
             "the button below. Searching over a large area is blocked to avoid\n"
             "slow or rate-limited Overpass requests."
         )
-        hint.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(hint, sk.muted_label)
         hint.setWordWrap(True)
         v.addWidget(hint)
 
-        self._view_search_btn = QPushButton("🔍  Search Railway Lines in Current View")
+        self._view_search_btn = QPushButton("Search Railway Lines in Current View")
+        self._view_search_btn.setIcon(icons.makeIcon("search"))
         self._view_search_btn.setMinimumHeight(36)
-        self._view_search_btn.setStyleSheet(
-            "QPushButton { background:#d35400; color:#fff; border-radius:4px; padding:5px; }"
-            "QPushButton:hover { background:#e67e22; }"
-            "QPushButton:disabled { background:#555; color:#888; }"
-        )
+        self.themed(self._view_search_btn, sk.secondary_button)
         self._view_search_btn.clicked.connect(self.search_in_view_requested.emit)
         v.addWidget(self._view_search_btn)
 
         self._view_status = QLabel("")
-        self._view_status.setStyleSheet("color:#aaa; font-size:10px;")
+        self.themed(self._view_status, sk.muted_label)
         self._view_status.setWordWrap(True)
         v.addWidget(self._view_status)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#555;")
+        sk.set_role(sep, "separator")
         v.addWidget(sep)
 
         v.addWidget(QLabel("Results:"))
@@ -240,7 +239,7 @@ class Step1Find(QWidget):
         v.setSpacing(6)
 
         hdr = QLabel("Railways in Czech Republic")
-        hdr.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(hdr, 2)
         v.addWidget(hdr)
 
         hint = QLabel(
@@ -248,7 +247,7 @@ class Step1Find(QWidget):
             "Republic). A snapshot ships with the app, so the list works "
             "offline; use 🔄 Update to refresh it from OpenStreetMap."
         )
-        hint.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(hint, sk.muted_label)
         hint.setWordWrap(True)
         v.addWidget(hint)
 
@@ -263,7 +262,7 @@ class Step1Find(QWidget):
         v.addWidget(self._cz_load_btn)
 
         self._cz_status = QLabel("")
-        self._cz_status.setStyleSheet("color:#aaa; font-size:10px;")
+        self.themed(self._cz_status, sk.muted_label)
         self._cz_status.setWordWrap(True)
         v.addWidget(self._cz_status)
 
@@ -278,7 +277,7 @@ class Step1Find(QWidget):
         v.addLayout(filter_row)
 
         self._cz_count_lbl = QLabel("")
-        self._cz_count_lbl.setStyleSheet("color:#888; font-size:10px;")
+        self.themed(self._cz_count_lbl, sk.muted_label)
         v.addWidget(self._cz_count_lbl)
 
         self._cz_list = QListWidget()

@@ -5,7 +5,16 @@ with QPainter at startup).
 
 The motif mirrors the app's element palette: a railway alignment running
 through the tile as blue tangent → green transition spiral → red circular
-curve, with sleepers and a PI marker.
+curve, with sleepers and a PI marker. Those hues come from `gui.palette`, the
+same source the map and the element table draw from.
+
+The two surfaces are themed differently on purpose:
+
+* the **icon** is a brand mark painted on `palette.BRAND`'s fixed tile — it
+  ends up in the taskbar and title bar, outside the app's own theme;
+* the **splash** is drawn inside the themed application, so its background,
+  border and type colours come from the active theme tokens and it no longer
+  flashes a dark panel when the app opens in light mode.
 """
 
 from __future__ import annotations
@@ -18,12 +27,11 @@ from PySide6.QtGui import (
 
 from app_meta import APP_NAME, APP_VERSION, APP_TAGLINE  # noqa: F401
 
-_BLUE   = QColor("#42a5f5")   # tangents
-_GREEN  = QColor("#66bb6a")   # transition spirals
-_RED    = QColor("#ef5350")   # circular curves
-_ACCENT = QColor("#2a82da")
-_BG_TOP = QColor("#20242d")
-_BG_BOT = QColor("#14161c")
+from gui.palette import ELEMENT_COLORS, MAP_COLORS, BRAND
+
+_BLUE   = QColor(ELEMENT_COLORS["Line"])     # tangents
+_GREEN  = QColor(ELEMENT_COLORS["Spiral"])   # transition spirals
+_RED    = QColor(ELEMENT_COLORS["Arc"])      # circular curves
 
 
 def _alignment_path(w: float, h: float) -> QPainterPath:
@@ -39,13 +47,20 @@ def _alignment_path(w: float, h: float) -> QPainterPath:
 
 
 def _paint_alignment(painter: QPainter, w: float, h: float,
-                     line_width: float) -> None:
-    """Draw the tri-colour alignment with sleepers + a PI marker."""
+                     line_width: float, ink: QColor | None = None) -> None:
+    """Draw the tri-colour alignment with sleepers + a PI marker.
+
+    `ink` is the colour the sleepers and the dashed virtual tangents are
+    tinted with — white on the icon's dark tile, the theme's text colour on
+    the splash so they stay visible in a light theme.
+    """
+    ink = QColor(ink) if ink is not None else QColor(255, 255, 255)
     path = _alignment_path(w, h)
-    total = path.length()
 
     # Sleepers under the track
-    sleeper_pen = QPen(QColor(255, 255, 255, 46), line_width * 0.55)
+    sleeper_col = QColor(ink)
+    sleeper_col.setAlpha(46)
+    sleeper_pen = QPen(sleeper_col, line_width * 0.55)
     sleeper_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     painter.setPen(sleeper_pen)
     n_sleepers = 13
@@ -79,20 +94,29 @@ def _paint_alignment(painter: QPainter, w: float, h: float,
     pi_pt = QPointF(0.60 * w, 0.62 * h)
     t0 = path.pointAtPercent(0.30)
     t1 = path.pointAtPercent(0.84)
-    dash_pen = QPen(QColor(255, 255, 255, 90), line_width * 0.30)
+    dash_col = QColor(ink)
+    dash_col.setAlpha(90)
+    dash_pen = QPen(dash_col, line_width * 0.30)
     dash_pen.setStyle(Qt.PenStyle.DashLine)
     painter.setPen(dash_pen)
     painter.drawLine(t0, pi_pt)
     painter.drawLine(t1, pi_pt)
-    painter.setPen(QPen(QColor("#37474f"), line_width * 0.35))
-    painter.setBrush(QBrush(QColor("#ffffff")))
+    painter.setPen(QPen(QColor(MAP_COLORS["piBorder"]), line_width * 0.35))
+    painter.setBrush(QBrush(QColor(MAP_COLORS["piFill"])))
     r = line_width * 0.75
     painter.drawEllipse(pi_pt, r, r)
 
 
 def make_app_icon() -> QIcon:
-    """Window / taskbar icon (rendered at several sizes)."""
+    """Window / taskbar icon (rendered at several sizes).
+
+    Painted on the fixed brand tile, not the active theme — see the module
+    docstring.
+    """
     icon = QIcon()
+    bg_top = QColor(BRAND["bgTop"])
+    bg_bot = QColor(BRAND["bgBot"])
+    accent = QColor(BRAND["accent"])
     for size in (16, 24, 32, 48, 64, 128, 256):
         pm = QPixmap(size, size)
         pm.fill(Qt.GlobalColor.transparent)
@@ -100,10 +124,10 @@ def make_app_icon() -> QIcon:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         grad = QLinearGradient(0, 0, 0, size)
-        grad.setColorAt(0.0, _BG_TOP)
-        grad.setColorAt(1.0, _BG_BOT)
+        grad.setColorAt(0.0, bg_top)
+        grad.setColorAt(1.0, bg_bot)
         painter.setBrush(QBrush(grad))
-        painter.setPen(QPen(_ACCENT, max(1.0, size * 0.03)))
+        painter.setPen(QPen(accent, max(1.0, size * 0.03)))
         radius = size * 0.20
         painter.drawRoundedRect(
             QRectF(size * 0.02, size * 0.02, size * 0.96, size * 0.96),
@@ -116,7 +140,10 @@ def make_app_icon() -> QIcon:
 
 
 def make_splash_pixmap() -> QPixmap:
-    """Loading-screen pixmap (520 × 320)."""
+    """Loading-screen pixmap (520 × 320), painted in the active theme."""
+    from gui.theme import current_tokens
+    t = current_tokens()
+
     w, h = 520, 320
     pm = QPixmap(w, h)
     pm.fill(Qt.GlobalColor.transparent)
@@ -124,31 +151,40 @@ def make_splash_pixmap() -> QPixmap:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     grad = QLinearGradient(0, 0, 0, h)
-    grad.setColorAt(0.0, _BG_TOP)
-    grad.setColorAt(1.0, _BG_BOT)
+    grad.setColorAt(0.0, QColor(t["window"]))
+    grad.setColorAt(1.0, QColor(t["base"]))
     painter.setBrush(QBrush(grad))
-    painter.setPen(QPen(_ACCENT, 2))
-    painter.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 14, 14)
+    painter.setPen(QPen(QColor(t["highlight"]), 2))
+    painter.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 3, 3)
 
     # Alignment motif in the lower-right area
     painter.save()
     painter.translate(w * 0.30, h * 0.18)
     painter.setOpacity(0.9)
-    _paint_alignment(painter, w * 0.66, h * 0.72, 9.0)
+    _paint_alignment(painter, w * 0.66, h * 0.72, 9.0, QColor(t["text"]))
     painter.restore()
 
-    # Titles
-    painter.setPen(QColor("#eceff1"))
-    f = QFont("Segoe UI", 26, QFont.Weight.Bold)
-    painter.setFont(f)
+    # Titles — family is left to the application font (COYPU sets none).
+    base = painter.font()
+    painter.setPen(QColor(t["text"]))
+    title_font = QFont(base)
+    title_font.setPointSize(26)
+    title_font.setBold(True)
+    painter.setFont(title_font)
     painter.drawText(QRectF(28, 26, w - 56, 48),
                      Qt.AlignmentFlag.AlignLeft, APP_NAME)
-    painter.setPen(_ACCENT)
-    painter.setFont(QFont("Segoe UI", 11))
+
+    tagline_font = QFont(base)
+    tagline_font.setPointSize(11)
+    painter.setPen(QColor(t["highlight"]))
+    painter.setFont(tagline_font)
     painter.drawText(QRectF(30, 78, w - 60, 24),
                      Qt.AlignmentFlag.AlignLeft, APP_TAGLINE)
-    painter.setPen(QColor("#78909c"))
-    painter.setFont(QFont("Segoe UI", 9))
+
+    footer_font = QFont(base)
+    footer_font.setPointSize(9)
+    painter.setPen(QColor(t["disabledText"]))
+    painter.setFont(footer_font)
     painter.drawText(QRectF(30, h - 34, w - 60, 20),
                      Qt.AlignmentFlag.AlignLeft,
                      f"v{APP_VERSION} · data © OpenStreetMap contributors")

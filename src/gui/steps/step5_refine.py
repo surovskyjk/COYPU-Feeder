@@ -15,8 +15,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
 
-class Step5Refine(QWidget):
+
+class Step5Refine(ThemedPanel, QWidget):
     refinement_done = Signal(list)   # final list[dict] elements
     back_requested  = Signal()       # user wants to go back to candidates
 
@@ -36,16 +39,16 @@ class Step5Refine(QWidget):
         outer.setSpacing(8)
 
         self._title_lbl = QLabel("Refine Alignment")
-        self._title_lbl.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
+        self.bolded(self._title_lbl, 4)
         outer.addWidget(self._title_lbl)
 
         self._algo_lbl = QLabel("")
-        self._algo_lbl.setStyleSheet("color: #aaa; font-size: 10px;")
+        self.themed(self._algo_lbl, sk.muted_label)
         outer.addWidget(self._algo_lbl)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #555;")
+        sk.set_role(sep, "separator")
         outer.addWidget(sep)
 
         info = QLabel(
@@ -64,19 +67,17 @@ class Step5Refine(QWidget):
             "Points of Intersection are shown as markers; the dashed grey\n"
             "stubs are the virtual tangent extensions toward each PI."
         )
-        info.setStyleSheet("color: #999; font-size: 10px;")
+        self.themed(info, sk.muted_label)
         info.setWordWrap(True)
         outer.addWidget(info)
 
         # Metrics
         metrics_frame = QFrame()
-        metrics_frame.setStyleSheet(
-            "QFrame { background: #2a2a2e; border-radius: 4px; }"
-        )
+        self.themed(metrics_frame, sk.panel_frame)
         mf = QVBoxLayout(metrics_frame)
         mf.setContentsMargins(8, 6, 8, 6)
         self._metrics_lbl = QLabel("No candidate selected.")
-        self._metrics_lbl.setStyleSheet("color: #888; font-size: 10px;")
+        self.themed(self._metrics_lbl, sk.muted_label)
         mf.addWidget(self._metrics_lbl)
         outer.addWidget(metrics_frame)
 
@@ -92,13 +93,8 @@ class Step5Refine(QWidget):
 
         self._accept_btn = QPushButton("Accept →")
         self._accept_btn.setMinimumHeight(36)
-        self._accept_btn.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
-        self._accept_btn.setStyleSheet(
-            "QPushButton { background: #27ae60; color: #fff; border-radius: 4px; "
-            "font-weight: bold; padding: 6px 12px; }"
-            "QPushButton:hover { background: #2ecc71; }"
-            "QPushButton:disabled { background: #444; color: #777; }"
-        )
+        self.bolded(self._accept_btn, 2)
+        self.themed(self._accept_btn, sk.confirm_button)
         self._accept_btn.setEnabled(False)
         self._accept_btn.clicked.connect(self._on_accept)
         nav_row.addWidget(self._accept_btn)

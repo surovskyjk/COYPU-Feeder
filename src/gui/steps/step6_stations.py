@@ -24,12 +24,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QColor
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+from gui.theme import current_tokens
+
 
 COLS = ["Station [km]", "Dwell [s]", "Name", "Source", ""]
 COL_KM, COL_DWELL, COL_NAME, COL_SRC, COL_DEL = range(5)
 
 
-class Step6Stations(QWidget):
+class Step6Stations(ThemedPanel, QWidget):
     stations_changed     = Signal(list)   # list[Station] → map markers + export
     stations_done        = Signal(list)   # user clicked Next
     back_requested       = Signal()
@@ -56,7 +60,7 @@ class Step6Stations(QWidget):
         outer.setSpacing(8)
 
         title = QLabel("Stations && Stops")
-        title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
+        self.bolded(title, 4)
         outer.addWidget(title)
 
         info = QLabel(
@@ -64,7 +68,7 @@ class Step6Stations(QWidget):
             "to the LandXML stationing. The list is exported as a CSV "
             "(Station,Dwell Time,Name) next to the LandXML file."
         )
-        info.setStyleSheet("color: #999; font-size: 10px;")
+        self.themed(info, sk.muted_label)
         info.setWordWrap(True)
         outer.addWidget(info)
 
@@ -100,7 +104,7 @@ class Step6Stations(QWidget):
         outer.addLayout(btn_row)
 
         self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet("color: #888; font-size: 10px;")
+        self.themed(self._status_lbl, sk.muted_label)
         self._status_lbl.setWordWrap(True)
         outer.addWidget(self._status_lbl)
 
@@ -124,7 +128,7 @@ class Step6Stations(QWidget):
 
         self._next_btn = QPushButton("Next →")
         self._next_btn.setMinimumHeight(36)
-        self._next_btn.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(self._next_btn, 2)
         self._next_btn.clicked.connect(self._on_next)
         nav_row.addWidget(self._next_btn)
         outer.addLayout(nav_row)
@@ -307,7 +311,7 @@ class Step6Stations(QWidget):
 
                 src = QTableWidgetItem(s.source)
                 src.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-                src.setForeground(QColor("#888888"))
+                src.setForeground(QColor(current_tokens()["disabledText"]))
                 self._table.setItem(row, COL_SRC, src)
 
                 btn = QPushButton("✕")

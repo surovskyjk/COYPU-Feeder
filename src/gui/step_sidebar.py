@@ -4,13 +4,18 @@
 Steps *suggest* an order rather than gating it: any step whose prerequisites
 are satisfied can be clicked at any time (including going back to Refine after
 consolidating or exporting). Locked steps explain why in their tooltip.
+
+Every colour comes from the active theme tokens (see gui.theme_manager), so the
+sidebar reads correctly in both light and dark themes; call `applyTheme` after a
+theme switch to restyle in place.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QSizePolicy,
+    QWidget, QVBoxLayout, QPushButton, QLabel, QSizePolicy,
 )
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont
+
+from gui.theme import current_tokens
 
 
 STEPS = [
@@ -31,31 +36,50 @@ class StepButton(QPushButton):
         super().__init__(parent)
         self._number = number
         self._label = label
+        self._state = "inactive"
+        self._tokens: dict = {}
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(46)
-        self._set_style("inactive")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_tokens(self, tokens: dict):
+        self._tokens = tokens or {}
+        self._set_style(self._state)
 
     def set_state(self, state: str):
         """state: 'inactive' | 'active' | 'done' | 'available' | 'suggested'"""
+        self._state = state
         self._set_style(state)
 
     def _set_style(self, state: str):
-        base = "border-radius:6px; text-align:left; padding:6px 10px;"
+        t = self._tokens or current_tokens()
+        # Every state carries a 1px border so switching state never nudges the
+        # text by a pixel; only its colour changes.
+        base = ("border-radius:3px; border:1px solid; text-align:left;"
+                " padding:6px 10px;")
         prefix = "  "
+        hover = ""
         if state == "active":
-            bg = "background:#2a82da; color:#fff; font-weight:bold;"
+            bg = (f"background:{t['highlight']}; color:{t['highlightText']};"
+                  f" border-color:{t['highlight']}; font-weight:600;")
         elif state == "done":
-            bg = "background:#2e5e2e; color:#8bc34a;"
+            bg = (f"background:{t['accentDoneBackground']}; color:{t['accentDone']};"
+                  f" border-color:{t['accentDone']};")
+            hover = f"QPushButton:hover {{ border-color:{t['highlight']}; }}"
         elif state == "suggested":
-            # Reachable and the natural next move — accented outline
-            bg = ("background:#3c3c3f; color:#e3f2fd;"
-                  "border:1px solid #2a82da;")
+            # Reachable and the natural next move - accented outline
+            bg = (f"background:{t['button']}; color:{t['text']};"
+                  f" border-color:{t['highlight']};")
+            hover = f"QPushButton:hover {{ background:{t['alternateBase']}; }}"
             prefix = "▸ "
         elif state == "available":
-            bg = "background:#3c3c3f; color:#cfd8dc;"
+            bg = (f"background:{t['button']}; color:{t['text']};"
+                  f" border-color:{t['border']};")
+            hover = f"QPushButton:hover {{ background:{t['alternateBase']}; }}"
         else:   # inactive / locked
-            bg = "background:#333336; color:#6b6b70;"
-        self.setStyleSheet(f"QPushButton {{ {base} {bg} }}")
+            bg = (f"background:transparent; color:{t['disabledText']};"
+                  f" border-color:transparent;")
+        self.setStyleSheet(f"QPushButton {{ {base} {bg} }} {hover}")
         self.setText(f"{prefix}{self._number}  {self._label}")
 
 
@@ -69,6 +93,7 @@ class StepSidebar(QWidget):
         self._available: set[int] = {0}
         self._done: set[int] = set()
         self._suggested: int | None = None
+        self._tokens: dict = current_tokens()
         self._build()
 
     def _build(self):
@@ -76,16 +101,15 @@ class StepSidebar(QWidget):
         layout.setContentsMargins(8, 12, 8, 12)
         layout.setSpacing(5)
 
-        title = QLabel("COYPU Feeder")
-        title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color:#2a82da; margin-bottom:6px;")
-        layout.addWidget(title)
+        # Font family/size are left to the application font so the Settings
+        # dialog's font-size preference governs here too.
+        self._title = QLabel("COYPU Feeder")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._title)
 
-        sub = QLabel("OSM → LandXML")
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setStyleSheet("color:#666; font-size:10px; margin-bottom:8px;")
-        layout.addWidget(sub)
+        self._sub = QLabel("OSM → LandXML")
+        self._sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._sub)
 
         for i, (num, label) in enumerate(STEPS):
             btn = StepButton(num, label)
@@ -93,14 +117,13 @@ class StepSidebar(QWidget):
             layout.addWidget(btn)
             self._buttons.append(btn)
 
-        hint = QLabel("Steps are suggestions —\nany unlocked step is clickable.")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("color:#555; font-size:9px; margin-top:6px;")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self._hint = QLabel("Steps are suggestions —\nany unlocked step is clickable.")
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
 
         layout.addStretch()
-        self._update_styles()
+        self.applyTheme(None, self._tokens)
 
     def _on_clicked(self, idx: int):
         # Gate on availability, not on how far the user has walked before.
@@ -120,6 +143,25 @@ class StepSidebar(QWidget):
             else:
                 btn.set_state("inactive")
             btn.setEnabled(i in self._available or i == self._current)
+
+    # ------------------------------------------------------------------
+    # Theming
+    # ------------------------------------------------------------------
+
+    def applyTheme(self, isDark=None, tokens: dict | None = None):
+        """Restyle in place after a theme switch (COYPU's dock convention)."""
+        self._tokens = tokens or current_tokens()
+        t = self._tokens
+        self._title.setStyleSheet(
+            f"color:{t['highlight']}; font-size:15px; font-weight:600;"
+            " margin-bottom:6px;")
+        self._sub.setStyleSheet(
+            f"color:{t['disabledText']}; font-size:10px; margin-bottom:8px;")
+        self._hint.setStyleSheet(
+            f"color:{t['disabledText']}; font-size:9px; margin-top:6px;")
+        for btn in self._buttons:
+            btn.set_tokens(t)
+        self._update_styles()
 
     # ------------------------------------------------------------------
     # Public API

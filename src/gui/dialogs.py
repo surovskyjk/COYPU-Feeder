@@ -65,10 +65,12 @@ class AboutDialog(QDialog):
         v.addLayout(row)
 
     def _about_tab(self) -> QWidget:
+        from gui.theme import current_tokens
+        muted = current_tokens()["disabledText"]
         w = QTextBrowser()
         w.setOpenExternalLinks(True)
         w.setHtml(
-            f"<h2>{meta.APP_NAME} <span style='color:#888;'>v{meta.APP_VERSION}</span></h2>"
+            f"<h2>{meta.APP_NAME} <span style='color:{muted};'>v{meta.APP_VERSION}</span></h2>"
             f"<p>{meta.APP_TAGLINE}</p>"
             f"<p>A desktop tool that queries railway route geometry from "
             f"OpenStreetMap and converts it into a clean, C1-continuous "

@@ -44,6 +44,17 @@ DATA_SOURCES = [
      "https://overpass-api.de"),
     ("OpenTopoData / DEM (elevation)",
      "https://www.opentopodata.org"),
+    ("ČÚZK DMR 5G (elevation)",
+     "© ČÚZK – on-line. Lidar terrain model, ~0.2 m accuracy. Free network service; "
+     "underlying data CC BY 4.0. "
+     "<a href='https://cuzk.gov.cz/Predpisy/Podminky-poskytovani-prostor-dat-a-sitovych-sluzeb/"
+     "Podminky-poskytovani-sitovych-sluzeb-CUZK.aspx'>Terms of use</a>"),
+    ("ČÚZK Ortofoto / Katastrální mapa (map layers)",
+     "© ČÚZK – on-line. Aerial orthophoto and land-register (cadastral) overlay. "
+     "The land-register layer is for orientation only — <b>not</b> a legally binding "
+     "cadastre extract. "
+     "<a href='https://cuzk.gov.cz/Predpisy/Podminky-poskytovani-prostor-dat-a-sitovych-sluzeb/"
+     "Podminky-poskytovani-sitovych-sluzeb-CUZK.aspx'>Terms of use</a>"),
     ("Leaflet (map rendering)",
      "© Leaflet contributors, BSD-2 — https://leafletjs.com"),
 ]

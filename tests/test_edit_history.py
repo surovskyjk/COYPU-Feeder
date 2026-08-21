@@ -256,8 +256,12 @@ class TestElementTableWiring:
 
 
 class TestToolbarIcons:
-    """Part D: procedurally-drawn icons for the domain-specific toolbar
-    actions (no bundled assets — see src/gui/toolbar_icons.py)."""
+    """Procedurally-drawn icons for the domain-specific toolbar actions.
+
+    These now come from the shared factory ported from COYPU
+    (src/gui/icons.py), which renders stroke-only SVG at the active theme's
+    foreground colour — still no bundled assets.
+    """
 
     @pytest.fixture(autouse=True)
     def _qapp(self):
@@ -266,16 +270,29 @@ class TestToolbarIcons:
         yield app
 
     def test_make_icon_returns_nonnull_icon_for_each_known_name(self):
-        from gui.toolbar_icons import make_icon
-        from PySide6.QtGui import QColor
-        for name in ("show_alignment", "merge", "undo", "redo", "edit"):
-            icon = make_icon(name, QColor("black"))
-            assert not icon.isNull()
+        from gui import icons
+        for name in ("showAlignment", "merge", "undo", "redo", "edit",
+                     "newProject", "save"):
+            icon = icons.makeIcon(name)
+            assert not icon.isNull(), name
             pm = icon.pixmap(20, 20)
-            assert not pm.isNull()
+            assert not pm.isNull(), name
 
     def test_make_icon_unknown_name_returns_empty_icon(self):
-        from gui.toolbar_icons import make_icon
-        from PySide6.QtGui import QColor
-        icon = make_icon("not_a_real_icon", QColor("black"))
-        assert icon.isNull()
+        from gui import icons
+        assert icons.makeIcon("not_a_real_icon").isNull()
+
+    def test_icons_retint_on_theme_change(self):
+        """applyTheme drops the cache so glyphs are re-rendered in the new ink."""
+        from gui import icons
+        from gui.theme import LIGHT_TOKENS, DARK_TOKENS
+
+        icons.iconFactory.applyTheme(LIGHT_TOKENS)
+        light = icons.makeIcon("merge")
+        assert icons.iconFactory.foreground == LIGHT_TOKENS["text"]
+
+        icons.iconFactory.applyTheme(DARK_TOKENS)
+        dark = icons.makeIcon("merge")
+        assert icons.iconFactory.foreground == DARK_TOKENS["text"]
+        assert light is not dark          # cache was cleared, not reused
+        assert not dark.isNull()

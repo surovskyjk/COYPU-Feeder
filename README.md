@@ -8,7 +8,7 @@ The fitted alignment follows the canonical railway geometry sequence:
 Line → Transition Spiral (Clothoid) → Circular Arc → Transition Spiral → Line → …
 ```
 
-Elevation is sampled from the [Open-Elevation](https://open-elevation.com/) DEM service and fitted as a vertical alignment with parabolic vertical curves.
+Elevation is sampled from [ČÚZK DMR 5G](https://cuzk.gov.cz/) (Czech national lidar terrain model, ~0.2 m accuracy) by default, with [OpenTopoData](https://www.opentopodata.org/) (EU-DEM/SRTM/ASTER, ~25–30 m) as a selectable alternative and automatic per-point fallback — fitted as a vertical alignment with parabolic vertical curves.
 
 ---
 
@@ -29,7 +29,7 @@ No Python installation required.
 - **Find any railway** by timetable reference number, name, or direct OSM relation ID
 - **Search in map view** — find all railway route-relations visible in the current map window (≤ 20 × 20 km)
 - **Czech Railways browser** — all ~240 lines of the *Railways in Czech Republic* OSM collection from a **bundled offline snapshot** (instant, no network), refreshable with 🔄 Update
-- **Interactive Leaflet map** with 6 selectable tile providers and an optional OpenRailwayMap overlay
+- **Interactive Leaflet map** with 7 selectable tile providers, an optional OpenRailwayMap overlay, and a dimmable ČÚZK land-register (katastrální mapa) overlay for orientation — © ČÚZK – on-line, not a legally binding cadastre extract
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
 - **Track editing** — split a track at a map point, merge two or more tracks end-to-end (endpoints matched and reversed automatically), or remove a track from the selection — all before fitting
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
@@ -329,8 +329,10 @@ pip install -r requirements.txt
 | Service | Used for |
 |---|---|
 | Overpass API (`overpass-api.de`, `overpass.kumi.systems`) | Railway geometry and relation metadata |
-| CARTO / OpenStreetMap / OpenTopoMap / Esri / OpenRailwayMap tile servers | Map background tiles |
-| Open-Elevation API (`api.open-elevation.com`) | DEM elevation sampling |
+| CARTO / OpenStreetMap / OpenTopoMap / Esri / ČÚZK / OpenRailwayMap tile servers | Map background tiles |
+| ČÚZK DMR 5G (`ags.cuzk.gov.cz`) | DEM elevation sampling (default) |
+| OpenTopoData API (`api.opentopodata.org`) | DEM elevation sampling (alternate / fallback) |
+| ČÚZK WMS (`services.cuzk.cz`) | Land register (katastrální mapa) overlay |
 
 ---
 

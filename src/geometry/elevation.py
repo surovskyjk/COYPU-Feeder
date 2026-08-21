@@ -1,12 +1,20 @@
 """
-Elevation querying via OpenTopoData (Copernicus GLO-30, 30 m resolution).
-Samples elevations along an alignment and fits a vertical geometry profile.
+Elevation querying via ČÚZK DMR 5G (Czech national lidar terrain model,
+~0.2 m accuracy) with OpenTopoData (Copernicus GLO-30, 30 m resolution) as
+fallback / alternate source. Samples elevations along an alignment and fits
+a vertical geometry profile.
 """
 
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
+
 import numpy as np
 import requests
-from typing import Optional
+
+from osm.query import HTTP_HEADERS
 
 # eudem25m = EU-DEM 25m (best for Europe); srtm30m = global fallback
 OPENTOPODATA_DATASETS = ["eudem25m", "srtm30m", "aster30m"]
@@ -14,11 +22,16 @@ OPENTOPODATA_BASE = "https://api.opentopodata.org/v1/{dataset}"
 BATCH_SIZE = 100  # API limit per request
 REQUEST_TIMEOUT = 30
 
-# Identifying User-Agent (usage-policy friendly; some hosts reject the
-# default python-requests agent).
-_HTTP_HEADERS = {
-    "User-Agent": "COYPU-Feeder/1.0 (+https://github.com/surovskyjk/COYPU-Feeder)"
-}
+# ČÚZK DMR 5G (digital terrain model, 5th generation) — ~2 m grid, ~0.18 m
+# accuracy in open terrain / ~0.3 m in forest. Public "identify" operation
+# only (no auth); the batch "getSamples" operation is blocked by ČÚZK's
+# firewall regardless of payload, so this is queried one point at a time.
+# CUZK_CONCURRENCY is deliberately modest — ČÚZK's network-services terms
+# reserve the right to block clients that overload its infrastructure, and
+# it already hard-blocks getSamples outright, so per-point fetching must
+# stay polite rather than maximally parallel.
+CUZK_DMR5G_URL = "https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/identify"
+CUZK_CONCURRENCY = 8
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +40,91 @@ _HTTP_HEADERS = {
 
 def sample_elevations(
     coords_latlon: list[tuple[float, float]],
+    source: str = "cuzk_dmr5g",
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> list[Optional[float]]:
+    """
+    Query elevations at each (lat, lon), in the same order; None where
+    unavailable.
+
+    source="cuzk_dmr5g" (default): ČÚZK DMR 5G per-point lookups. Any point
+        with no data (outside CZ, or a failed request) is transparently
+        backfilled from OpenTopoData so the profile stays continuous near
+        the border, without reverting the user's explicit choice for the
+        rest of the line.
+    source="opentopodata": OpenTopoData only — ČÚZK is never queried.
+    """
+    if source == "cuzk_dmr5g":
+        elevations = _sample_cuzk_dmr5g(coords_latlon, progress_cb=progress_cb)
+        missing_idx = [i for i, e in enumerate(elevations) if e is None]
+        if missing_idx:
+            fallback = _sample_opentopodata([coords_latlon[i] for i in missing_idx])
+            for idx, val in zip(missing_idx, fallback):
+                elevations[idx] = val
+        return elevations
+    return _sample_opentopodata(coords_latlon, progress_cb=progress_cb)
+
+
+def _sample_cuzk_dmr5g(
+    coords_latlon: list[tuple[float, float]],
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> list[Optional[float]]:
+    """Query ČÚZK DMR 5G's identify endpoint, one point per request,
+    with bounded concurrency. Returns None per point on NoData/failure."""
+    n = len(coords_latlon)
+    results: list[Optional[float]] = [None] * n
+    if n == 0:
+        return results
+
+    session = requests.Session()
+    session.headers.update(HTTP_HEADERS)
+    done = 0
+    lock = threading.Lock()
+
+    def fetch(i: int, lat: float, lon: float) -> tuple[int, Optional[float]]:
+        return i, _identify_one(session, lat, lon)
+
+    with ThreadPoolExecutor(max_workers=CUZK_CONCURRENCY) as ex:
+        futures = [ex.submit(fetch, i, lat, lon)
+                   for i, (lat, lon) in enumerate(coords_latlon)]
+        for fut in as_completed(futures):
+            i, val = fut.result()
+            results[i] = val
+            with lock:
+                done += 1
+                if progress_cb:
+                    progress_cb(done, n)
+    return results
+
+
+def _identify_one(
+    session: requests.Session, lat: float, lon: float, retry: bool = True,
+) -> Optional[float]:
+    params = {
+        "geometry": f'{{"x":{lon},"y":{lat},"spatialReference":{{"wkid":4326}}}}',
+        "geometryType": "esriGeometryPoint",
+        "f": "json",
+    }
+    try:
+        resp = session.get(CUZK_DMR5G_URL, params=params, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 429 and retry:
+            time.sleep(2)
+            return _identify_one(session, lat, lon, retry=False)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            return None
+        value = data.get("value")
+        if value is None or value == "NoData":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _sample_opentopodata(
+    coords_latlon: list[tuple[float, float]],
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> list[Optional[float]]:
     """
     Query OpenTopoData for elevations at each (lat, lon).
@@ -34,11 +132,14 @@ def sample_elevations(
     Returns a list of elevations (m) in the same order; None where unavailable.
     """
     elevations = []
-    for batch_start in range(0, len(coords_latlon), BATCH_SIZE):
+    n = len(coords_latlon)
+    for batch_start in range(0, n, BATCH_SIZE):
         batch = coords_latlon[batch_start:batch_start + BATCH_SIZE]
         locations = "|".join(f"{lat},{lon}" for lat, lon in batch)
         batch_elevs = _query_batch(locations, len(batch))
         elevations.extend(batch_elevs)
+        if progress_cb:
+            progress_cb(len(elevations), n)
     return elevations
 
 
@@ -47,10 +148,10 @@ def _query_batch(locations: str, n: int) -> list[Optional[float]]:
     for dataset in OPENTOPODATA_DATASETS:
         url = OPENTOPODATA_BASE.format(dataset=dataset)
         try:
-            resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=_HTTP_HEADERS)
+            resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=HTTP_HEADERS)
             if resp.status_code == 429:
-                import time; time.sleep(2)
-                resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=_HTTP_HEADERS)
+                time.sleep(2)
+                resp = requests.get(url, params={"locations": locations}, timeout=REQUEST_TIMEOUT, headers=HTTP_HEADERS)
             resp.raise_for_status()
             results = resp.json().get("results", [])
             elevs = [r.get("elevation") for r in results]

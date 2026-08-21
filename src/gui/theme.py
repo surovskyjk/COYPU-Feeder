@@ -1,64 +1,72 @@
 """
-Theme helpers for PySide6.
-Supports automatic dark/light mode detection (system theme) with
-Windows registry fallback when Qt colour-scheme detection returns Unknown.
+Theme facade over the COYPU-ported :mod:`gui.theme_manager`.
+
+All colour decisions live in ``theme_manager`` (a near-verbatim copy of COYPU's
+own module) so the two programs share one visual language. This module keeps the
+Feeder's existing snake_case entry points working and owns the process-wide
+:class:`ThemeManager` instance.
+
+Prefer :func:`apply_theme_mode` over :func:`apply_theme`: it passes the mode
+("auto"/"dark"/"light") straight through, so "auto" keeps tracking the OS
+colour scheme instead of being flattened to a one-shot boolean.
 """
 
+from __future__ import annotations
+
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPalette, QColor, QGuiApplication
-from PySide6.QtCore import Qt
+
+from gui.theme_manager import (          # noqa: F401  (re-exported for callers)
+    ThemeManager, MODE_AUTO, MODE_DARK, MODE_LIGHT,
+    LIGHT_TOKENS, DARK_TOKENS,
+)
+
+_manager: ThemeManager | None = None
 
 
 # ---------------------------------------------------------------------------
-# Detection
+# The shared manager
 # ---------------------------------------------------------------------------
 
-def is_dark_mode() -> bool:
-    """Return True when the OS is in dark mode."""
-    # Qt 6.5+ native detection
-    try:
-        scheme = QGuiApplication.styleHints().colorScheme()
-        if scheme == Qt.ColorScheme.Dark:
-            return True
-        if scheme == Qt.ColorScheme.Light:
-            return False
-    except Exception:
-        pass
+def manager() -> ThemeManager:
+    """The process-wide ThemeManager, created on first use.
 
-    # Windows registry fallback (AppsUseLightTheme = 0 → dark)
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        )
-        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-        winreg.CloseKey(key)
-        return val == 0
-    except Exception:
-        pass
+    Requires a live QApplication — ThemeManager installs a QProxyStyle in its
+    constructor.
+    """
+    global _manager
+    if _manager is None:
+        _manager = ThemeManager()
+    return _manager
 
-    return False   # safe default: light
+
+def apply_theme_mode(mode: str) -> bool:
+    """Apply 'auto' | 'dark' | 'light'; return whether dark is now active.
+
+    Emits ``ThemeManager.themeChanged`` so widgets can restyle in place.
+    """
+    m = manager()
+    m.applyTheme(mode)
+    return m.isDarkActive
+
+
+def current_tokens() -> dict:
+    """The active colour-token dict (see LIGHT_TOKENS / DARK_TOKENS)."""
+    return manager().currentTokens
+
+
+def is_dark_active() -> bool:
+    """Whether the *applied* theme is dark (not what the OS reports)."""
+    return manager().isDarkActive
+
+
+def token(name: str) -> str:
+    """One colour token by name, '#000000' if unknown."""
+    return manager().token(name)
 
 
 # ---------------------------------------------------------------------------
-# Application-level palette + stylesheet
+# Font size — no COYPU equivalent, the Feeder exposes it as a preference
 # ---------------------------------------------------------------------------
-
-def apply_theme(app: QApplication, dark: bool) -> None:
-    """Apply dark or light Fusion palette to *app*."""
-    app.setStyle("Fusion")
-    if dark:
-        _apply_dark_palette(app)
-    else:
-        _apply_light_palette(app)
-    _apply_stylesheet(app, dark)
-
-
-def apply_dark_theme(app: QApplication) -> None:
-    """Convenience: auto-detect system theme and apply."""
-    apply_theme(app, is_dark_mode())
-
 
 def apply_font_size(app: QApplication, point_size: int) -> None:
     """Set the base application font size (points). Widgets inherit it."""
@@ -67,221 +75,25 @@ def apply_font_size(app: QApplication, point_size: int) -> None:
     app.setFont(f)
 
 
+# ---------------------------------------------------------------------------
+# Back-compatible entry points
+# ---------------------------------------------------------------------------
+
+def apply_theme(app: QApplication, dark: bool) -> None:
+    """Apply an explicit dark/light theme. Kept for callers holding a bool."""
+    apply_theme_mode(MODE_DARK if dark else MODE_LIGHT)
+
+
+def apply_dark_theme(app: QApplication) -> None:
+    """Convenience: follow the system theme."""
+    apply_theme_mode(MODE_AUTO)
+
+
+def is_dark_mode() -> bool:
+    """Whether the OS is currently in dark mode."""
+    return manager().detectSystemDark()
+
+
 def resolve_dark(mode: str) -> bool:
     """Map a theme-mode preference ('auto'|'dark'|'light') to dark=bool."""
-    if mode == "dark":
-        return True
-    if mode == "light":
-        return False
-    return is_dark_mode()   # "auto"
-
-
-# ---------------------------------------------------------------------------
-# Palettes
-# ---------------------------------------------------------------------------
-
-def _apply_dark_palette(app: QApplication) -> None:
-    p = QPalette()
-    dark   = QColor(45,  45,  48)
-    darker = QColor(30,  30,  30)
-    mid    = QColor(60,  60,  63)
-    light  = QColor(80,  80,  84)
-    text   = QColor(220, 220, 220)
-    bright = QColor(255, 255, 255)
-    accent = QColor(42,  130, 218)
-    dis    = QColor(120, 120, 120)
-    link   = QColor(100, 170, 255)
-
-    p.setColor(QPalette.ColorRole.Window,          dark)
-    p.setColor(QPalette.ColorRole.WindowText,      text)
-    p.setColor(QPalette.ColorRole.Base,            darker)
-    p.setColor(QPalette.ColorRole.AlternateBase,   dark)
-    p.setColor(QPalette.ColorRole.ToolTipBase,     bright)
-    p.setColor(QPalette.ColorRole.ToolTipText,     bright)
-    p.setColor(QPalette.ColorRole.Text,            text)
-    p.setColor(QPalette.ColorRole.Button,          mid)
-    p.setColor(QPalette.ColorRole.ButtonText,      text)
-    p.setColor(QPalette.ColorRole.BrightText,      bright)
-    p.setColor(QPalette.ColorRole.Link,            link)
-    p.setColor(QPalette.ColorRole.Highlight,       accent)
-    p.setColor(QPalette.ColorRole.HighlightedText, bright)
-    p.setColor(QPalette.ColorRole.Light,           light)
-    p.setColor(QPalette.ColorRole.Midlight,        mid)
-    p.setColor(QPalette.ColorRole.Mid,             mid)
-    p.setColor(QPalette.ColorRole.Dark,            darker)
-    p.setColor(QPalette.ColorRole.Shadow,          QColor(0, 0, 0))
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       dis)
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, dis)
-    app.setPalette(p)
-
-
-def _apply_light_palette(app: QApplication) -> None:
-    """Standard Fusion light — just reset to default."""
-    app.setPalette(QPalette())
-
-
-def _apply_stylesheet(app: QApplication, dark: bool) -> None:
-    if dark:
-        app.setStyleSheet("""
-            QToolTip { color:#fff; background:#2d2d30; border:1px solid #555; }
-            QGroupBox { border:1px solid #555; border-radius:4px;
-                        margin-top:8px; padding-top:4px; }
-            QGroupBox::title { subcontrol-origin:margin; left:8px; color:#aaa; }
-            QTabBar::tab { background:#3c3c3f; color:#ccc;
-                           padding:6px 14px; border:1px solid #555;
-                           border-bottom:none; border-radius:3px 3px 0 0; }
-            QTabBar::tab:selected { background:#2a82da; color:#fff; }
-            QScrollBar:vertical { width:8px; background:#1e1e1e; }
-            QScrollBar::handle:vertical { background:#555; border-radius:4px; min-height:20px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-
-            QPushButton {
-                background-color: #1565c0;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #1e88e5;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-            }
-            QPushButton:disabled {
-                background-color: #3a3a3d;
-                color: #666;
-            }
-
-            QProgressBar { border:1px solid #555; border-radius:4px;
-                           text-align:center; color:#fff; }
-            QProgressBar::chunk { background-color:#2a82da; border-radius:3px; }
-
-            QToolBar#MainToolbar {
-                background-color: #2d2d30;
-                border-bottom: 1px solid #1a1a1c;
-                padding: 2px 3px;
-                spacing: 3px;
-            }
-            QToolBar#MainToolbar QToolButton {
-                background-color: #1565c0;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 2px 5px;
-                font-size: 9px;
-            }
-            QToolBar#MainToolbar QToolButton:hover {
-                background-color: #1e88e5;
-            }
-            QToolBar#MainToolbar QToolButton:pressed {
-                background-color: #0d47a1;
-            }
-            QToolBar#MainToolbar QToolButton:disabled {
-                background-color: #3a3a3d;
-                color: #666;
-            }
-            /* Checked (Edit mode ON, or any future checkable toolbar
-               action) gets a distinct amber "glow" instead of the plain
-               blue pill, so its on-state reads at a glance. */
-            QToolBar#MainToolbar QToolButton:checked {
-                background-color: #ffb300;
-                color: #1a1a1c;
-                border: 2px solid #ffe082;
-                padding: 0px 3px;
-            }
-            QToolBar#MainToolbar QToolButton:checked:hover {
-                background-color: #ffc233;
-            }
-            QToolBar#MainToolbar QLabel {
-                color: #e0e0e0;
-            }
-            QToolBar#MainToolbar QLabel#brandLabel {
-                color: #64b5f6;
-                font-weight: bold;
-                font-size: 13px;
-                padding: 0 10px;
-            }
-            QToolBar#MainToolbar::separator {
-                background-color: #4a4a4e;
-                width: 1px;
-                margin: 3px 5px;
-            }
-        """)
-    else:
-        app.setStyleSheet("""
-            QGroupBox { border:1px solid #ccc; border-radius:4px;
-                        margin-top:8px; padding-top:4px; }
-            QGroupBox::title { subcontrol-origin:margin; left:8px; }
-
-            QPushButton {
-                background-color: #1976d2;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #2196f3;
-            }
-            QPushButton:pressed {
-                background-color: #1565c0;
-            }
-            QPushButton:disabled {
-                background-color: #d0d0d0;
-                color: #888;
-            }
-
-            QProgressBar { border:1px solid #bbb; border-radius:4px; text-align:center; }
-            QProgressBar::chunk { background-color:#1976d2; border-radius:3px; }
-
-            QToolBar#MainToolbar {
-                background-color: #eef1f5;
-                border-bottom: 1px solid #c8ccd2;
-                padding: 2px 3px;
-                spacing: 3px;
-            }
-            QToolBar#MainToolbar QToolButton {
-                background-color: #1976d2;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 2px 5px;
-                font-size: 9px;
-            }
-            QToolBar#MainToolbar QToolButton:hover {
-                background-color: #2196f3;
-            }
-            QToolBar#MainToolbar QToolButton:pressed {
-                background-color: #1565c0;
-            }
-            QToolBar#MainToolbar QToolButton:disabled {
-                background-color: #d0d0d0;
-                color: #888;
-            }
-            QToolBar#MainToolbar QToolButton:checked {
-                background-color: #ffa000;
-                color: #1a1a1c;
-                border: 2px solid #ffca28;
-                padding: 0px 3px;
-            }
-            QToolBar#MainToolbar QToolButton:checked:hover {
-                background-color: #ffb300;
-            }
-            QToolBar#MainToolbar QLabel {
-                color: #202020;
-            }
-            QToolBar#MainToolbar QLabel#brandLabel {
-                color: #1565c0;
-                font-weight: bold;
-                font-size: 13px;
-                padding: 0 10px;
-            }
-            QToolBar#MainToolbar::separator {
-                background-color: #c8ccd2;
-                width: 1px;
-                margin: 3px 5px;
-            }
-        """)
+    return manager().resolveDark(mode)

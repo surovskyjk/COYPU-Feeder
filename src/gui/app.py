@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QToolBar, QLabel,
 )
 
+from gui import icons
+from gui.palette import OSM_REF_DEFAULT
 from .map_widget import MapWidget
 from .element_table import ElementTableDock
 from .edit_history import EditHistory
@@ -106,7 +108,7 @@ class App(QMainWindow):
             "confirm_start_over": s.value("confirm_start_over", True, bool),
             # Original-alignment (OSM reference) appearance — Part E
             "osm_ref_visible": s.value("osm_ref_visible", True, bool),
-            "osm_ref_color":   s.value("osm_ref_color", "#00e5ff", str),
+            "osm_ref_color":   s.value("osm_ref_color", OSM_REF_DEFAULT, str),
             "osm_ref_opacity": float(s.value("osm_ref_opacity", 0.85, float)),
         }
 
@@ -117,12 +119,14 @@ class App(QMainWindow):
         s.sync()
 
     def _apply_prefs(self):
-        from gui.theme import apply_theme, apply_font_size, resolve_dark
+        from gui.theme import apply_theme_mode, apply_font_size
         app = QApplication.instance()
-        dark = resolve_dark(self._prefs["theme_mode"])
-        apply_theme(app, dark)
+        # Font size first: the theme fanout re-derives every bold label font
+        # from the application font, so the new size must already be set.
         apply_font_size(app, self._prefs["font_pt"])
-        self.map_widget.set_theme(dark)
+        # Passing the mode (not a resolved bool) keeps "auto" tracking the OS.
+        # This emits themeChanged, which drives _on_theme_changed below.
+        apply_theme_mode(self._prefs["theme_mode"])
         self.log_panel.setVisible(self._prefs["show_log"])
         self.map_widget.set_osm_reference_style(
             self._prefs["osm_ref_visible"], self._prefs["osm_ref_color"],
@@ -141,23 +145,18 @@ class App(QMainWindow):
 
         style = self.style()
         file_menu = mb.addMenu("&File")
-        new_act = QAction(style.standardIcon(style.StandardPixmap.SP_FileIcon),
-                          "New project", self)
+        new_act = QAction(icons.makeIcon("newProject"), "New project", self)
         new_act.setShortcut("Ctrl+N")
         new_act.triggered.connect(self._on_new_project)
         file_menu.addAction(new_act)
         self._act_file_new = new_act
-        open_act = QAction(
-            style.standardIcon(style.StandardPixmap.SP_DialogOpenButton),
-            "Open project…", self)
+        open_act = QAction(icons.makeIcon("open"), "Open project…", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._on_open_project)
         file_menu.addAction(open_act)
         self._act_file_open = open_act
         file_menu.addSeparator()
-        save_act = QAction(
-            style.standardIcon(style.StandardPixmap.SP_DialogSaveButton),
-            "Save project", self)
+        save_act = QAction(icons.makeIcon("save"), "Save project", self)
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self._on_save_project)
         file_menu.addAction(save_act)
@@ -223,7 +222,6 @@ class App(QMainWindow):
 
     def _build_toolbar(self):
         from PySide6.QtCore import QSize
-        from .toolbar_icons import make_icon
         tb = QToolBar("Main", self)
         tb.setObjectName("MainToolbar")
         tb.setMovable(False)
@@ -235,10 +233,10 @@ class App(QMainWindow):
         self._toolbar = tb   # View menu's "Show toolbar" uses tb.toggleViewAction()
 
         style = self.style()
-        icon_color = self.palette().color(self.foregroundRole())
 
         brand = QLabel("COYPU Feeder")
         brand.setObjectName("brandLabel")
+        self._brand = brand   # restyled from tokens in _on_theme_changed
         tb.addWidget(brand)
         tb.addSeparator()
 
@@ -248,13 +246,13 @@ class App(QMainWindow):
         # _on_toolbar_back/_on_toolbar_forward and _refresh_nav's dynamic
         # tooltip. Always labelled Undo/Redo since step navigation is also
         # freely reachable from the sidebar.
-        self._act_back = QAction(make_icon("undo", icon_color), "Undo", self)
+        self._act_back = QAction(icons.makeIcon("undo"), "Undo", self)
         self._act_back.setToolTip("Go to the previous step")
         self._act_back.setShortcut(QKeySequence.StandardKey.Undo)   # Ctrl+Z
         self._act_back.triggered.connect(self._on_toolbar_back)
         tb.addAction(self._act_back)
 
-        self._act_forward = QAction(make_icon("redo", icon_color), "Redo", self)
+        self._act_forward = QAction(icons.makeIcon("redo"), "Redo", self)
         self._act_forward.setToolTip("Go to the next suggested step")
         self._act_forward.setShortcut(QKeySequence.StandardKey.Redo)  # Ctrl+Y
         self._act_forward.triggered.connect(self._on_toolbar_forward)
@@ -277,7 +275,7 @@ class App(QMainWindow):
 
         tb.addSeparator()
         self._act_show_alignment = QAction(
-            make_icon("show_alignment", icon_color), "Show alignment", self)
+            icons.makeIcon("showAlignment"), "Show alignment", self)
         self._act_show_alignment.setToolTip(
             "Re-draw the edited alignment and PI overlay on the map.")
         self._act_show_alignment.triggered.connect(
@@ -285,7 +283,7 @@ class App(QMainWindow):
         tb.addAction(self._act_show_alignment)
 
         self._act_merge_selection = QAction(
-            make_icon("merge", icon_color), "Merge selection", self)
+            icons.makeIcon("merge"), "Merge selection", self)
         self._act_merge_selection.setToolTip(
             "Merge PI range → single curve (select rows spanning\n"
             "two or more curves in the element table first).")
@@ -294,7 +292,7 @@ class App(QMainWindow):
         tb.addAction(self._act_merge_selection)
 
         self._act_undo_merge = QAction(
-            make_icon("undo", icon_color), "Undo merge", self)
+            icons.makeIcon("undo"), "Undo merge", self)
         self._act_undo_merge.setToolTip(
             "Undo the merge for the selected curve (select its row first).")
         self._act_undo_merge.triggered.connect(
@@ -302,8 +300,7 @@ class App(QMainWindow):
         tb.addAction(self._act_undo_merge)
 
         self._act_restore_default = QAction(
-            style.standardIcon(style.StandardPixmap.SP_DialogResetButton),
-            "Restore default", self)
+            icons.makeIcon("resetLayout"), "Restore default", self)
         self._act_restore_default.setToolTip(
             "Discard every edit made in Refine/Consolidate and return to\n"
             "the freshly-fitted alignment for the selected candidate.")
@@ -311,8 +308,9 @@ class App(QMainWindow):
         tb.addAction(self._act_restore_default)
 
         tb.addSeparator()
-        self._act_edit_mode = QAction(make_icon("edit", icon_color), "Edit mode", self)
+        self._act_edit_mode = QAction(icons.makeIcon("edit"), "Edit mode", self)
         self._act_edit_mode.setCheckable(True)
+        self._act_edit_mode.setProperty("seriesToggle", True)
         self._act_edit_mode.setToolTip(
             "Default mode keeps the tangent polygon locked (radius, spiral,\n"
             "merge, omit, split and delete all still work). Edit mode also\n"
@@ -329,6 +327,8 @@ class App(QMainWindow):
         tb.addWidget(QLabel("Map:"))
         tb.addWidget(self.map_widget._provider_combo)
         tb.addWidget(self.map_widget._rail_chk)
+        tb.addWidget(self.map_widget._cadastre_chk)
+        tb.addWidget(self.map_widget._cadastre_opacity_slider)
 
         # Back routing: each step's OWN back handler (some do overlay
         # cleanup) keyed by the step it goes back FROM — mirrors exactly
@@ -390,10 +390,9 @@ class App(QMainWindow):
             QMenu, QWidgetAction, QCheckBox, QSlider, QPushButton, QLabel,
         )
         from PySide6.QtGui import QColor
+        from gui.palette import contrast_text
 
-        act = QAction(
-            style.standardIcon(style.StandardPixmap.SP_DesktopIcon),
-            "Original…", self)
+        act = QAction(icons.makeIcon("layers"), "Original…", self)
         act.setToolTip(
             "Visibility, opacity and colour of the original OSM alignment\n"
             "overlay (the dashed reference line).")
@@ -421,7 +420,8 @@ class App(QMainWindow):
 
         def _swatch(hex_color: str):
             color_btn.setStyleSheet(
-                f"background-color: {hex_color}; color: #000;")
+                f"background-color: {hex_color};"
+                f" color: {contrast_text(hex_color)};")
 
         _swatch(self._prefs["osm_ref_color"])
         v.addWidget(color_btn)
@@ -976,22 +976,59 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     def _connect_scheme_changes(self):
-        try:
-            QGuiApplication.styleHints().colorSchemeChanged.connect(
-                self._on_color_scheme_changed
-            )
-        except Exception:
-            pass  # Qt < 6.5 — no signal, static theme is fine
+        """Restyle whenever the theme changes, whoever triggered it.
 
-    def _on_color_scheme_changed(self, scheme):
-        # Only auto-follow the OS when the user left the theme on "Automatic".
-        if self._prefs.get("theme_mode", "auto") != "auto":
-            return
-        from gui.theme import apply_theme, apply_font_size
-        dark = (scheme == Qt.ColorScheme.Dark)
-        apply_theme(QApplication.instance(), dark)
-        apply_font_size(QApplication.instance(), self._prefs["font_pt"])
-        self.map_widget.set_theme(dark)
+        ThemeManager already listens to the OS colour-scheme signal and
+        re-applies itself while the mode is "auto", so this only has to
+        react to the result rather than duplicate the detection.
+        """
+        from gui.theme import manager
+        manager().themeChanged.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self, mode: str = ""):
+        """Fan the new tokens out to every widget that owns local styling."""
+        from gui.theme import current_tokens, is_dark_active
+        tokens = current_tokens()
+        dark   = is_dark_active()
+
+        # Cached QIcons hold pixmaps painted in the previous foreground
+        # colour, so clear the factory first, then re-fetch every icon.
+        icons.iconFactory.applyTheme(tokens)
+        self._retint_action_icons()
+
+        brand = getattr(self, "_brand", None)
+        if brand is not None:
+            brand.setStyleSheet(
+                f"color:{tokens['highlight']}; font-weight:600;"
+                " font-size:13px; padding:0 10px;")
+
+        for w in (getattr(self, "sidebar", None), self.element_table,
+                  self.log_panel, self.map_widget):
+            fn = getattr(w, "applyTheme", None)
+            if fn is not None:
+                fn(dark, tokens)
+        for i in range(self.stack.count()):
+            fn = getattr(self.stack.widget(i), "applyTheme", None)
+            if fn is not None:
+                fn(dark, tokens)
+
+    def _retint_action_icons(self):
+        """Re-fetch every QAction icon from the refreshed factory."""
+        for attr, name in (
+            ("_act_back",            "undo"),
+            ("_act_forward",         "redo"),
+            ("_act_file_new",        "newProject"),
+            ("_act_file_open",       "open"),
+            ("_act_file_save",       "save"),
+            ("_act_show_alignment",  "showAlignment"),
+            ("_act_merge_selection", "merge"),
+            ("_act_undo_merge",      "undo"),
+            ("_act_restore_default", "resetLayout"),
+            ("_act_edit_mode",       "edit"),
+        ):
+            act = getattr(self, attr, None)
+            if act is not None:
+                act.setIcon(icons.makeIcon(name))
 
     # ------------------------------------------------------------------
     # Step transitions

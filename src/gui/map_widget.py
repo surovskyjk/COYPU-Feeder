@@ -19,13 +19,13 @@ import socket
 import threading
 from collections import deque
 
-from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer
+from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer, Qt
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout,
-    QComboBox, QCheckBox, QSizePolicy,
+    QComboBox, QCheckBox, QSizePolicy, QSlider,
 )
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,13 @@ TILE_PROVIDERS = [
         "maxZoom": 19,
     },
     {
+        "label":  "ČÚZK Ortofoto (CZ)",
+        "url":    "https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer/tile/{z}/{y}/{x}",
+        "subs":   "",
+        "attr":   "<a href='https://cuzk.gov.cz/Predpisy/Podminky-poskytovani-prostor-dat-a-sitovych-sluzeb/Podminky-poskytovani-sitovych-sluzeb-CUZK.aspx'>ČÚZK – on-line</a>",
+        "maxZoom": 20,
+    },
+    {
         "label":  "OpenRailwayMap (railway only)",
         "url":    "https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
         "subs":   "abc",
@@ -80,11 +87,8 @@ TILE_PROVIDERS = [
 # Default provider index
 _DEFAULT_PROVIDER = 0   # OpenStreetMap
 
-# Track colours
-TRACK_COLORS = [
-    "#4fc3f7", "#81c784", "#ffb74d", "#e57373",
-    "#ce93d8", "#80cbc4", "#fff176", "#ff8a65",
-]
+# Track colours (COYPU's categorical series palette)
+from gui.palette import TRACK_COLORS   # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -187,11 +191,14 @@ class MapWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from gui.theme import is_dark_mode
-        self._dark = is_dark_mode()
+        from gui.theme import is_dark_active, current_tokens
+        self._dark = is_dark_active()
+        self._tokens = current_tokens()
         self._map_ready  = False
         self._js_queue: deque[str] = deque()
         self._build()
+        # Queued, so the page has its palette before the first draw call.
+        self._push_page_theme()
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -216,6 +223,23 @@ class MapWidget(QWidget):
         self._rail_chk.setChecked(True)
         self._rail_chk.setToolTip("Show OpenRailwayMap overlay on top of base tiles")
         self._rail_chk.toggled.connect(self._on_rail_overlay_toggled)
+
+        self._cadastre_chk = QCheckBox("🗺️ Land register overlay")
+        self._cadastre_chk.setChecked(False)
+        self._cadastre_chk.setToolTip(
+            "Cadastral parcel/building outlines — © ČÚZK – on-line.\n"
+            "For orientation only; not a legally binding land-register extract.\n"
+            "Only renders when zoomed in close (parcels don't draw at low zoom)."
+        )
+        self._cadastre_chk.toggled.connect(self._on_cadastre_overlay_toggled)
+
+        self._cadastre_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._cadastre_opacity_slider.setRange(0, 100)
+        self._cadastre_opacity_slider.setValue(60)
+        self._cadastre_opacity_slider.setFixedWidth(80)
+        self._cadastre_opacity_slider.setEnabled(False)
+        self._cadastre_opacity_slider.setToolTip("Land register overlay opacity")
+        self._cadastre_opacity_slider.valueChanged.connect(self._on_cadastre_opacity_changed)
 
         # ── Web view ──────────────────────────────────────────────────
         page = DebugPage()
@@ -269,6 +293,7 @@ class MapWidget(QWidget):
         self._map_ready = True
         # Apply the correct theme-based provider
         self._apply_current_provider()
+        self._push_page_theme()
         while self._js_queue:
             self._view.page().runJavaScript(self._js_queue.popleft())
 
@@ -277,6 +302,7 @@ class MapWidget(QWidget):
             print("[MapWidget] QWebChannel timeout — forcing ready.")
             self._map_ready = True
             self._apply_current_provider()
+            self._push_page_theme()
             while self._js_queue:
                 self._view.page().runJavaScript(self._js_queue.popleft())
 
@@ -299,6 +325,9 @@ class MapWidget(QWidget):
         )
         show_rail = self._rail_chk.isChecked()
         self._run_js(f"setRailOverlay({'true' if show_rail else 'false'})")
+        show_cadastre = self._cadastre_chk.isChecked()
+        self._run_js(f"setCadastreOverlay({'true' if show_cadastre else 'false'})")
+        self._run_js(f"setCadastreOpacity({self._cadastre_opacity_slider.value() / 100})")
 
     def _on_provider_changed(self, idx: int):
         p = TILE_PROVIDERS[idx]
@@ -310,9 +339,47 @@ class MapWidget(QWidget):
     def _on_rail_overlay_toggled(self, checked: bool):
         self._run_js(f"setRailOverlay({'true' if checked else 'false'})")
 
+    def _on_cadastre_overlay_toggled(self, checked: bool):
+        self._cadastre_opacity_slider.setEnabled(checked)
+        self._run_js(f"setCadastreOverlay({'true' if checked else 'false'})")
+
+    def _on_cadastre_opacity_changed(self, value: int):
+        self._run_js(f"setCadastreOpacity({value / 100})")
+
     # ------------------------------------------------------------------
     # Public API (called from App)
     # ------------------------------------------------------------------
+
+    def applyTheme(self, isDark=None, tokens: dict | None = None):
+        """Restyle in place after a theme switch (COYPU's dock convention).
+
+        Basemap tiles are left to the provider, exactly as COYPU does in
+        map_viewer.applyTheme - only the page's own chrome is themed.
+        """
+        from gui.theme import current_tokens, is_dark_active
+        self._tokens = tokens or current_tokens()
+        self.set_theme(is_dark_active() if isDark is None else bool(isDark))
+        self._push_page_theme()
+
+    def _push_page_theme(self):
+        """Hand the page its colour variables and the element palette."""
+        from gui.theme import current_tokens
+        from gui.palette import ELEMENT_COLORS, MAP_COLORS
+        t = getattr(self, "_tokens", None) or current_tokens()
+        panel = "rgba(43,43,43,0.94)" if self._dark else "rgba(255,255,255,0.94)"
+        theme = {
+            "bg":     t["base"],
+            "panel":  panel,
+            "fg":     t["text"],
+            "border": t["border"],
+            "accent": t["highlight"],
+            "ok":     t["accentDone"],
+            "muted":  t["disabledText"],
+            "link":   t["highlight"],
+        }
+        self._run_js(f"setElementColors({json.dumps(ELEMENT_COLORS)})")
+        self._run_js(f"setMapColors({json.dumps(MAP_COLORS)})")
+        self._run_js(f"setPageTheme({json.dumps(theme)})")
 
     def set_theme(self, dark: bool):
         self._dark = dark

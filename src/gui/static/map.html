@@ -3,18 +3,32 @@
 <head>
 <meta charset="utf-8"/>
 <style>
-  html, body, #map { width:100%; height:100%; margin:0; padding:0; background:#1a1a1a; }
+  /* Theme colours are pushed from Python (MapWidget._push_page_theme) so
+     gui/theme_manager.py stays the single source of truth. The values here
+     are the dark defaults that apply until that first call lands. */
+  :root {
+    --bg:     #1a1a1a;
+    --panel:  rgba(30,30,30,0.92);
+    --fg:     #f0f0f0;
+    --border: #555555;
+    --accent: #ffd54f;
+    --ok:     #43a047;
+    --muted:  #757575;
+    --link:   #1e88e5;
+  }
+  html, body, #map { width:100%; height:100%; margin:0; padding:0; background:var(--bg); }
   .aln-tip {
-    background: rgba(30,30,30,0.92);
-    color: #f0f0f0;
-    border: 1px solid #555;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
     border-radius: 4px;
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
     font-size: 11px;
     padding: 6px 8px;
     line-height: 1.4;
   }
-  .aln-tip b { color: #ffd54f; }
+  .aln-tip b { color: var(--accent); }
+  .aln-tip span { color: var(--muted); }
 
   /* PI edit-mode markers (Part H): hover "bounce" invites interaction;
      locked PIs must be unlocked (click the lock badge) before they can be
@@ -35,9 +49,9 @@
     font-size: 8px; line-height: 1; cursor: pointer;
     border: 1px solid rgba(0,0,0,0.4); box-shadow: 0 0 2px rgba(0,0,0,0.6);
   }
-  .pi-drag-icon .pi-lock-badge    { right: -2px; bottom: -2px; background: #757575; color: #fff; }
-  .pi-drag-icon .pi-lock-badge.unlocked { background: #43a047; }
-  .pi-drag-icon .pi-restore-badge { right: -2px; top: -2px; background: #1e88e5; color: #fff; }
+  .pi-drag-icon .pi-lock-badge    { right: -2px; bottom: -2px; background: var(--muted); color: #fff; }
+  .pi-drag-icon .pi-lock-badge.unlocked { background: var(--ok); }
+  .pi-drag-icon .pi-restore-badge { right: -2px; top: -2px; background: var(--link); color: #fff; }
 </style>
 <link rel="stylesheet" href="leaflet.css"/>
 <script src="leaflet.js"></script>
@@ -133,6 +147,26 @@ function setRailOverlay(show) {
   }
 }
 
+/* ── ČÚZK land register (katastrální mapa) WMS overlay ────────────── */
+var cadastreOverlay = null;
+function setCadastreOverlay(show) {
+  if (show) {
+    if (!cadastreOverlay) {
+      cadastreOverlay = L.tileLayer.wms('https://services.cuzk.cz/wms/wms.asp', {
+        layers: 'KN', format: 'image/png', transparent: true, version: '1.3.0',
+        minZoom: 15, maxZoom: 21,
+        attribution: "<a href='https://cuzk.gov.cz/Predpisy/Podminky-poskytovani-prostor-dat-a-sitovych-sluzeb/Podminky-poskytovani-sitovych-sluzeb-CUZK.aspx'>ČÚZK – on-line</a>",
+      });
+    }
+    cadastreOverlay.addTo(map);
+  } else if (cadastreOverlay) {
+    map.removeLayer(cadastreOverlay);
+  }
+}
+function setCadastreOpacity(opacity) {
+  if (cadastreOverlay) cadastreOverlay.setOpacity(opacity);
+}
+
 /* Load default tiles immediately */
 setTileProvider(
   'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -158,7 +192,7 @@ function showTracks(tracks) {
   trackLayers = [];
   var all = [];
   tracks.forEach(function(t) {
-    var color   = t.color || '#4fc3f7';
+    var color   = t.color || MAP_COLORS.trackFallback;
     var latlngs = t.nodes.map(function(n) { return [n[0], n[1]]; });
     if (!latlngs.length) return;
     all = all.concat(latlngs);
@@ -173,9 +207,9 @@ function showTracks(tracks) {
 
 function highlightTrack(idx) {
   trackLayers.forEach(function(l, i) {
-    var base = l._baseColor || '#4fc3f7';
+    var base = l._baseColor || MAP_COLORS.trackFallback;
     if (idx < 0)       l.setStyle({color:base,    weight:4, opacity:0.9});
-    else if (i===idx) { l.setStyle({color:'#ffeb3b', weight:7, opacity:1.0}); l.bringToFront(); }
+    else if (i===idx) { l.setStyle({color:MAP_COLORS.trackHighlight, weight:7, opacity:1.0}); l.bringToFront(); }
     else               l.setStyle({color:base,    weight:2, opacity:0.25});
   });
 }
@@ -192,7 +226,9 @@ function flyToTracks() {
    popover) and persisted in Python prefs — applied here via setStyle on
    the existing layers (no redraw) and remembered so a later showOSMReference
    rebuild (new track / project load) picks the same look back up. */
-var _osmRefStyle = {visible: true, color: '#00e5ff', opacity: 0.85};
+/* color:null means "use MAP_COLORS.osmReference" - resolved at draw time
+   because MAP_COLORS is populated after this statement runs. */
+var _osmRefStyle = {visible: true, color: null, opacity: 0.85};
 
 function showOSMReference(alns) {
   clearOSMReference();
@@ -201,7 +237,7 @@ function showOSMReference(alns) {
     var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
     if (latlngs.length < 2) return;
     var pl = L.polyline(latlngs, {
-      color: st.color, weight: 3, opacity: st.opacity,
+      color: st.color || MAP_COLORS.osmReference, weight: 3, opacity: st.opacity,
       dashArray: '8 6', pane: 'osmRefPane'
     });
     if (st.visible) pl.addTo(map);
@@ -234,8 +270,8 @@ function showAlignment(alns) {
     var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
     if (latlngs.length < 2) return;
     all = all.concat(latlngs);
-    var glow = L.polyline(latlngs, {color:'#ffffff', weight:14, opacity:0.2, pane:'alignmentGlowPane'}).addTo(map);
-    var bright = L.polyline(latlngs, {color:'#ff1744', weight:5, opacity:1.0, pane:'alignmentPane'}).addTo(map);
+    var glow = L.polyline(latlngs, {color:MAP_COLORS.glow, weight:14, opacity:0.2, pane:'alignmentGlowPane'}).addTo(map);
+    var bright = L.polyline(latlngs, {color:MAP_COLORS.selected, weight:5, opacity:1.0, pane:'alignmentPane'}).addTo(map);
     alignmentLayers.push(glow);
     alignmentLayers.push(bright);
   });
@@ -250,11 +286,35 @@ function showAlignment(alns) {
  * Each element drawn as a separate coloured polyline with a sticky HTML
  * tooltip listing its parameters.
  */
-var ELEMENT_COLOR = {
-  "Line":   "#42a5f5",
-  "Arc":    "#ef5350",
-  "Spiral": "#66bb6a"
-};
+/* Line / Spiral / Arc identity, pushed from gui/palette.py via
+   setElementColors() before the first draw (MapWidget._on_map_ready). */
+var ELEMENT_COLOR = {};
+function setElementColors(colors) {
+  if (colors) { ELEMENT_COLOR = colors; }
+}
+
+/* Every other colour the page draws with, also owned by gui/palette.py and
+   pushed by MapWidget._push_page_theme() before the first draw. */
+var MAP_COLORS = {};
+function setMapColors(colors) {
+  if (!colors) { return; }
+  for (var key in colors) {
+    if (Object.prototype.hasOwnProperty.call(colors, key)) {
+      MAP_COLORS[key] = colors[key];
+    }
+  }
+}
+
+/* Apply a {name: cssColor} map onto the :root custom properties above. */
+function setPageTheme(theme) {
+  if (!theme) { return; }
+  var root = document.documentElement;
+  for (var key in theme) {
+    if (Object.prototype.hasOwnProperty.call(theme, key)) {
+      root.style.setProperty('--' + key, theme[key]);
+    }
+  }
+}
 
 function _fmtTooltip(seg) {
   var p = seg.params || {};
@@ -305,7 +365,7 @@ function _fmtStatsPopup(seg) {
     var re = (p.radius_end   === null || p.radius_end   === undefined) ? "∞" : num(p.radius_end, 0);
     html += "A: " + num(p.clothoid_A) + " m · R: " + rs + " → " + re + "<br>";
   }
-  html += "<span style='color:#aaa'>Deviation vs OSM — max: " + num(p._max_dev) +
+  html += "<span style='color:var(--muted)'>Deviation vs OSM — max: " + num(p._max_dev) +
           " m · mean: " + num(p._mean_dev) + " m</span>";
   return html;
 }
@@ -352,7 +412,7 @@ function _rebuildSegIndex() {
 function _addSegmentLayer(seg) {
   var pts = (seg.points || []).map(function(n){ return [n[0], n[1]]; });
   if (pts.length < 2) return null;
-  var col = ELEMENT_COLOR[seg.type] || '#ffffff';
+  var col = ELEMENT_COLOR[seg.type] || MAP_COLORS.elementFallback;
   /* Coloured main element (canvas-rendered: far cheaper for many paths) */
   var pl = L.polyline(pts, {
     color: col, weight: 4, opacity: 0.95,
@@ -523,8 +583,8 @@ var _piLocked = {};
    what actually gates dragging), and — only while unlocked — a restore
    badge that snaps the PI back to the fitted-alignment baseline. */
 function _piDragIcon(omitted, locked) {
-  var border = omitted ? '#9e9e9e' : '#37474f';
-  var fill   = omitted ? 'transparent' : '#ffffff';
+  var border = omitted ? MAP_COLORS.piOmitted : MAP_COLORS.piBorder;
+  var fill   = omitted ? 'transparent' : MAP_COLORS.piFill;
   var html = '<div class="pi-dot" style="border:2px solid ' + border +
              ';background:' + fill + ';cursor:' + (locked ? 'default' : 'grab') + ';"></div>' +
              '<div class="pi-badge pi-lock-badge' + (locked ? '' : ' unlocked') +
@@ -543,7 +603,7 @@ function showPIOverlay(payload) {
   if (!payload) return;
   (payload.tangents || []).forEach(function(t) {
     var pl = L.polyline([t.from, t.to], {
-      color: '#9e9e9e', weight: 2, opacity: 0.55,
+      color: MAP_COLORS.piOmitted, weight: 2, opacity: 0.55,
       dashArray: '6 6', pane: 'piPane'
     }).addTo(map);
     piLayers.push(pl);
@@ -592,8 +652,8 @@ function showPIOverlay(payload) {
       return;
     }
     mk = L.circleMarker(pi.latlon, {
-      radius: 5, color: omitted ? '#9e9e9e' : '#37474f', weight: 2,
-      fillColor: omitted ? 'transparent' : '#ffffff',
+      radius: 5, color: omitted ? MAP_COLORS.piOmitted : MAP_COLORS.piBorder, weight: 2,
+      fillColor: omitted ? 'transparent' : MAP_COLORS.piFill,
       fillOpacity: omitted ? 0.0 : 0.9, pane: 'piPane',
     }).addTo(map);
     mk.bindTooltip("PI " + pi.id + d + (omitted ? " (omitted)" : ""),
@@ -621,8 +681,8 @@ function showStations(stations) {
   clearStations();
   (stations || []).forEach(function(s) {
     var mk = L.circleMarker(s.latlon, {
-      radius: 7, color: '#4a148c', weight: 2,
-      fillColor: '#ffd54f', fillOpacity: 0.95, pane: 'stationPane'
+      radius: 7, color: MAP_COLORS.stationBorder, weight: 2,
+      fillColor: MAP_COLORS.stationFill, fillOpacity: 0.95, pane: 'stationPane'
     }).addTo(map);
     mk.bindTooltip("🚉 " + (s.name || "?") +
                    " · km " + Number(s.km || 0).toFixed(3),
@@ -692,12 +752,12 @@ function showCandidates(candidates) {
     var latlngs = c.nodes.map(function(n){ return [n[0], n[1]]; });
     if (latlngs.length < 2) return;
     /* Glow */
-    var glow = L.polyline(latlngs, {color:'#ffffff', weight:10, opacity:0.15,
+    var glow = L.polyline(latlngs, {color:MAP_COLORS.glow, weight:10, opacity:0.15,
                           pane:'candidatesPane'}).addTo(map);
     candidateLayers.push(glow);
     /* Main line */
     var pl = L.polyline(latlngs, {
-      color:   c.color || '#ffffff',
+      color:   c.color || MAP_COLORS.elementFallback,
       weight:  4,
       opacity: 0.9,
       pane:    'candidatesPane'

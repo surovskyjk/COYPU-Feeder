@@ -28,12 +28,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 
+from gui import icons
+from gui.theme import current_tokens
+from gui.palette import ELEMENT_COLORS
+from gui import style_kit as sk
 
-TYPE_COLORS = {
-    "Line":   QColor("#42a5f5"),
-    "Arc":    QColor("#ef5350"),
-    "Spiral": QColor("#66bb6a"),
-}
+# Line / Spiral / Arc identity, shared with the map (see gui.palette).
+TYPE_COLORS = {k: QColor(v) for k, v in ELEMENT_COLORS.items()}
 
 COLS = ["ID", "Type", "Station [km]", "Length [m]", "Radius [m]",
         "A [m]", "Defl [°]", "Spiral L [m]", "Actions"]
@@ -54,6 +55,7 @@ class ElementTableDock(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._tokens         = current_tokens()
         self._model          = None     # PIAlignment or None (read-only)
         self._elements: list = []
         self._check_interval = 5.0
@@ -91,12 +93,11 @@ class ElementTableDock(QWidget):
         v.setSpacing(4)
 
         header = QHBoxLayout()
-        title = QLabel("Alignment Elements")
-        title.setFont(QFont("Helvetica", 10, QFont.Weight.Bold))
-        header.addWidget(title)
+        self._title = QLabel("Alignment Elements")
+        sk.bold_font(self._title, 1)
+        header.addWidget(self._title)
 
         self._metrics_lbl = QLabel("")
-        self._metrics_lbl.setStyleSheet("color: #999; font-size: 10px;")
         header.addWidget(self._metrics_lbl)
         header.addStretch()
 
@@ -105,15 +106,11 @@ class ElementTableDock(QWidget):
             "updates automatically.  Omit PI removes a curve; neighbours "
             "absorb its deflection."
         )
-        self._hint_lbl.setStyleSheet("color: #777; font-size: 9px;")
         header.addWidget(self._hint_lbl)
 
-        self._show_btn = QPushButton("🗺 Show alignment")
-        self._show_btn.setStyleSheet(
-            "QPushButton { font-size: 10px; padding: 3px 10px; "
-            "background: #2a82da; color: #ffffff; border-radius: 3px; "
-            "font-weight: bold; }"
-            "QPushButton:hover { background: #3b93eb; }")
+        self._show_btn = QPushButton("Show alignment")
+        self._show_btn.setIcon(icons.makeIcon("showAlignment"))
+        self._show_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
         self._show_btn.setToolTip(
             "Re-draw the edited alignment and the PI overlay on the map\n"
             "(useful after the map was reloaded and the overlays vanished)."
@@ -122,12 +119,8 @@ class ElementTableDock(QWidget):
         header.addWidget(self._show_btn)
 
         self._range_btn = QPushButton("Merge PI range → single curve")
-        self._range_btn.setStyleSheet(
-            "QPushButton { font-size: 10px; padding: 3px 10px; "
-            "background: #ffb300; color: #212121; border-radius: 3px; "
-            "font-weight: bold; }"
-            "QPushButton:hover { background: #ffc633; }"
-            "QPushButton:disabled { background: #4a4a4e; color: #8a8a8e; }")
+        self._range_btn.setIcon(icons.makeIcon("merge"))
+        self._range_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
         self._range_btn.setToolTip(
             "Select the rows spanning two or more curves (e.g. the first and\n"
             "last tangent of the section, or Ctrl+click them on the map).\n"
@@ -166,12 +159,12 @@ class ElementTableDock(QWidget):
         self._trim_end_btn.clicked.connect(lambda: self._on_trim("end"))
         header.addWidget(self._trim_end_btn)
 
-        self._pick_split_btn = QPushButton("📍 Pick split point")
+        self._pick_split_btn = QPushButton("Pick split point")
+        self._pick_split_btn.setIcon(icons.makeIcon("stops"))
         self._pick_split_btn.setCheckable(True)
-        self._pick_split_btn.setStyleSheet(
-            "QPushButton { font-size: 10px; padding: 3px 10px; }"
-            "QPushButton:checked { background: #2a82da; color: #ffffff; "
-            "font-weight: bold; }")
+        self._pick_split_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
+        # Green when armed, red-tinted when off (theme_manager styles this).
+        self._pick_split_btn.setProperty("seriesToggle", True)
         self._pick_split_btn.setToolTip(
             "Click, then click a point on the map to insert a PI there\n"
             "(splits whichever Line currently covers that point).\n"
@@ -194,7 +187,6 @@ class ElementTableDock(QWidget):
         self._table.setStyleSheet(
             "QTableWidget { font-size: 11px; }"
             "QTableWidget::item { padding: 4px 6px; }"
-            "QTableWidget::item:selected { background: #2a82da; color: #ffffff; }"
         )
         self._table.cellChanged.connect(self._on_cell_changed)
         self._table.itemSelectionChanged.connect(self._on_selection)
@@ -227,6 +219,28 @@ class ElementTableDock(QWidget):
         return self._elements
 
     # ------------------------------------------------------------------
+    # Theming
+    # ------------------------------------------------------------------
+
+    def applyTheme(self, isDark=None, tokens: dict | None = None):
+        """Restyle in place after a theme switch (COYPU's dock convention)."""
+        self._tokens = tokens or current_tokens()
+        t = self._tokens
+        sk.bold_font(self._title, 1)
+        self._metrics_lbl.setStyleSheet(
+            f"color:{t['disabledText']}; font-size:10px;")
+        self._hint_lbl.setStyleSheet(
+            f"color:{t['disabledText']}; font-size:9px;")
+        # Cached QIcons still hold pixmaps painted in the old colour, so the
+        # header buttons need their icons re-fetched from the refreshed factory.
+        self._show_btn.setIcon(icons.makeIcon("showAlignment"))
+        self._range_btn.setIcon(icons.makeIcon("merge"))
+        self._pick_split_btn.setIcon(icons.makeIcon("stops"))
+        # Row items bake their colours in at populate time.
+        if self._elements:
+            self._populate()
+
+    # ------------------------------------------------------------------
     # Population
     # ------------------------------------------------------------------
 
@@ -236,7 +250,7 @@ class ElementTableDock(QWidget):
         flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         if editable:
             flags |= Qt.ItemFlag.ItemIsEditable
-            it.setBackground(QColor(60, 60, 70))
+            it.setBackground(QColor(self._tokens["alternateBase"]))
         it.setFlags(flags)
         if color:
             it.setForeground(color)
@@ -321,7 +335,7 @@ class ElementTableDock(QWidget):
         editable = self._model is not None
         if spec["kind"] == "om":
             pid = spec["pid"]
-            grey = QColor("#777777")
+            grey = QColor(self._tokens["disabledText"])
             it = self._mk_item(spec["id"], color=grey, align_right=False)
             f = it.font(); f.setStrikeOut(True); it.setFont(f)
             self._table.setItem(row, COL_ID, it)
@@ -338,7 +352,7 @@ class ElementTableDock(QWidget):
             delete = QPushButton("🗑 Delete")
             delete.setStyleSheet(
                 "QPushButton { font-size: 10px; padding: 2px 8px; "
-                "color: #ff8a80; }")
+                f"color: {self._tokens['error']}; }}")
             delete.setToolTip(
                 "Physically remove this PI (it is currently only omitted,\n"
                 "not deleted — the vertex is still in the tangent polygon).")
@@ -620,14 +634,14 @@ class ElementTableDock(QWidget):
             delete = QPushButton("🗑 Delete")
             delete.setStyleSheet(
                 "QPushButton { font-size: 10px; padding: 2px 8px; "
-                "color: #ff8a80; }")
+                f"color: {self._tokens['error']}; }}")
             delete.setToolTip(
                 "Physically remove this PI — unlike Omit, the tangent\n"
                 "polygon loses the vertex and its neighbours connect directly.")
             buttons.append(delete)
 
             if sig[1]:
-                buttons.append(self._mk_amber_button("Undo merge"))
+                buttons.append(self._mk_merge_button("Undo merge", "undo"))
             wrap = self._wrap_buttons(buttons)
             wrap._meta = meta
             omit.clicked.connect(lambda _=False, w=wrap: self._omit_pi(w._meta["pi"]))
@@ -656,7 +670,7 @@ class ElementTableDock(QWidget):
                 next_el = self._elements[elem_index + 1]
                 meta["pi"] = prev_el.get("_pi")
                 meta["pi_b"] = next_el.get("_pi")
-                merge = self._mk_amber_button("Merge spirals ↔")
+                merge = self._mk_merge_button("Merge spirals ↔")
                 merge.setToolTip(
                     "Remove this short straight by prolonging the adjacent\n"
                     "transition spirals (kept symmetrical on both curves).")
@@ -673,13 +687,11 @@ class ElementTableDock(QWidget):
             self._table.setCellWidget(row, COL_ACT, wrap)
 
     @staticmethod
-    def _mk_amber_button(text: str) -> QPushButton:
+    def _mk_merge_button(text: str, icon_name: str = "merge") -> QPushButton:
+        """Merge/undo-merge action: flat like COYPU, recognised by its icon."""
         b = QPushButton(text)
-        b.setStyleSheet(
-            "QPushButton { font-size: 10px; padding: 2px 8px; "
-            "background: #ffb300; color: #212121; border-radius: 3px; "
-            "font-weight: bold; }"
-            "QPushButton:hover { background: #ffc633; }")
+        b.setIcon(icons.makeIcon(icon_name))
+        b.setStyleSheet("font-size: 10px; padding: 2px 8px;")
         return b
 
     # ------------------------------------------------------------------

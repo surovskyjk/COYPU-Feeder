@@ -6,17 +6,25 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QSplashScreen
-from gui.theme import is_dark_mode, apply_theme
+from gui.theme import apply_theme_mode, apply_font_size, current_tokens
 from gui.branding import make_app_icon, make_splash_pixmap
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("COYPU Feeder")
+
+    # Apply the saved preferences before anything is painted, so the splash
+    # opens in the theme the main window will use rather than always following
+    # the OS. App re-applies the same values once it exists.
+    settings = QSettings("COYPU", "COYPU-Feeder")
+    apply_font_size(app, int(settings.value("font_pt", 9, int)))
+    apply_theme_mode(settings.value("theme_mode", "auto", str))
+
     app.setWindowIcon(make_app_icon())
-    apply_theme(app, is_dark_mode())
 
     # Loading screen — visible while the heavy imports (QtWebEngine, scipy,
     # pyproj, …) and the main-window construction run.
@@ -25,7 +33,7 @@ def main():
     splash.showMessage(
         "Loading map engine & geometry libraries…",
         Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
-        Qt.GlobalColor.gray,
+        QColor(current_tokens()["disabledText"]),
     )
     app.processEvents()
 

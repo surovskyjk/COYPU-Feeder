@@ -24,12 +24,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QColor
 
+from gui import style_kit as sk
+from gui.style_kit import ThemedPanel
+from gui.theme import current_tokens
+
 
 COLS = ["", "PIs", "Curves", "R before → after [m]", "Max dev [m]", "Status"]
 COL_CHK, COL_PIS, COL_N, COL_R, COL_DEV, COL_STATUS = range(6)
 
 
-class Step6Consolidate(QWidget):
+class Step6Consolidate(ThemedPanel, QWidget):
     consolidation_done = Signal(list)   # elements → next step
     model_changed      = Signal()       # model edited → refresh map/table/staleness
     back_requested     = Signal()
@@ -55,7 +59,7 @@ class Step6Consolidate(QWidget):
         v.setSpacing(8)
 
         title = QLabel("Consolidate Curves")
-        title.setFont(QFont("Helvetica", 13, QFont.Weight.Bold))
+        self.bolded(title, 4)
         v.addWidget(title)
 
         info = QLabel(
@@ -64,7 +68,7 @@ class Step6Consolidate(QWidget):
             "transition–circular–transition curve. Only runs whose merged "
             "curve stays within the deviation limit are offered."
         )
-        info.setStyleSheet("color: #999; font-size: 10px;")
+        self.themed(info, sk.muted_label)
         info.setWordWrap(True)
         v.addWidget(info)
 
@@ -120,7 +124,7 @@ class Step6Consolidate(QWidget):
         v.addWidget(self._progress_bar)
 
         self._status_lbl = QLabel("Press Scan to look for mergeable runs.")
-        self._status_lbl.setStyleSheet("color: #888; font-size: 10px;")
+        self.themed(self._status_lbl, sk.muted_label)
         self._status_lbl.setWordWrap(True)
         v.addWidget(self._status_lbl)
 
@@ -145,7 +149,7 @@ class Step6Consolidate(QWidget):
         nav.addWidget(back)
         self._next_btn = QPushButton("Next →")
         self._next_btn.setMinimumHeight(34)
-        self._next_btn.setFont(QFont("Helvetica", 11, QFont.Weight.Bold))
+        self.bolded(self._next_btn, 2)
         self._next_btn.clicked.connect(self._on_next)
         nav.addWidget(self._next_btn)
         v.addLayout(nav)
@@ -226,7 +230,7 @@ class Step6Consolidate(QWidget):
 
     def _populate(self):
         self._table.setRowCount(0)
-        grey = QColor("#888888")
+        grey = QColor(current_tokens()["disabledText"])
         for g in self._groups:
             row = self._table.rowCount()
             self._table.insertRow(row)

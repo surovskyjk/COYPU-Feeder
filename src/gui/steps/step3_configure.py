@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QDoubleSpinBox, QScrollArea, QFormLayout, QGroupBox,
+    QDoubleSpinBox, QScrollArea, QFormLayout, QGroupBox, QComboBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
+from gui import style_kit as sk
 
 
 class Step3Configure(QWidget):
@@ -136,6 +137,18 @@ class Step3Configure(QWidget):
         )
         ef.addRow("Vertical curve length:", self._vc_spin)
 
+        self._elev_source_combo = QComboBox()
+        self._elev_source_combo.addItem("ČÚZK DMR 5G (CZ, ~0.2 m accuracy)")
+        self._elev_source_combo.addItem("OpenTopoData (EU-DEM/SRTM, ~25–30 m)")
+        self._elev_source_combo.setCurrentIndex(0)
+        self._elev_source_combo.setToolTip(
+            "Source for the LandXML vertical profile.\n"
+            "ČÚZK DMR 5G: Czech national lidar terrain model, © ČÚZK – on-line.\n"
+            "Falls back to OpenTopoData for any point outside its coverage.\n"
+            "OpenTopoData: coarser, but works anywhere (not CZ-specific)."
+        )
+        ef.addRow("Elevation source:", self._elev_source_combo)
+
         v.addWidget(exp_group)
 
         v.addStretch()
@@ -151,7 +164,7 @@ class Step3Configure(QWidget):
 
         self._next_btn = QPushButton("Next →  Candidates")
         self._next_btn.setMinimumHeight(38)
-        self._next_btn.setFont(QFont("Helvetica", 12, QFont.Weight.Bold))
+        sk.bold_font(self._next_btn, 3)
         self._next_btn.clicked.connect(self._on_next)
         nav_row.addWidget(self._next_btn)
         outer.addLayout(nav_row)
@@ -165,6 +178,9 @@ class Step3Configure(QWidget):
             "project_name":    self._project_edit.text().strip() or "Railway Alignment",
             "sample_interval": self._sample_spin.value(),
             "vc_length":       self._vc_spin.value(),
+            "elevation_source": ("cuzk_dmr5g"
+                                  if self._elev_source_combo.currentIndex() == 0
+                                  else "opentopodata"),
             "max_deviation":   self._max_dev_spin.value(),
             "min_radius":      self._min_radius_spin.value(),
             "spiral_length":   self._spiral_length_spin.value(),

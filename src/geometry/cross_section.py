@@ -344,6 +344,7 @@ def compute_cross_section(
     work_epsg:   int,
     offset_m:    float,
     interval_m:  float = 5.0,
+    elevation_source: str = "cuzk_dmr5g",
     progress_cb  = None,
 ) -> list[dict]:
     """
@@ -355,6 +356,7 @@ def compute_cross_section(
     work_epsg  : EPSG code of the metric working CRS
     offset_m   : perpendicular offset distance in metres
     interval_m : sampling interval along the alignment (default 5 m)
+    elevation_source : "cuzk_dmr5g" (default) or "opentopodata"
     progress_cb: callable(current: int, total: int) for progress reporting
 
     Returns
@@ -383,8 +385,17 @@ def compute_cross_section(
     # Reproject entire batch to WGS84 in one call
     all_wgs84 = projected_to_wgs84(all_utm, work_epsg)
 
-    # Sample elevations for all 3N points (batched by elevation.py)
-    all_elevs: list[Optional[float]] = sample_elevations(all_wgs84)
+    # Sample elevations for all 3N points (batched by elevation.py).
+    # progress_cb reports in *stations*, but sample_elevations reports in
+    # points (3 per station) — translate so the UI's "N / total stations"
+    # label stays accurate rather than showing 3x the real count.
+    n_stations = len(stations)
+    points_cb = (
+        (lambda done, tot: progress_cb(done // 3, n_stations))
+        if progress_cb else None
+    )
+    all_elevs: list[Optional[float]] = sample_elevations(
+        all_wgs84, source=elevation_source, progress_cb=points_cb)
 
     # Unpack into result dicts
     results: list[dict] = []

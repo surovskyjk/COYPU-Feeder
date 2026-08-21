@@ -51,12 +51,16 @@ def build_landxml(
     output_epsg: int,
     project_name: str = "Railway Alignment",
     force_positive: bool = False,
+    elevation_source: str = "cuzk_dmr5g",
 ) -> etree._Element:
     """
     Build a LandXML 1.2 root element (COYPU-compatible structure).
 
     force_positive: if True, coordinate signs were stripped (abs applied)
                     before reaching this function — noted in Project desc.
+    elevation_source: which DEM was used ("cuzk_dmr5g" or "opentopodata") —
+                    credited in Project desc when ČÚZK data was used, since
+                    an exported file may travel outside the app.
     """
     XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
     nsmap = {None: LANDXML_NS, "xsi": XSI_NS}
@@ -85,6 +89,8 @@ def build_landxml(
             f" Coordinates exported as absolute values (signs stripped) "
             f"for EPSG:{output_epsg} — numeric values are unchanged."
         )
+    if elevation_source == "cuzk_dmr5g":
+        desc += " Elevation: © ČÚZK DMR 5G, ČÚZK – on-line (cuzk.gov.cz)."
     proj_el.set("desc", desc)
 
     units_el = etree.SubElement(root, "Units")

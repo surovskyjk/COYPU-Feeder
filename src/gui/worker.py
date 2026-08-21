@@ -10,6 +10,8 @@ import numpy as np
 
 from PySide6.QtCore import QThread, Signal
 
+from gui.palette import LEVEL_COLORS, MAP_COLORS
+
 import math
 
 
@@ -143,11 +145,7 @@ class CandidateWorker(QThread):
     all_done          = Signal()
     failed            = Signal(str)
 
-    _ALGO_COLORS = {
-        "level1": "#e040fb",   # OSM polyline — purple
-        "level2": "#ff9800",   # Lines + Arcs — orange
-        "level3": "#26c6da",   # Lines + Spirals + Arcs — cyan
-    }
+    _ALGO_COLORS = LEVEL_COLORS
 
     def __init__(self, xy_list, chainages_list, settings: dict, parent=None):
         super().__init__(parent)
@@ -189,7 +187,8 @@ class CandidateWorker(QThread):
             sweep_n = int(self._settings.get("sweep_n", 3))
 
             for algo_id in algo_ids:
-                color = self._ALGO_COLORS.get(algo_id, "#ffffff")
+                color = self._ALGO_COLORS.get(algo_id,
+                                              MAP_COLORS["elementFallback"])
 
                 # --- progress text callback (called from algorithm internals) ---
                 def _pcb(msg, _id=algo_id):
@@ -390,6 +389,7 @@ class FinalExportWorker(QThread):
         s               = self._settings
         sample_interval = s.get("sample_interval", 20.0)
         vc_length       = s.get("vc_length", 100.0)
+        elevation_source = s.get("elevation_source", "cuzk_dmr5g")
         project_name    = s.get("project_name", "Railway Alignment")
         work_epsg       = self._work_epsg
         output_epsg     = self._output_epsg
@@ -455,7 +455,12 @@ class FinalExportWorker(QThread):
                 track.nodes, chainages, sample_interval=sample_interval
             )
             self.station_progress.emit(0.0, total_len)
-            elevs      = sample_elevations(sample_latlon)
+            elevs      = sample_elevations(
+                sample_latlon,
+                source=elevation_source,
+                progress_cb=lambda done, tot: self.station_progress.emit(
+                    (done / tot) * total_len if tot else total_len, total_len),
+            )
             self.station_progress.emit(total_len, total_len)
             v_elements = fit_vertical_geometry(sample_ch, elevs, vc_length=vc_length)
 
@@ -488,6 +493,7 @@ class FinalExportWorker(QThread):
             output_epsg=output_epsg,
             project_name=project_name,
             force_positive=force_positive,
+            elevation_source=elevation_source,
         )
 
         self.stage_changed.emit("Writing file…")
@@ -521,7 +527,8 @@ class CrossSectionWorker(QThread):
     Background worker for cross-section elevation analysis.
 
     Samples terrain elevation at the central alignment and at left/right
-    perpendicular offsets every *interval_m* metres, using OpenTopoData.
+    perpendicular offsets every *interval_m* metres (ČÚZK DMR 5G by default,
+    or OpenTopoData).
 
     Signals
     -------
@@ -540,6 +547,7 @@ class CrossSectionWorker(QThread):
         work_epsg:  int,
         offset_m:   float,
         interval_m: float = 5.0,
+        elevation_source: str = "cuzk_dmr5g",
         parent=None,
     ):
         super().__init__(parent)
@@ -547,6 +555,7 @@ class CrossSectionWorker(QThread):
         self._work_epsg  = work_epsg
         self._offset_m   = offset_m
         self._interval_m = interval_m
+        self._elevation_source = elevation_source
 
     def run(self):
         try:
@@ -556,6 +565,7 @@ class CrossSectionWorker(QThread):
                 self._work_epsg,
                 self._offset_m,
                 self._interval_m,
+                elevation_source=self._elevation_source,
                 progress_cb=lambda cur, tot: self.progress.emit(cur, tot),
             )
             self.finished.emit(results)
@@ -617,6 +627,7 @@ class ExportWorker(QThread):
         smooth_window   = s["smooth_window"]
         sample_interval = s["sample_interval"]
         vc_length       = s["vc_length"]
+        elevation_source = s.get("elevation_source", "cuzk_dmr5g")
         project_name    = s.get("project_name", "Railway Alignment")
         min_line        = s.get("min_line_length", 10.0)
         min_arc         = s.get("min_arc_length",  10.0)
@@ -694,7 +705,12 @@ class ExportWorker(QThread):
                 track.nodes, chainages, sample_interval=sample_interval
             )
             self.station_progress.emit(0.0, total_len)
-            elevs      = sample_elevations(sample_latlon)
+            elevs      = sample_elevations(
+                sample_latlon,
+                source=elevation_source,
+                progress_cb=lambda done, tot: self.station_progress.emit(
+                    (done / tot) * total_len if tot else total_len, total_len),
+            )
             self.station_progress.emit(total_len, total_len)
             v_elements = fit_vertical_geometry(sample_ch, elevs, vc_length=vc_length)
 
@@ -714,6 +730,7 @@ class ExportWorker(QThread):
             output_epsg=work_epsg,
             project_name=project_name,
             force_positive=force_positive,
+            elevation_source=elevation_source,
         )
 
         self.stage_changed.emit("Writing file…")
