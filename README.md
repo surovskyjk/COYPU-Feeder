@@ -42,7 +42,7 @@ No Python installation required.
 - **Restore default** — one click (↺ in the toolbar) discards every edit made in Refine/Consolidate and returns to the freshly-fitted alignment, clearing the undo history
 - **Original-alignment appearance** — the toolbar's "Original…" popover controls the OSM reference overlay's visibility, opacity and colour, applied instantly and remembered across sessions
 - **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
-- **Project files (`.coypu`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
+- **Project files (`.coypuf`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
 - **PI display** — Points of Intersection as markers (lockable/draggable in Edit mode), virtual tangent extensions dashed light-grey
 - **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
 - **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
@@ -89,7 +89,7 @@ Editing actions: **🗺 Show alignment** re-draws the edited alignment and PI ov
 
 The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine* or *Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically).
 
-Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypu` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
+Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypuf` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
 
 ---
 
@@ -398,7 +398,7 @@ COYPU-Feeder/
     │   ├── elevation.py          # DEM sampling and vertical geometry
     │   └── projection.py         # CRS transformations (pyproj)
     ├── app_meta.py              # Name / version / license / data sources
-    ├── project_io.py            # .coypu project save / load
+    ├── project_io.py            # .coypuf project save / load
     ├── data/
     │   ├── suggested_lines.py    # Curated Czech railway line database
     │   ├── cz_lines.py          # Offline CZ list loader (+ user copy)

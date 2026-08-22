@@ -208,7 +208,7 @@ class TestExportAndRoundTrip:
             "step": 4, "settings": {}, "tracks": [], "selected_tracks": [0],
             "pi_model": model, "stations": [],
         }
-        path = str(tmp_path / "reflex.coypu")
+        path = str(tmp_path / "reflex.coypuf")
         project_io.save_project(path, state)
         text = open(path, encoding="utf-8").read()
         assert '<PI ' in text
@@ -226,7 +226,7 @@ class TestExportAndRoundTrip:
                 assert abs(t1 - t2) < 1e-6
 
     def test_old_project_file_without_merged_turn_loads(self, tmp_path):
-        """A pre-1.2 .coypu file (no mergedTurn attribute) must still load —
+        """A pre-1.2 .coypuf file (no mergedTurn attribute) must still load —
         the default (None) keeps every PI's ordinary wrapped-delta rebuild."""
         import project_io
         model, xy, k_from, ok, msg = _build_and_merge(60.0)
@@ -235,7 +235,7 @@ class TestExportAndRoundTrip:
             "step": 4, "settings": {}, "tracks": [], "selected_tracks": [0],
             "pi_model": model, "stations": [],
         }
-        path = str(tmp_path / "old.coypu")
+        path = str(tmp_path / "old.coypuf")
         project_io.save_project(path, state)
         text = open(path, encoding="utf-8").read()
         import re
@@ -246,7 +246,7 @@ class TestExportAndRoundTrip:
         assert all(p.merged_turn is None for p in loaded["pi_model"].pis)
 
     def test_legacy_chain_next_still_loads(self, tmp_path):
-        """A pre-release .coypu 1.1 file with chainNext=true (from the old,
+        """A pre-release .coypuf 1.1 file with chainNext=true (from the old,
         now-removed chained-merge builder) must still load and rebuild via
         _build_zone_range's untouched legacy chain-boundary code path."""
         import project_io
@@ -258,7 +258,7 @@ class TestExportAndRoundTrip:
             "step": 4, "settings": {}, "tracks": [], "selected_tracks": [0],
             "pi_model": model, "stations": [],
         }
-        path = str(tmp_path / "legacy.coypu")
+        path = str(tmp_path / "legacy.coypuf")
         project_io.save_project(path, state)
         text = open(path, encoding="utf-8").read()
         # Flip the FIRST PI's chainNext to true, simulating a legacy file.
@@ -438,7 +438,7 @@ class TestAuxiliaryPISingularBand:
             "step": 4, "settings": {}, "tracks": [], "selected_tracks": [0],
             "pi_model": model, "stations": [],
         }
-        path = str(tmp_path / "auxpi.coypu")
+        path = str(tmp_path / "auxpi.coypuf")
         project_io.save_project(path, state)
         text = open(path, encoding="utf-8").read()
         assert 'chainNext="true"' in text

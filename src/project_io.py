@@ -1,5 +1,5 @@
 """
-COYPU Feeder project files (``.coypu``).
+COYPU Feeder project files (``.coypuf``).
 
 Self-contained XML so a session can be reopened and edited later with no
 network access, no re-fetching and no re-fitting.
@@ -67,7 +67,7 @@ def _pb(text: str | None) -> bool:
 
 def save_project(filepath: str, state: dict) -> None:
     """
-    Write a `.coypu` project.
+    Write a `.coypuf` project.
 
     `state` keys (all optional except work_epsg):
       project_name, work_epsg, level, step, settings, tracks,
@@ -172,7 +172,7 @@ def save_project(filepath: str, state: dict) -> None:
 
 def load_project(filepath: str) -> dict:
     """
-    Read a `.coypu` project and rebuild the in-memory state.
+    Read a `.coypuf` project and rebuild the in-memory state.
 
     Returns a dict with: project_name, work_epsg, level, step, settings,
     tracks, selected_indices, pi_model, elements, stations, xy_list,

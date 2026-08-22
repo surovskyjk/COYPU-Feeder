@@ -13,6 +13,7 @@ APP_TAGLINE = "OSM railways → LandXML alignments"
 REPO_URL    = "https://github.com/surovskyjk/COYPU-Feeder"
 README_URL  = "https://github.com/surovskyjk/COYPU-Feeder#readme"
 RELEASES_URL = "https://github.com/surovskyjk/COYPU-Feeder/releases/latest"
+COYPU_REPO_URL = "https://github.com/surovskyjk/COYPU"
 
 AUTHOR      = "Jakub Surovsky"
 LICENSE     = "MIT License"

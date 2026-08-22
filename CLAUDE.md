@@ -25,7 +25,7 @@ Desktop PySide6 app converting OSM railway polylines into C1-continuous LandXML 
 
 - `PIAlignment` (tangent polygon: vertices `V`, reference polyline `xy_ref`, per-vertex `PIData` list, `elements`, `last_stats`) and `PIData` (radius/spiral overrides, `omitted`, merge flags).
 - `extract_pi_model(...)` derives the model from a fitted candidate; it **auto-merges same-rotation curves whose gap is < `_PI_MIN_TANGENT` (60 m)** — synthetic test tracks need larger separations or runs vanish before you can test merging.
-- `rebuild_from_pi_model(model)` regenerates the element chain from the model. **Elements are never persisted anywhere** — not in `.coypu` files, not across edits; always regenerate. Rebuild also refreshes `model.last_stats` (deviation stats) — consumers read that instead of recomputing.
+- `rebuild_from_pi_model(model)` regenerates the element chain from the model. **Elements are never persisted anywhere** — not in `.coypuf` files, not across edits; always regenerate. Rebuild also refreshes `model.last_stats` (deviation stats) — consumers read that instead of recomputing.
 - `merge_pi_range`, `merge_intermediate_line`, `undo_merge` edit the model *and* leave `model.elements` correct; UI callers must not trigger a second rebuild (see perf invariants).
 - The Consolidate step (`find_consolidation_groups` / `apply_consolidation`) trials merges on a `deepcopy`, then applies accepted groups **back-to-front** so PI indices stay valid.
 
@@ -37,7 +37,7 @@ Note the step *file names* do not match the 9-step UI numbering (`step6_consolid
 
 - All geometry math runs in a projected CRS in meters (transformer via `geometry/projection.py`, `make_transformer` is `lru_cache`d); WGS84 appears only at the map/OSM boundary. COYPU targets EPSG:5514 (S-JTSK) for Czech data.
 - Spirals are true clothoids (scipy Fresnel). `_compute_zone_geometry(n_pts=0)` is the fast endpoint-only path used everywhere except `_zone_objective` (which passes `n_pts=40`).
-- `.coypu` project files (`src/project_io.py`) are XML in the LandXML house style: 6 decimals for user-facing values, **9 decimals (`NUM_GEOM`) for internal geometry** — 6 is not enough for exact round-trips. Chainages and elements are recomputed on load.
+- `.coypuf` project files (`src/project_io.py`) are XML in the LandXML house style: 6 decimals for user-facing values, **9 decimals (`NUM_GEOM`) for internal geometry** — 6 is not enough for exact round-trips. Chainages and elements are recomputed on load.
 
 ### Performance invariants (hard-won; do not regress)
 

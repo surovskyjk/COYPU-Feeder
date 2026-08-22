@@ -330,6 +330,15 @@ class App(QMainWindow):
         tb.addWidget(self.map_widget._cadastre_chk)
         tb.addWidget(self.map_widget._cadastre_opacity_slider)
 
+        tb.addSeparator()
+        self._act_coypu_repo = QAction(
+            icons.makeIcon("externalLink"), "Explore COYPU", self)
+        self._act_coypu_repo.setToolTip(
+            "COYPU is a separate railway design application this Feeder "
+            "exports for — open its GitHub repository.")
+        self._act_coypu_repo.triggered.connect(self._open_coypu_repo)
+        tb.addAction(self._act_coypu_repo)
+
         # Back routing: each step's OWN back handler (some do overlay
         # cleanup) keyed by the step it goes back FROM — mirrors exactly
         # what that step's in-page "← Back" button does.
@@ -626,8 +635,13 @@ class App(QMainWindow):
         import app_meta as meta
         webbrowser.open(meta.RELEASES_URL)
 
+    def _open_coypu_repo(self):
+        import webbrowser
+        import app_meta as meta
+        webbrowser.open(meta.COYPU_REPO_URL)
+
     # ------------------------------------------------------------------
-    # Project files (.coypu)
+    # Project files (.coypuf)
     # ------------------------------------------------------------------
 
     def _set_dirty(self, dirty: bool = True):
@@ -706,7 +720,7 @@ class App(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(
             self, "Open COYPU Feeder project", "",
-            "COYPU Feeder project (*.coypu);;All files (*.*)")
+            "COYPU Feeder project (*.coypuf);;All files (*.*)")
         if path:
             self._load_project(path)
 
@@ -717,14 +731,14 @@ class App(QMainWindow):
 
     def _on_save_project_as(self) -> bool:
         from PySide6.QtWidgets import QFileDialog
-        suggested = self._settings.get("project_name", "project") + ".coypu"
+        suggested = self._settings.get("project_name", "project") + ".coypuf"
         path, _ = QFileDialog.getSaveFileName(
             self, "Save COYPU Feeder project", suggested,
-            "COYPU Feeder project (*.coypu)")
+            "COYPU Feeder project (*.coypuf)")
         if not path:
             return False
-        if not path.lower().endswith(".coypu"):
-            path += ".coypu"
+        if not path.lower().endswith(".coypuf"):
+            path += ".coypuf"
         return self._save_project(path)
 
     def _save_project(self, path: str) -> bool:
@@ -1025,6 +1039,7 @@ class App(QMainWindow):
             ("_act_undo_merge",      "undo"),
             ("_act_restore_default", "resetLayout"),
             ("_act_edit_mode",       "edit"),
+            ("_act_coypu_repo",      "externalLink"),
         ):
             act = getattr(self, attr, None)
             if act is not None:

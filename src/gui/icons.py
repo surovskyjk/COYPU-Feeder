@@ -77,6 +77,7 @@ ICON_BODIES = {
     "edit": "<path d='M4 20l1-4 11-11 3 3-11 11z'/><path d='M15 6l3 3'/>",
     "newProject": "<path d='M5 3h9l5 5v13H5z'/><path d='M14 3v5h5'/><path d='M12 12v6'/><path d='M9 15h6'/>",
     "save": "<path d='M5 3h11l3 3v15H5z'/><path d='M8 3v6h7V3'/><path d='M8 21v-7h8v7'/>",
+    "externalLink": "<path d='M14 4h6v6'/><path d='M20 4l-9 9'/><path d='M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6'/>",
 }
 
 # Icons whose glyph should always be tinted with the accent colour instead

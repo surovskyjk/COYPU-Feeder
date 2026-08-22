@@ -84,7 +84,7 @@ class PIData:
     # on the same circle (no exit spiral here, no entry spiral there, zero
     # connector). Legacy field: no longer SET by any current merge (which
     # always builds a single PI — see merged_turn below); kept read-only so
-    # a pre-release .coypu 1.1 file with chainNext still loads and rebuilds.
+    # a pre-release .coypuf 1.1 file with chainNext still loads and rebuilds.
     chain_next:       bool  = False
     # Set by merge_pi_range on the single PI it creates: the SIGNED,
     # UNWRAPPED total turn (radians) the merged curve must sweep — may
@@ -5296,7 +5296,7 @@ def find_consolidation_groups(
         rec["radius_after"] = round(float(arcs[0]["radius"]), 1)
         # Every merge — including high-angle/reflex ones — now builds a
         # single PI; _merged_group_range degenerates to (k_from, k_from)
-        # unless a legacy .coypu 1.1 file's chain_next links are present.
+        # unless a legacy .coypuf 1.1 file's chain_next links are present.
         _, k_hi_built = _merged_group_range(trial, k_from)
         dev = _range_max_dev(trial, k_from, k_hi_built)
         rec["max_dev"] = round(dev, 3)
