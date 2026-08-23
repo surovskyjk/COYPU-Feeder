@@ -24,8 +24,12 @@ from lxml import etree
 
 import app_meta as meta
 
-FILE_VERSION = "1.2"   # 1.1 added PI/@chainNext (legacy, read-only now);
-                        # 1.2 adds PI/@mergedTurn (single-PI reflex merges)
+FILE_VERSION = "1.3"   # 1.1 added PI/@chainNext (legacy, read-only now);
+                        # 1.2 adds PI/@mergedTurn (single-PI reflex merges);
+                        # 1.3 merged wizard steps 5 (Refine) and 6
+                        # (Consolidate) into one 8-step workflow — Project/
+                        # @step written under the OLD 9-step numbering needs
+                        # remapping on load (see _migrate_step below).
 NUM = "{:.6f}"          # LandXML house style — user-facing values
 # Internal geometry (projected metres) is stored at nanometre precision so a
 # save/load round-trip reproduces the element chain exactly rather than to the
@@ -59,6 +63,27 @@ def _b(value: bool) -> str:
 
 def _pb(text: str | None) -> bool:
     return str(text).lower() == "true"
+
+
+def _parse_version(v: str) -> tuple[int, int]:
+    try:
+        major, _, minor = v.partition(".")
+        return (int(major), int(minor or 0))
+    except (ValueError, AttributeError):
+        return (0, 0)
+
+
+# Old 9-step numbering (0=Find … 4=Refine, 5=Consolidate, 6=Stations,
+# 7=Cross-section, 8=Export) → new 8-step numbering (4=Refine&Consolidate,
+# 5=Stations, 6=Cross-section, 7=Export). Files older than format 1.3 carry
+# a step index under the old scheme.
+_STEP_MIGRATION_TO_V3 = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 4, 6: 5, 7: 6, 8: 7}
+
+
+def _migrate_step(step: int, file_version: str) -> int:
+    if _parse_version(file_version) < (1, 3):
+        step = _STEP_MIGRATION_TO_V3.get(step, step)
+    return max(0, min(step, 7))
 
 
 # ---------------------------------------------------------------------------
@@ -188,12 +213,14 @@ def load_project(filepath: str) -> dict:
     if root.tag != "CoypuProject":
         raise ValueError("Not a COYPU Feeder project file.")
 
+    file_version = root.get("version", "1.0")
     proj = root.find("Project")
+    raw_step = int(proj.get("step", "0")) if proj is not None else 0
     state: dict = {
         "project_name": proj.get("name", "Railway Alignment") if proj is not None else "",
         "work_epsg":    int(proj.get("workEpsg", "32633")) if proj is not None else 32633,
         "level":        proj.get("level", "") if proj is not None else "",
-        "step":         int(proj.get("step", "0")) if proj is not None else 0,
+        "step":         _migrate_step(raw_step, file_version),
     }
 
     # Settings — restore numbers as numbers (they were written as text)

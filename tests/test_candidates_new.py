@@ -470,24 +470,25 @@ class TestProgressiveMCAlgorithm:
 
 
 class TestRunAll:
-    def test_all_four_run(self):
-        """run_all() must return 4 results, none crashing."""
+    def test_all_levels_run(self):
+        """run_all() must return the three shipping levels, none crashing."""
         xy, ch = _make_line_arc_line(R=300, defl_deg=60, noise_m=0.0)
         gen  = CandidateGenerator(xy, ch, SETTINGS)
         cands = gen.run_all()
-        assert len(cands) == 4
+        assert len(cands) == 3
         ids = [c.algorithm_id for c in cands]
-        assert "segment_fit"    in ids
-        assert "dp_segment"     in ids
-        assert "progressive_mc" in ids
-        assert "raw"            in ids
+        assert "level1" in ids
+        assert "level2" in ids
+        assert "level3" in ids
+        for c in cands:
+            assert c.elements, f"{c.algorithm_id} produced no elements"
 
     def test_raw_unchanged(self):
-        """Raw OSM polyline must have max_deviation ≈ 0."""
+        """Level 1 (raw OSM polyline) must have max_deviation ≈ 0."""
         xy, ch = _make_line_arc_line(R=300, defl_deg=60, noise_m=0.0)
         gen  = CandidateGenerator(xy, ch, SETTINGS)
         cands = gen.run_all()
-        raw = next(c for c in cands if c.algorithm_id == "raw")
+        raw = next(c for c in cands if c.algorithm_id == "level1")
         assert raw.max_deviation < 0.5   # should be near-zero for dense points
 
     def test_no_forward_drift_segment_fit(self):

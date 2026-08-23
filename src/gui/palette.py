@@ -53,7 +53,10 @@ MAP_COLORS = {
     "elementFallback": "#ffffff",   # unknown element type
     # Dashed reference overlay of the original OSM alignment. This is also
     # the factory default for the user-adjustable osm_ref_color preference.
-    "osmReference":    "#00e5ff",
+    # Deliberately muted/subdued — it's a reference to fit against, not a
+    # result to look at; the constructed alignment (ELEMENT_COLORS) carries
+    # the saturated hues so the two never compete for attention.
+    "osmReference":    "#8a8a8a",
     "glow":            "#ffffff",   # halo drawn under an emphasised line
     "selected":        "#ff1744",   # the exported alignment preview
     "piBorder":        "#37474f",   # PI marker outline / fill / omitted
@@ -65,6 +68,17 @@ MAP_COLORS = {
 
 # Factory default for the OSM reference overlay preference (see app.py).
 OSM_REF_DEFAULT = MAP_COLORS["osmReference"]
+
+# Map legend entries — pushed to the page alongside ELEMENT_COLORS/
+# MAP_COLORS so the swatches always match what's actually drawn. `dashed`
+# marks the OSM-reference sample so the legend swatch itself carries the
+# same dash pattern as the real overlay.
+LEGEND_ENTRIES = [
+    {"label": "Line",          "color": ELEMENT_COLORS["Line"]},
+    {"label": "Arc",           "color": ELEMENT_COLORS["Arc"]},
+    {"label": "Spiral",        "color": ELEMENT_COLORS["Spiral"]},
+    {"label": "OSM reference", "color": MAP_COLORS["osmReference"], "dashed": True},
+]
 
 
 def element_color(kind: str, default: str = "#ffffff") -> str:

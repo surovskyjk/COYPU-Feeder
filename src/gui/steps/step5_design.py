@@ -1,28 +1,29 @@
 """
-Step 6 — Consolidate.
+Step 5 — Refine & Consolidate.
 
-Level 2/3 often split one physical curve into a run of consecutive
-same-direction curves (Douglas-Peucker noise). This step scans for such runs
-— curves that turn the same way and are connected directly or by a straight
-shorter than a user-defined length — and offers to replace each run with a
-single Spiral–Arc–Spiral.
+The unified alignment-design workspace: manual editing (curve radius,
+spiral length, omitting PIs, merging spirals, PI drag on the map) happens
+in the element-table dock below the map, exactly as before; this panel
+carries the summary metrics, a collapsible "Consolidate curve runs" tool
+(Scan → tick/untick rows → Apply, replacing runs of same-direction curves
+with a single transition–circular–transition curve), and the Back/Accept
+navigation.
 
-A run is only proposed when the merged curve stays within the user-defined
-maximum deviation from the OSM polyline. Rejected runs are listed with the
-reason instead of being hidden.
-
-Scan → tick/untick rows → Apply. One Undo restores the pre-Apply model.
+Automatic consolidation already runs during candidate generation (see
+`geometry.candidates.auto_consolidate`), so by the time this step opens
+most curve runs are already merged — the tool here exists to push the
+straight/deviation thresholds wider than the automatic pass allowed. It
+starts collapsed for that reason: available, not front-and-center.
 """
 
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox,
-    QFormLayout, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QToolButton, QGroupBox, QFormLayout, QDoubleSpinBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar,
 )
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont, QColor
 
 from gui import style_kit as sk
 from gui.style_kit import ThemedPanel
@@ -33,20 +34,26 @@ COLS = ["", "PIs", "Curves", "R before → after [m]", "Max dev [m]", "Status"]
 COL_CHK, COL_PIS, COL_N, COL_R, COL_DEV, COL_STATUS = range(6)
 
 
-class Step6Consolidate(ThemedPanel, QWidget):
-    consolidation_done = Signal(list)   # elements → next step
-    model_changed      = Signal()       # model edited → refresh map/table/staleness
-    back_requested     = Signal()
-    log_message        = Signal(str, str)
-    highlight_span     = Signal(list)   # element_ids to emphasize on the map
+class Step5Design(ThemedPanel, QWidget):
+    design_done    = Signal(list)   # final list[dict] elements → Stations
+    model_changed  = Signal()       # consolidation applied/undone → App refresh
+    back_requested = Signal()       # user wants to go back to Candidates
+    log_message    = Signal(str, str)
+    highlight_span = Signal(list)   # element_ids to emphasize on the map
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._candidate = None
         self._model = None
+        self._working_elements: list[dict] = []
         self._groups: list = []
-        self._undo_snapshot = None
         self._worker = None    # ConsolidationScanWorker | ConsolidationApplyWorker | None
         self._timer  = None    # ElapsedTimer, started when the current worker began
+        # Set by App, mirroring element_table's undo-history hooks — the
+        # consolidation Apply is a real edit and must land in the SAME
+        # undo/redo stack as every other Refine action.
+        self.on_before_edit = None   # callable(label: str)
+        self.on_edit_failed = None   # callable()
         self._build()
 
     # ------------------------------------------------------------------
@@ -54,23 +61,113 @@ class Step6Consolidate(ThemedPanel, QWidget):
     # ------------------------------------------------------------------
 
     def _build(self):
-        v = QVBoxLayout(self)
-        v.setContentsMargins(10, 10, 10, 10)
-        v.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
 
-        title = QLabel("Consolidate Curves")
-        self.bolded(title, 4)
-        v.addWidget(title)
+        self._title_lbl = QLabel("Refine & Consolidate")
+        self.bolded(self._title_lbl, 4)
+        outer.addWidget(self._title_lbl)
+
+        self._algo_lbl = QLabel("")
+        self.themed(self._algo_lbl, sk.muted_label)
+        outer.addWidget(self._algo_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sk.set_role(sep, "separator")
+        outer.addWidget(sep)
+
+        info = QLabel(
+            "All elements are listed in the table below the map:\n\n"
+            "• Edit an arc Radius or a Spiral L value — the alignment\n"
+            "  rebuilds and the map updates automatically.\n"
+            "• Omit PI removes a curve (neighbours absorb the deflection);\n"
+            "  omitted PIs can be restored at the bottom of the table.\n"
+            "• Short straights between two curves offer 'Merge spirals' —\n"
+            "  the straight is replaced by prolonged, symmetric spirals.\n"
+            "• Click a table row to highlight that element on the map, or\n"
+            "  click an element directly on the map to select its row;\n"
+            "  Ctrl+click on the map multi-selects (e.g. pick the first and\n"
+            "  last tangent for 'Merge PI range'). Hover an element for 3 s\n"
+            "  to see its statistics.\n\n"
+            "Points of Intersection are shown as markers; the dashed grey\n"
+            "stubs are the virtual tangent extensions toward each PI."
+        )
+        self.themed(info, sk.muted_label)
+        info.setWordWrap(True)
+        outer.addWidget(info)
+
+        # Metrics (persistent deviation numbers also live in the status-bar
+        # chip; this panel keeps its own copy for readability inside Step 5)
+        metrics_frame = QFrame()
+        self.themed(metrics_frame, sk.panel_frame)
+        mf = QVBoxLayout(metrics_frame)
+        mf.setContentsMargins(8, 6, 8, 6)
+        self._metrics_lbl = QLabel("No candidate selected.")
+        self.themed(self._metrics_lbl, sk.muted_label)
+        mf.addWidget(self._metrics_lbl)
+        outer.addWidget(metrics_frame)
+
+        outer.addWidget(self._build_consolidate_section())
+
+        outer.addStretch()
+
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
+
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setFixedWidth(70)
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        nav_row.addWidget(self._back_btn)
+
+        self._accept_btn = QPushButton("Accept →")
+        self._accept_btn.setMinimumHeight(36)
+        self.bolded(self._accept_btn, 2)
+        self.themed(self._accept_btn, sk.confirm_button)
+        self._accept_btn.setEnabled(False)
+        self._accept_btn.clicked.connect(self._on_accept)
+        nav_row.addWidget(self._accept_btn)
+
+        outer.addLayout(nav_row)
+
+    def _build_consolidate_section(self) -> QWidget:
+        """A collapsed-by-default section — the Rules/Scan/Apply tool moved
+        verbatim from the old standalone Consolidate step."""
+        section = QWidget()
+        sv = QVBoxLayout(section)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(4)
+
+        self._consolidate_toggle = QToolButton()
+        self._consolidate_toggle.setCheckable(True)
+        self._consolidate_toggle.setChecked(False)
+        self._consolidate_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._consolidate_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._consolidate_toggle.setText("Consolidate curve runs")
+        self._consolidate_toggle.setStyleSheet(
+            "QToolButton { border: none; font-weight: 600; }")
+        self._consolidate_toggle.toggled.connect(self._on_consolidate_toggled)
+        sv.addWidget(self._consolidate_toggle)
+
+        self._consolidate_body = QWidget()
+        self._consolidate_body.setVisible(False)
+        body = QVBoxLayout(self._consolidate_body)
+        body.setContentsMargins(0, 4, 0, 0)
+        body.setSpacing(8)
 
         info = QLabel(
             "Replaces runs of consecutive curves that turn the same way — "
             "connected directly or by a short straight — with a single "
             "transition–circular–transition curve. Only runs whose merged "
-            "curve stays within the deviation limit are offered."
+            "curve stays within the deviation limit are offered. Runs are "
+            "already auto-merged during fitting where possible — use this "
+            "to push the thresholds further."
         )
         self.themed(info, sk.muted_label)
         info.setWordWrap(True)
-        v.addWidget(info)
+        body.addWidget(info)
 
         params = QGroupBox("Rules")
         pf = QFormLayout(params)
@@ -83,9 +180,7 @@ class Step6Consolidate(ThemedPanel, QWidget):
         self._straight_spin.setSuffix(" m")
         self._straight_spin.setToolTip(
             "Curves separated by a straight LONGER than this are left alone.\n"
-            "0 = only curves that touch directly (spiral → spiral).\n"
-            "Note: runs separated by less than ~60 m are already merged\n"
-            "automatically while the alignment is built."
+            "0 = only curves that touch directly (spiral → spiral)."
         )
         pf.addRow("Max intermediate straight:", self._straight_spin)
 
@@ -100,7 +195,7 @@ class Step6Consolidate(ThemedPanel, QWidget):
             "polyline, otherwise the run is rejected."
         )
         pf.addRow("Max deviation from OSM:", self._dev_spin)
-        v.addWidget(params)
+        body.addWidget(params)
 
         btns = QHBoxLayout()
         self._scan_btn = QPushButton("🔍 Scan")
@@ -111,22 +206,17 @@ class Step6Consolidate(ThemedPanel, QWidget):
         self._apply_btn.setEnabled(False)
         self._apply_btn.clicked.connect(self._on_apply)
         btns.addWidget(self._apply_btn)
-
-        self._undo_btn = QPushButton("↩ Undo")
-        self._undo_btn.setEnabled(False)
-        self._undo_btn.clicked.connect(self._on_undo)
-        btns.addWidget(self._undo_btn)
-        v.addLayout(btns)
+        body.addLayout(btns)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
         self._progress_bar.setTextVisible(True)
-        v.addWidget(self._progress_bar)
+        body.addWidget(self._progress_bar)
 
         self._status_lbl = QLabel("Press Scan to look for mergeable runs.")
         self.themed(self._status_lbl, sk.muted_label)
         self._status_lbl.setWordWrap(True)
-        v.addWidget(self._status_lbl)
+        body.addWidget(self._status_lbl)
 
         self._table = QTableWidget(0, len(COLS))
         self._table.setHorizontalHeaderLabels(COLS)
@@ -139,32 +229,73 @@ class Step6Consolidate(ThemedPanel, QWidget):
         hdr.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Stretch)
         self._table.verticalHeader().setDefaultSectionSize(28)
         self._table.setStyleSheet("font-size: 10px;")
+        self._table.setMaximumHeight(180)
         self._table.itemSelectionChanged.connect(self._on_row_selected)
-        v.addWidget(self._table, stretch=1)
+        body.addWidget(self._table)
 
-        nav = QHBoxLayout()
-        back = QPushButton("← Back")
-        back.setFixedWidth(70)
-        back.clicked.connect(self.back_requested.emit)
-        nav.addWidget(back)
-        self._next_btn = QPushButton("Next →")
-        self._next_btn.setMinimumHeight(34)
-        self.bolded(self._next_btn, 2)
-        self._next_btn.clicked.connect(self._on_next)
-        nav.addWidget(self._next_btn)
-        v.addLayout(nav)
+        sv.addWidget(self._consolidate_body)
+        return section
+
+    def _on_consolidate_toggled(self, on: bool):
+        self._consolidate_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self._consolidate_body.setVisible(on)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def prepare(self, pi_model):
-        """Bind the working PI model (App owns it; Refine edits the same one)."""
+    def prepare(self, candidate, pi_model, xy, chainages, settings: dict):
+        """Called by App when the user selects a candidate in Step 4."""
+        self._candidate = candidate
+        self._model = pi_model
+        self._working_elements = list(getattr(candidate, "elements", []) or [])
+        label = getattr(candidate, "label", "Unknown")
+        self._title_lbl.setText(f"Refine & Consolidate: {label}")
+        editable = pi_model is not None
+        self._algo_lbl.setText(
+            f"{label}" + ("" if editable else "  (read-only — no PI model)"))
+        self._accept_btn.setEnabled(len(self._working_elements) > 0)
+        self._refresh_metrics({
+            "max_deviation":        getattr(candidate, "max_deviation", 0.0),
+            "rmse":                 getattr(candidate, "rmse", 0.0),
+            "mean_deviation":       getattr(candidate, "mean_deviation", 0.0),
+            "max_heading_jump_deg": getattr(candidate, "max_heading_jump_deg", 0.0),
+        })
+
+        self._groups = []
+        self._table.setRowCount(0)
+        self._progress_bar.setVisible(False)
+        auto_merged = int(getattr(candidate, "auto_merged", 0) or 0)
+        if pi_model is None:
+            self._status_lbl.setText(
+                "This level has no editable PI model (Level 1 is the raw "
+                "polyline) — nothing to consolidate.")
+            self._scan_btn.setEnabled(False)
+            self._apply_btn.setEnabled(False)
+        else:
+            self._scan_btn.setEnabled(True)
+            self._status_lbl.setText(
+                (f"{auto_merged} run(s) were already auto-merged during "
+                 "fitting — Scan to look for more."
+                 if auto_merged > 0 else
+                 "Press Scan to look for mergeable runs.")
+            )
+
+    def set_elements(self, elements: list, metrics: dict | None = None):
+        """Called by App after every table-driven rebuild."""
+        self._working_elements = list(elements or [])
+        self._accept_btn.setEnabled(len(self._working_elements) > 0)
+        if metrics:
+            self._refresh_metrics(metrics)
+
+    def bind(self, pi_model):
+        """Rebind the working PI model without a full `prepare()` — used by
+        project load, where there is no `CandidateAlignment` to read a
+        label/deviation snapshot from. Also resets the Consolidate section's
+        transient scan state, matching `prepare()`'s behaviour there."""
         self._model = pi_model
         self._groups = []
-        self._undo_snapshot = None
-        self._undo_btn.setEnabled(False)
-        self._apply_btn.setEnabled(False)
         self._table.setRowCount(0)
         self._progress_bar.setVisible(False)
         if pi_model is None:
@@ -172,12 +303,48 @@ class Step6Consolidate(ThemedPanel, QWidget):
                 "This level has no editable PI model (Level 1 is the raw "
                 "polyline) — nothing to consolidate.")
             self._scan_btn.setEnabled(False)
+            self._apply_btn.setEnabled(False)
         else:
             self._scan_btn.setEnabled(True)
+            self._apply_btn.setEnabled(False)
             self._status_lbl.setText("Press Scan to look for mergeable runs.")
 
+    def reset(self):
+        """Called by App's Start Over."""
+        self._candidate = None
+        self._model = None
+        self._working_elements = []
+        self._groups = []
+        self._title_lbl.setText("Refine & Consolidate")
+        self._algo_lbl.setText("")
+        self._metrics_lbl.setText("No candidate selected.")
+        self._accept_btn.setEnabled(False)
+        self._table.setRowCount(0)
+        self._progress_bar.setVisible(False)
+        self._scan_btn.setEnabled(False)
+        self._apply_btn.setEnabled(False)
+        self._status_lbl.setText("Press Scan to look for mergeable runs.")
+
     # ------------------------------------------------------------------
-    # Scan
+    # Internal — metrics
+    # ------------------------------------------------------------------
+
+    def _refresh_metrics(self, metrics: dict):
+        n = len(self._working_elements)
+        self._metrics_lbl.setText(
+            f"Elements: {n}    "
+            f"Mean deviation: {metrics.get('mean_deviation', 0.0):.2f} m    "
+            f"Max deviation: {metrics.get('max_deviation', 0.0):.2f} m\n"
+            f"RMSE: {metrics.get('rmse', 0.0):.2f} m    "
+            f"C1 mismatch: {metrics.get('max_heading_jump_deg', 0.0):.3f}°"
+        )
+
+    def _on_accept(self):
+        if self._working_elements:
+            self.design_done.emit(list(self._working_elements))
+
+    # ------------------------------------------------------------------
+    # Consolidate — Scan
     # ------------------------------------------------------------------
 
     def _on_scan(self):
@@ -230,6 +397,7 @@ class Step6Consolidate(ThemedPanel, QWidget):
 
     def _populate(self):
         self._table.setRowCount(0)
+        from PySide6.QtGui import QColor
         grey = QColor(current_tokens()["disabledText"])
         for g in self._groups:
             row = self._table.rowCount()
@@ -273,7 +441,7 @@ class Step6Consolidate(ThemedPanel, QWidget):
         self.highlight_span.emit(ids)
 
     # ------------------------------------------------------------------
-    # Apply / Undo
+    # Consolidate — Apply (folded into the shared EditHistory)
     # ------------------------------------------------------------------
 
     def _selected_groups(self) -> list:
@@ -285,7 +453,6 @@ class Step6Consolidate(ThemedPanel, QWidget):
         return out
 
     def _on_apply(self):
-        from geometry.candidates import _light_copy
         from gui.worker import ConsolidationApplyWorker
         from gui.progress_util import ElapsedTimer
         if self._model is None or self._worker is not None:
@@ -294,11 +461,8 @@ class Step6Consolidate(ThemedPanel, QWidget):
         if not chosen:
             self._status_lbl.setText("No rows ticked.")
             return
-        # merge_pi_range (all apply_consolidation ever calls) never touches
-        # xy_ref/chainages_ref, so the same cheap _light_copy the scan's own
-        # trials use is a safe, much lighter undo snapshot than a full
-        # copy.deepcopy on a large alignment.
-        self._undo_snapshot = _light_copy(self._model)
+        if self.on_before_edit is not None:
+            self.on_before_edit(f"consolidate {len(chosen)} run(s)")
         self._apply_btn.setEnabled(False)
         self._scan_btn.setEnabled(False)
         self._progress_bar.setRange(0, len(chosen))
@@ -325,7 +489,10 @@ class Step6Consolidate(ThemedPanel, QWidget):
         self._scan_btn.setEnabled(True)
         for m in msgs:
             self.log_message.emit(f"Consolidate: {m}", "ok")
-        self._undo_btn.setEnabled(n > 0)
+        if n == 0 and self.on_edit_failed is not None:
+            # Nothing was actually applied — don't leave a do-nothing entry
+            # in the undo stack.
+            self.on_edit_failed()
         self._status_lbl.setText(
             f"Applied {n} of {n_chosen} run(s). Re-scan to look for more.")
         self.log_message.emit(
@@ -339,29 +506,7 @@ class Step6Consolidate(ThemedPanel, QWidget):
         self._worker = None
         self._progress_bar.setVisible(False)
         self._scan_btn.setEnabled(True)
-        self._undo_snapshot = None
+        if self.on_edit_failed is not None:
+            self.on_edit_failed()
         self._status_lbl.setText(f"⚠ Apply failed: {error}")
         self.log_message.emit(f"Consolidate apply failed: {error}", "error")
-
-    def _on_undo(self):
-        if self._undo_snapshot is None or self._model is None:
-            return
-        # Restore in place so App/table keep pointing at the same object
-        snap = self._undo_snapshot
-        self._model.V           = snap.V
-        self._model.idx         = snap.idx
-        self._model.pis         = snap.pis
-        self._model.elements    = snap.elements
-        self._model.tangent_stubs = snap.tangent_stubs
-        self._model.last_stats  = snap.last_stats
-        self._undo_snapshot = None
-        self._undo_btn.setEnabled(False)
-        self._table.setRowCount(0)
-        self._groups = []
-        self._status_lbl.setText("Undone. Press Scan to look again.")
-        self.log_message.emit("Consolidate: undone.", "info")
-        self.model_changed.emit()
-
-    def _on_next(self):
-        els = self._model.elements if self._model is not None else []
-        self.consolidation_done.emit(list(els))

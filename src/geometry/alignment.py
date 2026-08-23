@@ -965,16 +965,18 @@ def _sample_spiral_heading(
     n_int = max(50, min(200, int(length / max(interval * 0.1, 0.2))))
     ds    = length / n_int
 
-    pts_raw: list[tuple[float, float]] = [tuple(start)]
-    x, y = float(start[0]), float(start[1])
-
-    for i in range(1, n_int + 1):
-        s_mid    = (i - 0.5) * ds
-        theta_m  = theta_0 + sign * (k_s * s_mid +
-                                     (k_e - k_s) * s_mid ** 2 / (2.0 * length))
-        x += ds * math.cos(theta_m)
-        y += ds * math.sin(theta_m)
-        pts_raw.append((x, y))
+    # Vectorized midpoint rule. np.add.accumulate sums strictly left-to-
+    # right, so seeding it with the start coordinate reproduces the old
+    # per-step `x += ds*cos(θ)` loop's accumulation order exactly (any
+    # residual difference is a cos/sin ULP, ~1e-13 m — display-level only).
+    s_mid   = (np.arange(1, n_int + 1, dtype=float) - 0.5) * ds
+    theta_m = theta_0 + sign * (k_s * s_mid +
+                                (k_e - k_s) * s_mid ** 2 / (2.0 * length))
+    xs = np.add.accumulate(
+        np.concatenate(([float(start[0])], ds * np.cos(theta_m))))
+    ys = np.add.accumulate(
+        np.concatenate(([float(start[1])], ds * np.sin(theta_m))))
+    pts_raw: list[tuple[float, float]] = list(zip(xs.tolist(), ys.tolist()))
 
     # Snap last point to the declared endpoint (absorbs integration drift)
     pts_raw[-1] = (float(end[0]), float(end[1]))

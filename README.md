@@ -35,12 +35,12 @@ No Python installation required.
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
 - **Clothoid transition curves** — entry/exit spirals at every arc, exact Fresnel-based tangent placement
 - **Interactive element table** — every Line/Arc/Spiral with parameters; edit arc radius or spiral length with live map update, omit/restore/delete PIs, split a Line by inserting a new PI, trim the alignment's start/end, merge short straights between curves into prolonged symmetric spirals, or replace a whole PI range with **one** curve — both boundary tangents kept fixed, always exactly Spiral–Arc–Spiral (or a plain Arc), for any turn including a reflex/major arc past 180°. A total turn within ~2° of exactly 180° (geometrically singular for any single circular PI) automatically falls back to one auxiliary PI — two arcs sharing the same fitted radius, joined with a zero-length, fully C1-continuous connector — instead of refusing.
-- **Curve consolidation** — scan for runs of same-direction curves joined by short straights and replace each with a single transition–circular–transition curve, within a deviation tolerance you choose; handles high-angle and near-180° runs (via the same auxiliary-PI fallback) the same way. Scan and Apply run in the background with a progress bar and a time-remaining estimate, so the UI stays responsive on long alignments.
+- **Curve consolidation** — same-direction curve runs are auto-merged during fitting where possible; a collapsible tool in Refine & Consolidate scans for runs joined by short straights and replaces each with a single transition–circular–transition curve, within a deviation tolerance you choose, for the wider cases the automatic pass didn't cover. Handles high-angle and near-180° runs (via the same auxiliary-PI fallback) the same way. Scan and Apply run in the background with a progress bar and a time-remaining estimate, so the UI stays responsive on long alignments.
 - **Toolbar** — a compact, two-row (icon-above-text) bar: the app name, icon-only New/Open/Save, ↩ Undo / ↪ Redo (doubling as step navigation — see below), ↺ Restore default, the most-used Refine actions, and the map's tile-provider/railway-overlay controls, all in one place. Minimize it from View ▸ Show toolbar; several of its actions are mirrored in a new **Edit** menu too.
 - **Undo/redo** — every alignment edit (merge, radius/spiral, omit, split, delete, trim, PI drag/restore) can be undone with the toolbar's ↩ Undo button (or Ctrl+Z) and redone with ↪ Redo (Ctrl+Y); Undo only falls through to step navigation once there's nothing left to undo
 - **Edit modes** — default mode keeps the tangent polygon locked (radius, spiral, merge, omit, split and delete all still work); toggle **✏ Edit mode** to unlock individual PIs for dragging. Each PI starts locked (🔒) and bounces on hover as an "unlock me" cue; click its lock badge to unlock (🔓) and drag it, then use the small restore badge (↺) to snap it back to the fitted position, or re-lock when done.
-- **Restore default** — one click (↺ in the toolbar) discards every edit made in Refine/Consolidate and returns to the freshly-fitted alignment, clearing the undo history
-- **Original-alignment appearance** — the toolbar's "Original…" popover controls the OSM reference overlay's visibility, opacity and colour, applied instantly and remembered across sessions
+- **Restore default** — one click (↺ in the toolbar) discards every edit made in Refine & Consolidate and returns to the freshly-fitted alignment, clearing the undo history
+- **Original-alignment appearance** — the toolbar's "Original…" popover controls the OSM reference overlay's visibility, opacity and colour, applied instantly and remembered across sessions. It defaults to a muted grey dashed line at low opacity so the constructed alignment's colour-coded elements (blue Line / red Arc / green Spiral) stay the visual focus; a bottom-left map legend explains the colours (View ▸ Show map legend)
 - **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
 - **Project files (`.coypuf`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
 - **PI display** — Points of Intersection as markers (lockable/draggable in Edit mode), virtual tangent extensions dashed light-grey
@@ -62,32 +62,34 @@ No Python installation required.
 │ File  Edit  View  Settings  Help                                     │
 ├──────────────────────────────────────────────────────────────────────┤
 │COYPU │ ↩  ↪  │New│Open│Save│ 🗺  ⤺  ↩  ↺ │ ✏  │ 🎨  │Map:[OSM ▾]🚂│
-│Feeder│Undo Redo Step 5·Refine  Show Merge Undo Rst  Edit Orig.       │
-├───────────────────┬────────────────────────────────────────┬─────────┤
-│ [1] Find Railway  │        Interactive Leaflet Map         │  Step   │
-│ [2] Select        │                                        │  panel  │
-│ [3] Configure     │                                        │ 340 px  │
-│ [4] Candidates    │                                        │         │
-│ [5] Refine        ├──────────────┬─────────────────────────┤         │
-│ [6] Consolidate   │   Log        │  Element table:         │         │
-│ [7] Stations      │  (timestamped│  ID · type · station ·  │         │
-│ [8] Cross-section │   activity + │  length · radius · A ·  │         │
-│ [9] Export        │   step tips) │  defl · spiral L · ⋯    │         │
-│   200 px sidebar  │              │                         │         │
-└───────────────────┴──────────────┴─────────────────────────┴─────────┘
+│Feeder│Undo Redo Step 5·Refine&Consolidate  Show Merge Undo Rst Edit  │
+├────────────────────────┬───────────────────────────────────┬─────────┤
+│ [1] Find Railway       │        Interactive Leaflet Map    │  Step   │
+│ [2] Select             │                                   │  panel  │
+│ [3] Configure          │                                   │ 340 px  │
+│ [4] Candidates         │                                   │         │
+│ [5] Refine&Consolidate ├──────────────┬────────────────────┤         │
+│ [6] Stations           │   Log        │  Element table:    │         │
+│ [7] Cross-section      │  (timestamped│  ID · type · sta · │         │
+│ [8] Export             │   activity + │  length · radius · │         │
+│                        │   step tips) │  A · defl · SL · ⋯ │         │
+│   200 px sidebar       │              │                    │         │
+└────────────────────────┴──────────────┴────────────────────┴─────────┘
 ```
 
 The toolbar is a single compact, two-row (icon-above-text) bar: the app name, then step navigation, the File actions (icon-only — New/Open/Save are self-explanatory), the alignment's most-used edit actions, and — folded in from what used to be a separate row above the map — the tile-provider selector and railway-overlay checkbox. It's enabled only where the current selection supports it, and can be hidden entirely from **View ▸ Show toolbar** (the preference persists across restarts). A new **Edit** menu mirrors its domain-specific actions (Show alignment, Merge selection, Undo merge, Restore default, Edit mode, Original…) using the exact same actions, so their enabled/checked state always matches the toolbar.
 
-**↩ Undo / ↪ Redo** are dual-purpose: inside Refine or Consolidate they first drain the undo/redo history (Ctrl+Z / Ctrl+Y both work), so repeatedly pressing ↩ Undo walks each alignment edit backwards one at a time before falling through to ordinary step navigation (matching what the current step's own Back button and the sidebar's suggested-next step would do). Their tooltip always says which it will do next ("Undo: merge PIs 4–7" vs "Go to the previous step").
+**↩ Undo / ↪ Redo** are dual-purpose: inside Refine & Consolidate they first drain the undo/redo history (Ctrl+Z / Ctrl+Y both work) — including a Consolidate Apply, which lands in the same history as every other edit — so repeatedly pressing ↩ Undo walks each alignment edit backwards one at a time before falling through to ordinary step navigation (matching what the current step's own Back button and the sidebar's suggested-next step would do). Their tooltip always says which it will do next ("Undo: merge PIs 4–7" vs "Go to the previous step").
 
 Editing actions: **🗺 Show alignment** re-draws the edited alignment and PI overlay; **⤺ Merge selection** replaces the selected PI range with one curve (see Step 5 below); **↩ Undo merge** reverts the spiral-merge feature for the selected curve; **↺ Restore default** discards every edit and returns to the freshly-fitted alignment (with a confirmation, since it also clears the undo history); **✏ Edit mode** enables per-PI lock/unlock dragging on the map (all other edits work in both modes — see Step 5 below); **🎨 Original…** opens a small popover to control the OSM reference overlay's visibility, opacity and colour. Toggling **✏ Edit mode**, and hovering/clicking a checkable action, gives it a distinct amber glow so its on-state reads at a glance.
+
+A **deviation-metrics chip** in the status bar (Δmean / RMSE / Δmax / C1 / element count) stays visible from Refine & Consolidate through Export — toggle it from View ▸ Show deviation metrics.
 
 ---
 
 ## Working with projects
 
-The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine* or *Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically).
+The eight steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine & Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically).
 
 Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypuf` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
 
@@ -166,7 +168,7 @@ Each result card shows the element count, maximum deviation, RMSE, and the worst
 
 ---
 
-### Step 5 — Refine
+### Step 5 — Refine & Consolidate
 
 The full **element table** appears under the map: every Line, Arc and Spiral with its ID, station [km], length, radius, clothoid A and deflection.
 
@@ -177,29 +179,25 @@ The full **element table** appears under the map: every Line, Arc and Spiral wit
 - **Merge spirals ↔** appears on short straights (< 30 m) sandwiched between two transition curves: the straight is removed by prolonging the adjacent spirals, and the spirals on the far side of each circular curve prolong identically so both curves stay **symmetrical**. *Undo merge* restores the previous state.
 - **Merge PI range → single curve** replaces every PI between the two selected tangents with **one** curve: select the first and last tangent (Ctrl+click works directly on the map) and press the button. Both boundary tangents are kept fixed — the new PI sits at their intersection — and the result is always exactly one Spiral–Arc–Spiral (or a plain Arc), never a chain: for turns past 180° the arc becomes a reflex/major arc, its radius fitted to the OSM points of the whole range. A total turn within ~2° of exactly 180° is geometrically singular for a *single* PI (the boundary tangents are near-parallel and never meet at a finite point) — instead of refusing, this automatically falls back to **one auxiliary PI**: two arcs sharing the same fitted radius, meeting at a zero-length, fully C1-continuous connector, so the range still reads as one smooth curve. In the rarer case where the total turn is genuinely ambiguous (a single PI's own reading sits within a few degrees of ±180°), you're asked which interpretation you meant, each with its resulting deviation; the common case never asks.
 - The map shows the **PIs** as markers and the **virtual tangent extensions** toward each PI as dashed light-grey lines. Click a table row to highlight that element, or click an element on the map to select its row (Ctrl+click multi-selects); hover an element for 3 s to see its ID and deviation statistics.
-- **✏ Edit mode** lets you drag PIs directly on the map instead. Every PI starts **locked** (🔒) for safety; hovering one makes it bounce to signal it's interactive, and clicking its lock badge unlocks it (🔓) so you can drag it — the neighbouring curves rebuild live as you drop it. While unlocked, a small **↺ restore** badge appears next to it to snap that one PI back to its fitted-alignment position; click the badge again to re-lock. Leaving and re-entering Edit mode re-locks everything.
+- **✏ Edit mode** lets you drag PIs directly on the map instead. Every PI starts **locked** (🔒) for safety; hovering one makes it bounce to signal it's interactive, and clicking its lock badge unlocks it (🔓) so you can drag it — with **live preview** (View ▸ Live PI-drag preview, on by default) the neighbouring curves rebuild continuously *while* you drag, not just when you drop it; the whole gesture is one undo step either way. While unlocked, a small **↺ restore** badge appears next to it to snap that one PI back to its fitted-alignment position; click the badge again to re-lock. Leaving and re-entering Edit mode re-locks everything.
 - Every edit here (including a PI drag/restore) can be undone with the toolbar's ↩ Undo (or Ctrl+Z) and redone with ↪ Redo (Ctrl+Y); **↺ Restore default** discards all of them at once and returns to the freshly-fitted alignment.
 
-Click **Accept →** when the geometry is final — though you can return here and keep editing at any later point.
-
----
-
-### Step 6 — Consolidate
-
-Level 2/3 sometimes split one physical curve into a run of consecutive curves. This step replaces such a run with a single transition–circular–transition curve.
+**Consolidate curve runs** (collapsed by default — click to expand): Level 2/3 sometimes split one physical curve into a run of consecutive curves. Same-direction runs joined by short straights are already auto-merged during fitting (Step 4); this tool exists for the wider cases the automatic pass didn't cover.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | Max intermediate straight | 30 m | Curves separated by a longer straight are left alone (0 = only curves that touch directly) |
 | Max deviation from OSM | 2.0 m | The merged curve must stay within this of the OSM polyline, otherwise the run is rejected |
 
-**🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — or **↩ Undo** to restore. Selecting a row highlights that run on the map. Both Scan and Apply run in the background with a progress bar and a "~Xs left" estimate, so the window stays responsive on a long alignment with many candidate runs.
+**🔍 Scan** lists every run of same-direction curves that matches the rules: `PIs | Curves | R before → after | Max dev | Status`. Runs within tolerance are ticked; rejected runs are greyed **with the reason shown** rather than hidden. Untick anything you want to keep, then **✅ Apply selected** — this lands in the same undo/redo history as every other edit here, so ↩ Undo reverts it like any other change. Selecting a row highlights that run on the map. Both Scan and Apply run in the background with a progress bar and a "~Xs left" estimate, so the window stays responsive on a long alignment with many candidate runs.
 
-> Runs separated by less than ~60 m are already merged automatically while the alignment is built; this step exists for the wider cases you want to control yourself. Long runs (even past 180°, and the same auxiliary-PI fallback right at 180°) are handled the same way as in Refine's Merge PI range — one curve (or one auxiliary-PI pair), radius fitted from the OSM points, reflex arc if the total turn needs it.
+> Runs separated by less than ~60 m are already merged automatically while the alignment is built; the Consolidate tool exists for the wider cases you want to control yourself. Long runs (even past 180°, and the same auxiliary-PI fallback right at 180°) are handled the same way as Merge PI range above — one curve (or one auxiliary-PI pair), radius fitted from the OSM points, reflex arc if the total turn needs it.
+
+Click **Accept →** when the geometry is final — though you can return here and keep editing at any later point.
 
 ---
 
-### Step 7 — Stations
+### Step 6 — Stations
 
 Build the station/stop list whose chainages are measured along the fitted alignment (identical to the LandXML stationing):
 
@@ -207,7 +205,7 @@ Build the station/stop list whose chainages are measured along the fitted alignm
 - **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
 - **＋ Add row** — manual entry; edit the km value directly in the table.
 
-Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 9 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
+Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 8 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
 
 ```csv
 Station,Dwell Time,Name
@@ -217,7 +215,7 @@ Station,Dwell Time,Name
 
 ---
 
-### Step 8 — Cross-Section
+### Step 7 — Cross-Section
 
 The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export.
 
@@ -225,7 +223,7 @@ Click **Next → Export** to proceed.
 
 ---
 
-### Step 9 — Export
+### Step 8 — Export
 
 1. Choose an output CRS from the preset list or enter a custom EPSG code
 2. Click **Browse…** and choose an output `.xml` file path
@@ -382,11 +380,11 @@ COYPU-Feeder/
     │       ├── step2_section.py  # Track selection
     │       ├── step3_configure.py# Geometry parameters
     │       ├── step4_candidates.py  # Level 1/2/3 comparison
-    │       ├── step5_refine.py   # Interactive editing (with element table)
-│       ├── step6_consolidate.py # Merge same-direction curve runs
-    │       ├── step6_stations.py # Stations & stops → chainage CSV (step 7)
-    │       ├── step6_crosssection.py  # Deviation profile (step 8)
-    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 9)
+    │       ├── step5_design.py   # Refine & Consolidate: editing (element
+    │       │                     # table) + curve-run consolidation (step 5)
+    │       ├── step6_stations.py # Stations & stops → chainage CSV (step 6)
+    │       ├── step6_crosssection.py  # Deviation profile (step 7)
+    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 8)
     ├── osm/
     │   ├── query.py              # Overpass API queries (incl. station detection)
     │   └── parser.py             # OSM way → Track objects

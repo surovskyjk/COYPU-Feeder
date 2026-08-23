@@ -13,6 +13,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QDoubleSpinBox, QScrollArea, QFormLayout, QGroupBox, QComboBox,
+    QCheckBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
@@ -104,6 +105,19 @@ class Step3Configure(QWidget):
         )
         gf.addRow("Spiral length (Level 3):", self._spiral_length_spin)
 
+        self._auto_consolidate_chk = QCheckBox("Auto-consolidate curve runs (recommended)")
+        self._auto_consolidate_chk.setChecked(True)
+        self._auto_consolidate_chk.setToolTip(
+            "Level 2/3 fitting often splits one physical curve into several\n"
+            "same-direction PIs (Douglas-Peucker noise). When checked, runs\n"
+            "of same-direction curves joined by short straights are merged\n"
+            "into a single curve automatically during fitting, bounded by\n"
+            "the Max deviation above — Step 5's 'Consolidate curve runs'\n"
+            "tool is still there afterward for wider cases you want to\n"
+            "control by hand."
+        )
+        gf.addRow("", self._auto_consolidate_chk)
+
         v.addWidget(geo_group)
 
         # ── Export Settings ───────────────────────────────────────────
@@ -184,6 +198,7 @@ class Step3Configure(QWidget):
             "max_deviation":   self._max_dev_spin.value(),
             "min_radius":      self._min_radius_spin.value(),
             "spiral_length":   self._spiral_length_spin.value(),
+            "auto_consolidate": self._auto_consolidate_chk.isChecked(),
             # Defaults for keys still referenced by legacy code paths
             # (old algorithms remain callable from CandidateGenerator).
             "smooth_window":      21,

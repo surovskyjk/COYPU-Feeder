@@ -202,7 +202,11 @@ class CandidateCard(ThemedPanel, QGroupBox):
         sk.set_role(self._dev_lbl, "value")
         self._rmse_lbl.setText(f"{candidate.rmse:.2f} m")
         sk.set_role(self._rmse_lbl, "value")
-        self._n_lbl.setText(str(candidate.n_elements))
+        auto_merged = int(getattr(candidate, "auto_merged", 0) or 0)
+        n_text = str(candidate.n_elements)
+        if auto_merged > 0:
+            n_text += f"  ({auto_merged} run{'s' if auto_merged != 1 else ''} auto-merged)"
+        self._n_lbl.setText(n_text)
         sk.set_role(self._n_lbl, "value")
         # Heading-jump (C1 sanity): green if < 0.1°, amber if < 1°, red otherwise
         jump = float(getattr(candidate, "max_heading_jump_deg", 0.0) or 0.0)

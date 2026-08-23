@@ -225,21 +225,32 @@ class CandidateWorker(QThread):
                         geo_xy      = reconstruct_alignment_projected(
                             c.elements, sample_interval=5.0)
                         c.geo_wgs84 = projected_to_wgs84(geo_xy, work_epsg)
-                        # Per-element segments (for tooltip-rendering)
+                        # Per-element segments (for tooltip-rendering).
+                        # Length-adaptive sampling + ONE batched projection
+                        # for all samples (a per-element call ran the
+                        # transformer 1000+ times on long corridors).
                         try:
+                            total_len = sum(
+                                float(e.get("length", 0.0)) for e in c.elements)
+                            interval = min(20.0, max(2.0, total_len / 4000.0))
                             per_el = reconstruct_alignment_per_element(
-                                c.elements, sample_interval=2.0)
-                            seg_payload = []
+                                c.elements, sample_interval=interval)
+                            flat: list = []
+                            spans: list = []
                             for el, pts in per_el:
-                                if not pts:
+                                spans.append((el, len(flat), len(pts)))
+                                flat.extend(pts)
+                            wgs_all = (projected_to_wgs84(flat, work_epsg)
+                                       if flat else [])
+                            seg_payload = []
+                            for el, off, n in spans:
+                                if not n:
                                     continue
-                                wgs = projected_to_wgs84(pts, work_epsg)
-                                # Strip non-JSON-safe values from element dict
-                                params = _serialise_element_params(el)
                                 seg_payload.append({
                                     "type":   el.get("type", "Line"),
-                                    "params": params,
-                                    "points": [list(p) for p in wgs],
+                                    "params": _serialise_element_params(el),
+                                    "points": [list(p)
+                                               for p in wgs_all[off:off + n]],
                                 })
                             c.geo_segments_wgs84 = seg_payload
                         except Exception:
@@ -425,19 +436,29 @@ class FinalExportWorker(QThread):
             geo_latlon = projected_to_wgs84(geo_xy_utm, work_epsg) if geo_xy_utm else []
             geo_wgs84_tracks.append([[lat, lon] for lat, lon in geo_latlon])
 
-            # Per-element segments (for tooltip-rich display after export)
+            # Per-element segments (for tooltip-rich display after export).
+            # Length-adaptive sampling + one batched projection call.
             if h_elements_utm:
                 try:
+                    total_len = sum(
+                        float(e.get("length", 0.0)) for e in h_elements_utm)
+                    interval = min(20.0, max(2.0, total_len / 4000.0))
                     per_el = reconstruct_alignment_per_element(
-                        h_elements_utm, sample_interval=2.0)
+                        h_elements_utm, sample_interval=interval)
+                    flat = []
+                    spans = []
                     for el, pts in per_el:
-                        if not pts:
+                        spans.append((el, len(flat), len(pts)))
+                        flat.extend(pts)
+                    wgs_all = (projected_to_wgs84(flat, work_epsg)
+                               if flat else [])
+                    for el, off, n in spans:
+                        if not n:
                             continue
-                        wgs = projected_to_wgs84(pts, work_epsg)
                         per_element_segments.append({
                             "type":   el.get("type", "Line"),
                             "params": _serialise_element_params(el),
-                            "points": [list(p) for p in wgs],
+                            "points": [list(p) for p in wgs_all[off:off + n]],
                         })
                 except Exception:
                     pass

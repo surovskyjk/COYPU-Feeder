@@ -146,6 +146,8 @@ class MapBridge(QObject):
     split_point_clicked = Signal(float, float)   # lat, lon (Refine split-pick mode)
     pi_dragged         = Signal(int, float, float)  # pi index, lat, lon (edit mode)
     pi_restore_requested = Signal(int)           # pi index (edit-mode restore badge)
+    pi_drag_start      = Signal(int)                # pi index — drag gesture began
+    pi_drag_preview     = Signal(int, float, float)  # pi index, lat, lon — live, throttled
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -175,6 +177,14 @@ class MapBridge(QObject):
     def on_pi_restore_requested(self, pi_index):
         self.pi_restore_requested.emit(pi_index)
 
+    @Slot(int)
+    def on_pi_drag_start(self, pi_index):
+        self.pi_drag_start.emit(pi_index)
+
+    @Slot(int, float, float)
+    def on_pi_drag_preview(self, pi_index, lat, lon):
+        self.pi_drag_preview.emit(pi_index, lat, lon)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
@@ -188,6 +198,8 @@ class MapWidget(QWidget):
     split_point_clicked = Signal(float, float)    # lat, lon (Refine split-pick mode)
     pi_dragged          = Signal(int, float, float)  # pi index, lat, lon (edit mode)
     pi_restore_requested = Signal(int)            # pi index (edit-mode restore badge)
+    pi_drag_start       = Signal(int)                # pi index — drag gesture began
+    pi_drag_preview     = Signal(int, float, float)  # pi index, lat, lon — live, throttled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -196,6 +208,9 @@ class MapWidget(QWidget):
         self._tokens = current_tokens()
         self._map_ready  = False
         self._js_queue: deque[str] = deque()
+        self._last_highlight_ids: list | None = None
+        self._js_aln_count: int | None = None
+        self._legend_visible = True
         self._build()
         # Queued, so the page has its palette before the first draw call.
         self._push_page_theme()
@@ -217,6 +232,11 @@ class MapWidget(QWidget):
         self._provider_combo.setCurrentIndex(_DEFAULT_PROVIDER)
         self._provider_combo.setToolTip("Choose base map tile provider")
         self._provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        # `activated` only fires for USER selections (not programmatic
+        # setCurrentIndex) — once the user picks a provider, theme switches
+        # stop overriding their choice (see set_theme).
+        self._provider_combo.activated.connect(self._on_provider_activated)
+        self._user_provider_choice = False
         self._provider_combo.setFixedWidth(160)
 
         self._rail_chk = QCheckBox("🚂 Railway overlay")
@@ -263,6 +283,8 @@ class MapWidget(QWidget):
         self._bridge.split_point_clicked.connect(self.split_point_clicked)
         self._bridge.pi_dragged.connect(self.pi_dragged)
         self._bridge.pi_restore_requested.connect(self.pi_restore_requested)
+        self._bridge.pi_drag_start.connect(self.pi_drag_start)
+        self._bridge.pi_drag_preview.connect(self.pi_drag_preview)
 
         # Serve gui/static/ (which contains map.html) over a local HTTP
         # server. Using http://127.0.0.1 as origin removes ALL cross-origin
@@ -306,11 +328,33 @@ class MapWidget(QWidget):
             while self._js_queue:
                 self._view.page().runJavaScript(self._js_queue.popleft())
 
-    def _run_js(self, js: str):
+    def _run_js(self, js: str, callback=None):
         if self._map_ready:
-            self._view.page().runJavaScript(js)
+            if callback is not None:
+                self._view.page().runJavaScript(js, callback)
+            else:
+                self._view.page().runJavaScript(js)
         else:
+            # Queued calls never carry a callback through today (nothing
+            # currently needs a result from a call made before map-ready).
             self._js_queue.append(js)
+
+    # Payloads above this size are shipped as a JSON string + JSON.parse()
+    # instead of a JS array/object literal: Chromium tokenizes+parses a JS
+    # literal as source code (slow, ~1 MB on a long alignment edit), while
+    # JSON.parse on the same bytes is a dedicated fast path.
+    _JSON_PARSE_THRESHOLD = 50_000
+
+    def _run_js_call(self, fn_name: str, *args, callback=None):
+        """Call `fn_name(*args)`, encoding any large arg as JSON.parse(...)."""
+        parts = []
+        for a in args:
+            s = json.dumps(a)
+            if len(s) > self._JSON_PARSE_THRESHOLD:
+                parts.append(f"JSON.parse({json.dumps(s)})")
+            else:
+                parts.append(s)
+        self._run_js(f"{fn_name}({', '.join(parts)})", callback=callback)
 
     # ------------------------------------------------------------------
     # Tile provider helpers
@@ -335,6 +379,9 @@ class MapWidget(QWidget):
             f"setTileProvider({json.dumps(p['url'])}, {json.dumps(p['subs'])}, "
             f"{json.dumps(p['attr'])}, {p['maxZoom']})"
         )
+
+    def _on_provider_activated(self, idx: int):
+        self._user_provider_choice = True
 
     def _on_rail_overlay_toggled(self, checked: bool):
         self._run_js(f"setRailOverlay({'true' if checked else 'false'})")
@@ -364,7 +411,7 @@ class MapWidget(QWidget):
     def _push_page_theme(self):
         """Hand the page its colour variables and the element palette."""
         from gui.theme import current_tokens
-        from gui.palette import ELEMENT_COLORS, MAP_COLORS
+        from gui.palette import ELEMENT_COLORS, MAP_COLORS, LEGEND_ENTRIES
         t = getattr(self, "_tokens", None) or current_tokens()
         panel = "rgba(43,43,43,0.94)" if self._dark else "rgba(255,255,255,0.94)"
         theme = {
@@ -380,24 +427,36 @@ class MapWidget(QWidget):
         self._run_js(f"setElementColors({json.dumps(ELEMENT_COLORS)})")
         self._run_js(f"setMapColors({json.dumps(MAP_COLORS)})")
         self._run_js(f"setPageTheme({json.dumps(theme)})")
+        self._run_js(f"setLegend({json.dumps(LEGEND_ENTRIES)}, "
+                     f"{'true' if self._legend_visible else 'false'})")
+
+    def set_legend_visible(self, visible: bool):
+        self._legend_visible = bool(visible)
+        self._run_js(f"setLegend(null, {'true' if visible else 'false'})")
 
     def set_theme(self, dark: bool):
         self._dark = dark
-        # Auto-switch to a sensible provider for the new theme
+        # Auto-switch to a sensible provider for the new theme — but never
+        # override a provider the user picked by hand (that teardown/refetch
+        # of the basemap was also a visible flash on every theme change).
+        if self._user_provider_choice:
+            return
         target = "CARTO Dark Matter" if dark else "CARTO Voyager"
         for i, p in enumerate(TILE_PROVIDERS):
             if p["label"] == target:
-                self._provider_combo.setCurrentIndex(i)
+                if self._provider_combo.currentIndex() != i:
+                    self._provider_combo.setCurrentIndex(i)
                 break
 
-    def show_tracks(self, tracks):
+    def show_tracks(self, tracks, fit: bool = True):
+        """fit=False keeps the current zoom/pan (in-place track edits)."""
         payload = [
             {"nodes": [[n[0], n[1]] for n in t.nodes],
              "color": TRACK_COLORS[i % len(TRACK_COLORS)],
              "name":  t.name}
             for i, t in enumerate(tracks)
         ]
-        self._run_js(f"showTracks({json.dumps(payload)})")
+        self._run_js_call("showTracks", payload, fit)
 
     def highlight_track(self, idx: int):
         self._run_js(f"highlightTrack({idx})")
@@ -409,7 +468,7 @@ class MapWidget(QWidget):
         """Draw the raw OSM polyline as a dashed reference overlay (colour/
         opacity/visibility as last set by `set_osm_reference_style`)."""
         payload = [{"nodes": nodes} for nodes in alignments]
-        self._run_js(f"showOSMReference({json.dumps(payload)})")
+        self._run_js_call("showOSMReference", payload)
 
     def clear_osm_reference(self):
         self._run_js("clearOSMReference()")
@@ -426,7 +485,9 @@ class MapWidget(QWidget):
 
     def show_alignment(self, alignments: list):
         payload = [{"nodes": nodes} for nodes in alignments]
-        self._run_js(f"showAlignment({json.dumps(payload)})")
+        self._last_highlight_ids = None
+        self._js_aln_count = 0   # this path doesn't populate alignEntries
+        self._run_js_call("showAlignment", payload)
 
     def show_alignment_segmented(self, segments: list, fit_view: bool = True):
         """
@@ -445,8 +506,9 @@ class MapWidget(QWidget):
         Spiral=green) and binds a sticky tooltip listing the element's
         parameters.
         """
-        fit = "true" if fit_view else "false"
-        self._run_js(f"showAlignmentSegmented({json.dumps(segments)}, {fit})")
+        self._last_highlight_ids = None
+        self._js_aln_count = len(segments)
+        self._run_js_call("showAlignmentSegmented", segments, fit_view)
 
     def update_alignment_segmented(self, segments: list):
         """
@@ -455,12 +517,53 @@ class MapWidget(QWidget):
         edited span (falls back to a full redraw when nothing is shown yet).
         Keeps the user's current zoom/pan.
         """
-        self._run_js(f"updateAlignmentSegmented({json.dumps(segments)})")
+        self._last_highlight_ids = None
+        self._js_aln_count = len(segments)
+        self._run_js_call("updateAlignmentSegmented", segments)
+
+    def patch_alignment_segmented(self, start: int, removed: int,
+                                  new_segments: list, metas: list):
+        """
+        Span-local update after a `rebuild_pi_span` edit: replaces
+        `alignEntries[start : start+removed]` with `new_segments` (each a
+        full {type, params, points} dict) and retargets every OTHER kept
+        entry's tooltip/params from the parallel `metas` list (light
+        {type, params} dicts, no points — ids and stations shift after a
+        merge/omit even for elements whose geometry didn't move).
+
+        Returns False (doing nothing) when the entry count currently on the
+        page doesn't match what this splice expects — e.g. the map was
+        cleared/reloaded since the last full draw, or a previous patch
+        desynced — so the caller can fall back to a full redraw instead of
+        corrupting the page's layer bookkeeping.
+        """
+        old_count_expected = len(metas) - len(new_segments) + removed
+        if getattr(self, "_js_aln_count", None) != old_count_expected:
+            return False   # caller should fall back to a full redraw
+        self._last_highlight_ids = None
+        self._js_aln_count = len(metas)
+
+        def _on_patch_result(ok):
+            # The JS side can still refuse the patch (e.g. a degenerate
+            # near-zero-length element didn't get its own layer, so the
+            # page's actual entry count doesn't match what we assumed).
+            # Invalidate the counter so the NEXT edit's pre-check fails
+            # closed and falls back to a full redraw instead of silently
+            # compounding a desync.
+            if ok is False:
+                self._js_aln_count = None
+
+        self._run_js_call("patchAlignmentSegmented",
+                          start, removed, new_segments, metas,
+                          callback=_on_patch_result)
+        return True
 
     def fly_to_alignment(self):
         self._run_js("flyToAlignment()")
 
     def clear_alignment(self):
+        self._last_highlight_ids = None
+        self._js_aln_count = 0
         self._run_js("clearAlignment()")
 
     def request_bounds(self):
@@ -494,7 +597,32 @@ class MapWidget(QWidget):
         if js == getattr(self, "_last_pi_overlay", None):
             return
         self._last_pi_overlay = js
-        self._run_js(f"showPIOverlay({js})")
+        if len(js) > self._JSON_PARSE_THRESHOLD:
+            self._run_js(f"showPIOverlay(JSON.parse({json.dumps(js)}))")
+        else:
+            self._run_js(f"showPIOverlay({js})")
+
+    def move_pi_marker(self, pi_id: int, latlon: tuple[float, float]):
+        """
+        Move ONE PI marker in place instead of tearing down and recreating
+        every marker (the old `show_pi_overlay(_lastPIPayload)` full rebuild
+        also made the dragged marker itself visibly snap/recreate). Falls
+        back to a full `show_pi_overlay` call site-side when no payload is
+        cached yet (nothing to patch).
+        """
+        self._run_js_call("movePIMarker", pi_id, [float(latlon[0]), float(latlon[1])])
+
+    def update_pi_tangents(self, tangents: list):
+        """Rebuild only the dashed virtual-tangent stub polylines (few of
+        them per PI) without touching the PI markers themselves."""
+        self._run_js_call("updatePITangents", tangents)
+
+    def sync_pi_overlay_cache(self, payload: dict):
+        """Record `payload` as the currently-displayed PI overlay without a
+        JS round-trip — call after an incremental update (move_pi_marker +
+        update_pi_tangents) so a later full `show_pi_overlay` dedupe check
+        still compares against what's actually on the page."""
+        self._last_pi_overlay = json.dumps(payload)
 
     def clear_pi_overlay(self):
         self._last_pi_overlay = None
@@ -505,8 +633,16 @@ class MapWidget(QWidget):
         self._run_js(f"highlightElement({json.dumps(element_id)})")
 
     def highlight_elements(self, element_ids: list):
-        """Emphasize (glow) several alignment elements (table multiselect)."""
-        self._run_js(f"highlightElements({json.dumps(list(element_ids))})")
+        """Emphasize (glow) several alignment elements (table multiselect).
+
+        Consecutive identical requests are dropped Python-side (table
+        repopulates re-emit the same selection); the cache is invalidated
+        whenever the alignment layer set is rebuilt below."""
+        ids = list(element_ids)
+        if ids == self._last_highlight_ids:
+            return
+        self._last_highlight_ids = ids
+        self._run_js(f"highlightElements({json.dumps(ids)})")
 
     def emphasize_candidate(self, algo_id: str):
         """Thicken one Step-4 candidate polyline (empty string resets)."""
@@ -537,6 +673,12 @@ class MapWidget(QWidget):
         """
         self._run_js(f"setPIEditMode({'true' if on else 'false'})")
 
+    def set_live_drag_preview(self, on: bool):
+        """Enable/disable the throttled `pi_drag_preview` signal fired
+        while a PI marker is being dragged (Part I). Off = only `dragend`
+        updates anything, exactly as before this feature existed."""
+        self._run_js(f"setLiveDragPreview({'true' if on else 'false'})")
+
     def show_cross_section(self, left_pts: list, right_pts: list):
         """
         Draw colour-coded cross-section overlays.
@@ -546,10 +688,25 @@ class MapWidget(QWidget):
         left_pts / right_pts : list of [lat, lon, color_hex]
             One entry per sampled station; consecutive entries are connected
             by polyline segments coloured by the first entry's colour.
+
+        Very long corridors are decimated to a bounded vertex count before
+        shipping — colour-transition points are always kept so the coloured
+        runs stay visually exact.
         """
-        self._run_js(
-            f"showCrossSection({json.dumps(left_pts)}, {json.dumps(right_pts)})"
-        )
+        self._run_js_call("showCrossSection",
+                          self._decimate_cs(left_pts), self._decimate_cs(right_pts))
+
+    @staticmethod
+    def _decimate_cs(pts: list, cap: int = 2000) -> list:
+        if not pts or len(pts) <= cap:
+            return pts
+        stride = max(1, len(pts) // cap)
+        out = []
+        for i, p in enumerate(pts):
+            if (i % stride == 0 or i == len(pts) - 1
+                    or (i > 0 and p[2] != pts[i - 1][2])):
+                out.append(p)
+        return out
 
     def clear_cross_section(self):
         """Remove cross-section overlays."""

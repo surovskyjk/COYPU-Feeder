@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QGuiApplication, QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget,
@@ -19,6 +19,7 @@ from gui import icons
 from gui.palette import OSM_REF_DEFAULT
 from .map_widget import MapWidget
 from .element_table import ElementTableDock
+from .metrics_chip import MetricsChip
 from .edit_history import EditHistory
 from .log_panel import LogPanel
 from .dialogs import AboutDialog, SettingsDialog
@@ -27,15 +28,16 @@ from .steps.step1_find import Step1Find
 from .steps.step2_section import Step2Section
 from .steps.step3_configure import Step3Configure
 from .steps.step4_candidates import Step4Candidates
-from .steps.step5_refine        import Step5Refine
-from .steps.step6_consolidate   import Step6Consolidate
+from .steps.step5_design        import Step5Design
 from .steps.step6_stations      import Step6Stations
 from .steps.step6_crosssection  import Step6CrossSection
 from .steps.step7_export        import Step7Export
 
-# Stack indices — the UI numbers them 1-9
-S_FIND, S_SELECT, S_CONFIG, S_CANDIDATES, S_REFINE, \
-    S_CONSOLIDATE, S_STATIONS, S_CROSSSEC, S_EXPORT = range(9)
+# Stack indices — the UI numbers them 1-8. Steps 5 (Refine) and 6
+# (Consolidate) were merged into one "Refine & Design" workspace.
+S_FIND, S_SELECT, S_CONFIG, S_CANDIDATES, S_DESIGN, \
+    S_STATIONS, S_CROSSSEC, S_EXPORT = range(8)
+N_STEPS = 8
 
 # Maximum map-view span (km) allowed for "search in view"
 _MAX_VIEW_KM = 20.0
@@ -68,6 +70,17 @@ class App(QMainWindow):
         self._refine_baseline        = None   # PIAlignment | None
         self._elements: list        = []
         self._level: str            = ""
+        # Level 1 (raw OSM polyline) has no PI model to read live stats from
+        # — its metrics are computed once at candidate selection and cached
+        # here for the persistent metrics chip.
+        self._level1_metrics: dict | None = None
+        # Live PI-drag preview (Phase 8): dragstart pushes ONE history
+        # entry for the whole gesture; drag ticks move the model directly
+        # without re-pushing. _drag_history_pushed tracks whether dragend
+        # needs to push its own (live preview was off, or never started).
+        self._drag_history_pushed = False
+        self._pending_drag: tuple[int, float, float] | None = None
+        self._drag_preview_timer: QTimer | None = None
         self._stations: list        = []
         self._xy_list: list         = []
         self._chainages_list: list  = []
@@ -105,11 +118,14 @@ class App(QMainWindow):
             "font_pt":    int(s.value("font_pt", 9, int)),
             "show_log":   s.value("show_log", True, bool),
             "show_toolbar": s.value("show_toolbar", True, bool),
+            "show_metrics_chip": s.value("show_metrics_chip", True, bool),
+            "show_map_legend": s.value("show_map_legend", True, bool),
+            "live_drag_preview": s.value("live_drag_preview", True, bool),
             "confirm_start_over": s.value("confirm_start_over", True, bool),
             # Original-alignment (OSM reference) appearance — Part E
             "osm_ref_visible": s.value("osm_ref_visible", True, bool),
             "osm_ref_color":   s.value("osm_ref_color", OSM_REF_DEFAULT, str),
-            "osm_ref_opacity": float(s.value("osm_ref_opacity", 0.85, float)),
+            "osm_ref_opacity": float(s.value("osm_ref_opacity", 0.45, float)),
         }
 
     def _save_prefs(self):
@@ -117,6 +133,18 @@ class App(QMainWindow):
         for k, val in self._prefs.items():
             s.setValue(k, val)
         s.sync()
+
+    def _save_prefs_debounced(self):
+        """Coalesce rapid pref writes (opacity slider drags fired a
+        synchronous QSettings disk sync per tick) into one save."""
+        t = getattr(self, "_prefs_save_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(500)
+            t.timeout.connect(self._save_prefs)
+            self._prefs_save_timer = t
+        t.start()
 
     def _apply_prefs(self):
         from gui.theme import apply_theme_mode, apply_font_size
@@ -131,6 +159,8 @@ class App(QMainWindow):
         self.map_widget.set_osm_reference_style(
             self._prefs["osm_ref_visible"], self._prefs["osm_ref_color"],
             self._prefs["osm_ref_opacity"])
+        self.map_widget.set_legend_visible(self._prefs["show_map_legend"])
+        self.map_widget.set_live_drag_preview(self._prefs["live_drag_preview"])
 
     # ------------------------------------------------------------------
     # Layout
@@ -179,6 +209,29 @@ class App(QMainWindow):
         self._act_show_log.setChecked(self._prefs["show_log"])
         self._act_show_log.toggled.connect(self._on_toggle_log)
         view_menu.addAction(self._act_show_log)
+
+        self._metrics_chip = MetricsChip()
+        self.statusBar().addPermanentWidget(self._metrics_chip)
+        self._act_show_metrics = QAction(
+            "Show deviation metrics", self, checkable=True)
+        self._act_show_metrics.setChecked(self._prefs["show_metrics_chip"])
+        self._act_show_metrics.toggled.connect(self._on_toggle_metrics_chip)
+        view_menu.addAction(self._act_show_metrics)
+
+        self._act_show_legend = QAction("Show map legend", self, checkable=True)
+        self._act_show_legend.setChecked(self._prefs["show_map_legend"])
+        self._act_show_legend.toggled.connect(self._on_toggle_map_legend)
+        view_menu.addAction(self._act_show_legend)
+
+        self._act_live_drag_preview = QAction(
+            "Live PI-drag preview", self, checkable=True)
+        self._act_live_drag_preview.setChecked(self._prefs["live_drag_preview"])
+        self._act_live_drag_preview.setToolTip(
+            "Update the alignment continuously while dragging a PI, instead "
+            "of only when you release it.")
+        self._act_live_drag_preview.toggled.connect(self._on_toggle_live_drag_preview)
+        view_menu.addAction(self._act_live_drag_preview)
+
         view_menu.addSeparator()
         reset_act = QAction("Reset panel layout", self)
         reset_act.triggered.connect(self._reset_layout)
@@ -346,9 +399,8 @@ class App(QMainWindow):
             S_SELECT:      lambda: self._goto_step(S_FIND),
             S_CONFIG:      lambda: self._goto_step(S_SELECT),
             S_CANDIDATES:  self._on_candidates_back,
-            S_REFINE:      self._on_refine_back,
-            S_CONSOLIDATE: lambda: self._goto_step(S_REFINE),
-            S_STATIONS:    lambda: self._goto_step(S_CONSOLIDATE),
+            S_DESIGN:      self._on_refine_back,
+            S_STATIONS:    lambda: self._goto_step(S_DESIGN),
             S_CROSSSEC:    lambda: self._goto_step(S_STATIONS),
             S_EXPORT:      lambda: self._goto_step(S_CROSSSEC),
         }
@@ -438,7 +490,7 @@ class App(QMainWindow):
         def apply_style():
             self._prefs["osm_ref_visible"] = chk.isChecked()
             self._prefs["osm_ref_opacity"] = slider.value() / 100.0
-            self._save_prefs()
+            self._save_prefs_debounced()
             self.map_widget.set_osm_reference_style(
                 self._prefs["osm_ref_visible"], self._prefs["osm_ref_color"],
                 self._prefs["osm_ref_opacity"])
@@ -500,26 +552,99 @@ class App(QMainWindow):
 
     def _on_edit_mode_toggled(self, on: bool):
         self.map_widget.set_pi_edit_mode(on)
+        if not on:
+            # Defensive: leaving edit mode mid-drag (shouldn't normally
+            # happen — the marker holds the mouse — but never leave a
+            # dangling history push a dragend will never arrive to close).
+            self._drag_history_pushed = False
+            self._pending_drag = None
         self.log_panel.log(
             "Edit mode ON — drag PI markers on the map to move them."
             if on else "Edit mode off — PI markers are locked again.",
             "info")
 
     def _on_pi_dragged(self, pi_index: int, lat: float, lon: float):
-        """A PI marker was dragged to (lat, lon) in edit mode."""
+        """A PI marker was dragged to (lat, lon) — the drag-END position.
+
+        If live-drag preview ran during the gesture, `_on_pi_drag_start`
+        already pushed the ONE history entry for this whole drag and
+        `_apply_pending_drag` already moved the model repeatedly (no
+        further history pushes) — this call just finalizes with the exact
+        release position and performs the full refresh (element table,
+        metrics chip, staleness) those cheap live ticks deliberately skip.
+        """
         from geometry.candidates import move_pi
         from geometry.projection import wgs84_to_projected
         if self._pi_model is None:
             return
+        # A pending preview tick for THIS drag may still be queued — apply
+        # it first so it can't fire after we've already finalized below.
+        if self._pending_drag is not None and self._pending_drag[0] == pi_index:
+            self._pending_drag = None
+        live_preview_ran = self._drag_history_pushed
+        self._drag_history_pushed = False
+        if not live_preview_ran:
+            self._history_push(f"move PI {pi_index}")
         xy = wgs84_to_projected([(lat, lon)], self._work_epsg)[0]
-        self._history_push(f"move PI {pi_index}")
         ok, msg = move_pi(self._pi_model, pi_index, xy)
         if not ok:
-            self._edit_history.discard_last_push()
+            if not live_preview_ran:
+                self._edit_history.discard_last_push()
             self.log_panel.log(f"Move PI {pi_index}: {msg}", "warn")
+            if live_preview_ran:
+                # The model still reflects the last successful live-preview
+                # tick (a real edit) — only the exact release point failed,
+                # so the table/chip still need to catch up to what the map
+                # already shows.
+                self._on_consolidation_model_changed(moved_pi=pi_index)
             return
-        self._on_consolidation_model_changed()
+        self._on_consolidation_model_changed(moved_pi=pi_index)
         self.log_panel.log(msg, "ok")
+
+    def _on_pi_drag_start(self, pi_index: int):
+        """First event of a drag gesture (live preview only) — push the
+        ONE history entry that covers the whole gesture."""
+        if self._pi_model is None:
+            return
+        self._history_push(f"move PI {pi_index}")
+        self._drag_history_pushed = True
+
+    def _on_pi_drag_preview(self, pi_index: int, lat: float, lon: float):
+        """A live, throttled (~20/s) position update while dragging.
+
+        Coalesced through a zero-interval timer so a burst of ticks that
+        arrive before Qt processes the last one collapses to the latest
+        position only — never a backlog."""
+        if self._pi_model is None or not self._drag_history_pushed:
+            return   # no matching dragstart (pref toggled mid-drag) — ignore
+        self._pending_drag = (pi_index, lat, lon)
+        if self._drag_preview_timer is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(0)
+            t.timeout.connect(self._apply_pending_drag)
+            self._drag_preview_timer = t
+        if not self._drag_preview_timer.isActive():
+            self._drag_preview_timer.start()
+
+    def _apply_pending_drag(self):
+        """Fires the latest coalesced live-preview tick: move the model and
+        refresh only the map + PI overlay — deliberately skipping the
+        element table (full Qt rebuild), metrics chip and staleness, which
+        `_on_pi_dragged` catches up on once at the end of the gesture."""
+        if self._pending_drag is None or self._pi_model is None:
+            return
+        pi_index, lat, lon = self._pending_drag
+        self._pending_drag = None
+        from geometry.candidates import move_pi
+        from geometry.projection import wgs84_to_projected
+        xy = wgs84_to_projected([(lat, lon)], self._work_epsg)[0]
+        ok, _msg = move_pi(self._pi_model, pi_index, xy)
+        if not ok:
+            return   # e.g. dragged past a neighbour mid-gesture — dragend reports it properly
+        self._elements = list(self._pi_model.elements)
+        self._render_elements_on_map(self._elements, splice=self._pi_model.last_splice)
+        self._show_pi_overlay(self._pi_model, moved_only=pi_index)
 
     def _on_pi_restore(self, pi_index: int):
         """The map's restore badge (Part H) asked to snap PI `pi_index`
@@ -545,15 +670,15 @@ class App(QMainWindow):
             self._edit_history.discard_last_push()
             self.log_panel.log(f"Restore PI {pi_index}: {msg}", "warn")
             return
-        self._on_consolidation_model_changed()
+        self._on_consolidation_model_changed(moved_pi=pi_index)
         self.log_panel.log(f"PI {pi_index} restored to its fitted position.", "ok")
 
     def _on_toolbar_back(self):
-        """In an editing step, Back drains the undo stack first (like a
-        normal program's Ctrl+Z) before falling back to step navigation —
-        so it only leaves Refine/Consolidate once there's nothing left to
-        undo."""
-        if (self._current_step in (S_REFINE, S_CONSOLIDATE)
+        """In the Refine & Consolidate step, Back drains the undo stack
+        first (like a normal program's Ctrl+Z) before falling back to step
+        navigation — so it only leaves the step once there's nothing left
+        to undo."""
+        if (self._current_step == S_DESIGN
                 and self._edit_history.can_undo()):
             label = self._edit_history.undo(self._pi_model)
             self._after_history_change("Undid", label)
@@ -563,7 +688,7 @@ class App(QMainWindow):
             handler()
 
     def _on_toolbar_forward(self):
-        if (self._current_step in (S_REFINE, S_CONSOLIDATE)
+        if (self._current_step == S_DESIGN
                 and self._edit_history.can_redo()):
             label = self._edit_history.redo(self._pi_model)
             self._after_history_change("Redid", label)
@@ -581,7 +706,7 @@ class App(QMainWindow):
 
     def _refresh_toolbar_edit_actions(self):
         et = self.element_table
-        in_edit_step = self._current_step in (S_REFINE, S_CONSOLIDATE)
+        in_edit_step = self._current_step == S_DESIGN
         self._act_show_alignment.setEnabled(
             in_edit_step and self._pi_model is not None)
         self._act_merge_selection.setEnabled(
@@ -598,6 +723,21 @@ class App(QMainWindow):
         self._prefs["show_log"] = bool(on)
         self.log_panel.setVisible(on)
         self._save_prefs()
+
+    def _on_toggle_metrics_chip(self, on: bool):
+        self._prefs["show_metrics_chip"] = bool(on)
+        self._save_prefs()
+        self._update_metrics_chip()
+
+    def _on_toggle_map_legend(self, on: bool):
+        self._prefs["show_map_legend"] = bool(on)
+        self._save_prefs()
+        self.map_widget.set_legend_visible(on)
+
+    def _on_toggle_live_drag_preview(self, on: bool):
+        self._prefs["live_drag_preview"] = bool(on)
+        self._save_prefs()
+        self.map_widget.set_live_drag_preview(on)
 
     def _reset_layout(self):
         self._map_splitter.setSizes([460, 300])
@@ -797,10 +937,20 @@ class App(QMainWindow):
             self.element_table.prepare(
                 self._pi_model, self._elements,
                 check_interval=self._settings.get("check_interval", 5.0))
-            self.step5_refine.set_elements(self._elements, metrics)
-            self.step6_consolidate.prepare(self._pi_model)
+            self.step5_design.bind(self._pi_model)
+            self.step5_design.set_elements(self._elements, metrics)
             self._render_elements_on_map(self._elements, fit_view=True)
             self._show_pi_overlay(self._pi_model)
+            if self._pi_model is None:
+                # Level 1 (raw) — no PI model to read live stats from; the
+                # metrics chip needs a one-off pass against the OSM baseline.
+                from geometry.candidates import evaluate_candidate
+                xy        = self._xy_list[0]        if self._xy_list        else None
+                chainages = self._chainages_list[0] if self._chainages_list else None
+                self._level1_metrics = evaluate_candidate(
+                    self._elements, xy, chainages,
+                    self._settings.get("check_interval", 5.0))
+            self._update_metrics_chip()
         if self._stations:
             self.step6_stations.set_stations(self._stations)
             self._on_stations_changed(self._stations)
@@ -812,11 +962,11 @@ class App(QMainWindow):
             f"Project opened: {path} — {len(self._tracks)} track(s), "
             f"{len(self._elements)} elements, {n_pi} PIs, "
             f"{len(self._stations)} station(s).", "ok")
-        step = st.get("step", S_REFINE)
+        step = st.get("step", S_DESIGN)
         if step not in self._step_reasons():
             self._goto_step(step)
         else:
-            self._goto_step(S_REFINE if self._elements else S_FIND)
+            self._goto_step(S_DESIGN if self._elements else S_FIND)
 
     def _build_layout(self):
         central = QWidget()
@@ -870,18 +1020,16 @@ class App(QMainWindow):
         self.step2              = Step2Section()
         self.step3              = Step3Configure()
         self.step4_candidates   = Step4Candidates()
-        self.step5_refine       = Step5Refine()
-        self.step6_consolidate  = Step6Consolidate()    # step 6 in the UI
-        self.step6_stations     = Step6Stations()       # step 7 in the UI
-        self.step6_crosssec     = Step6CrossSection()   # step 8 in the UI
-        self.step7_export       = Step7Export()         # step 9 in the UI
+        self.step5_design       = Step5Design()          # step 5 in the UI
+        self.step6_stations     = Step6Stations()        # step 6 in the UI
+        self.step6_crosssec     = Step6CrossSection()    # step 7 in the UI
+        self.step7_export       = Step7Export()          # step 8 in the UI
 
         self.stack.addWidget(self.step1)              # S_FIND
         self.stack.addWidget(self.step2)              # S_SELECT
         self.stack.addWidget(self.step3)              # S_CONFIG
         self.stack.addWidget(self.step4_candidates)   # S_CANDIDATES
-        self.stack.addWidget(self.step5_refine)       # S_REFINE
-        self.stack.addWidget(self.step6_consolidate)  # S_CONSOLIDATE
+        self.stack.addWidget(self.step5_design)       # S_DESIGN
         self.stack.addWidget(self.step6_stations)     # S_STATIONS
         self.stack.addWidget(self.step6_crosssec)     # S_CROSSSEC
         self.stack.addWidget(self.step7_export)       # S_EXPORT
@@ -931,9 +1079,16 @@ class App(QMainWindow):
             self.map_widget.emphasize_candidate)
         self.step4_candidates.back_requested.connect(self._on_candidates_back)
 
-        # Step 5 (refine) → done / back
-        self.step5_refine.refinement_done.connect(self._on_refinement_done)
-        self.step5_refine.back_requested.connect(self._on_refine_back)
+        # Step 5 (Refine & Consolidate) → done / back / model edits / highlight
+        self.step5_design.design_done.connect(self._on_design_done)
+        self.step5_design.back_requested.connect(self._on_refine_back)
+        self.step5_design.model_changed.connect(
+            self._on_consolidation_model_changed)
+        self.step5_design.log_message.connect(self.log_panel.log)
+        self.step5_design.highlight_span.connect(
+            self.map_widget.highlight_elements)
+        self.step5_design.on_before_edit = self._history_push
+        self.step5_design.on_edit_failed = self._edit_history.discard_last_push
 
         # Element table (bottom dock) → rebuilds + row selection + log
         self.element_table.rebuilt.connect(self._on_elements_rebuilt)
@@ -947,27 +1102,17 @@ class App(QMainWindow):
         self.map_widget.split_point_clicked.connect(self._on_split_point_clicked)
         self.map_widget.pi_dragged.connect(self._on_pi_dragged)
         self.map_widget.pi_restore_requested.connect(self._on_pi_restore)
+        self.map_widget.pi_drag_start.connect(self._on_pi_drag_start)
+        self.map_widget.pi_drag_preview.connect(self._on_pi_drag_preview)
         # Map element click (Ctrl = toggle into multiselect) → table selection
         self.map_widget.element_clicked.connect(self.element_table.select_element)
 
-        # Step 6 (cross-section) → back / done / map overlay
-        # Step 6 (consolidate) → model edits / navigation / map highlight
-        self.step6_consolidate.model_changed.connect(
-            self._on_consolidation_model_changed)
-        self.step6_consolidate.consolidation_done.connect(
-            self._on_consolidation_done)
-        self.step6_consolidate.back_requested.connect(
-            lambda: self._goto_step(S_REFINE))
-        self.step6_consolidate.log_message.connect(self.log_panel.log)
-        self.step6_consolidate.highlight_span.connect(
-            self.map_widget.highlight_elements)
-
-        # Step 7 (stations) → map markers / click mode / navigation
+        # Step 6 (stations) → map markers / click mode / navigation
         self.step6_stations.stations_changed.connect(self._on_stations_changed)
         self.step6_stations.map_click_mode.connect(
             self.map_widget.set_station_click_mode)
         self.step6_stations.stations_done.connect(self._on_stations_done)
-        self.step6_stations.back_requested.connect(lambda: self._goto_step(S_CONSOLIDATE))
+        self.step6_stations.back_requested.connect(lambda: self._goto_step(S_DESIGN))
         self.map_widget.map_clicked.connect(self.step6_stations.on_map_clicked)
 
         self.step6_crosssec.back_requested.connect(lambda: self._goto_step(S_STATIONS))
@@ -1066,26 +1211,24 @@ class App(QMainWindow):
             "Three levels are computed; hover a card to emphasise",
             "its line on the map, then Select one.",
         ]),
-        S_REFINE: ("Step 5 — Refine", [
+        S_DESIGN: ("Step 5 — Refine & Consolidate", [
             "Edit Radius / Spiral L in the table; the map updates live.",
             "Click elements on the map to select rows; Ctrl+click multi-selects.",
             "Select first & last tangent → 'Merge PI range → single curve'.",
             "Short straights between curves offer 'Merge spirals'.",
+            "'Consolidate curve runs' replaces runs of same-direction curves",
+            "joined by short straights with one transition–circular–transition",
+            "curve — most runs are already auto-merged during fitting.",
             "🗺 'Show alignment' re-draws everything after a map reload.",
         ]),
-        S_CONSOLIDATE: ("Step 6 — Consolidate", [
-            "Scan for runs of same-direction curves joined by short straights",
-            "and replace each run with one transition–circular–transition curve.",
-            "Only runs within the deviation limit are offered; Undo restores.",
-        ]),
-        S_STATIONS: ("Step 7 — Stations", [
+        S_STATIONS: ("Step 6 — Stations", [
             "⚡ Auto-detect stations from OSM, 📍 place on map, or add rows.",
             "The CSV (Station,Dwell Time,Name) is written next to the LandXML.",
         ]),
-        S_CROSSSEC: ("Step 8 — Cross-Section", [
+        S_CROSSSEC: ("Step 7 — Cross-Section", [
             "Optional deviation profile of the fitted alignment vs OSM.",
         ]),
-        S_EXPORT: ("Step 9 — Export", [
+        S_EXPORT: ("Step 8 — Export", [
             "Pick the output CRS and file; 👁 Preview shows the LandXML first.",
         ]),
     }
@@ -1109,26 +1252,25 @@ class App(QMainWindow):
         elif not self._settings:
             r[S_CANDIDATES] = "Confirm the geometry settings (step 3)."
         if not self._elements:
-            for i in (S_REFINE,) + self._DOWNSTREAM:
+            for i in (S_DESIGN,) + self._DOWNSTREAM:
                 r[i] = "Select a candidate level first (step 4)."
-            r[S_CONSOLIDATE] = "Select a candidate level first (step 4)."
-        elif self._pi_model is None:
-            r[S_CONSOLIDATE] = ("Level 1 (raw OSM polyline) has no editable "
-                                "curves — pick Level 2 or 3 to consolidate.")
+        # Level 1 (raw OSM polyline) has no PI model — the step stays
+        # available (read-only refine metrics), but Step5Design's own
+        # Consolidate section self-disables (see prepare()/bind()).
         return r
 
     def _refresh_nav(self):
         reasons = self._step_reasons()
-        available = {i for i in range(9) if i not in reasons}
+        available = {i for i in range(N_STEPS) if i not in reasons}
         done = set(self._done_steps) & available
         suggested = None
-        for i in range(self._current_step + 1, 9):
+        for i in range(self._current_step + 1, N_STEPS):
             if i in available:
                 suggested = i
                 break
         self.sidebar.set_states(available, done, suggested, reasons)
         self._suggested_step = suggested
-        in_edit_step = self._current_step in (S_REFINE, S_CONSOLIDATE)
+        in_edit_step = self._current_step == S_DESIGN
         can_undo = in_edit_step and self._edit_history.can_undo()
         can_redo = in_edit_step and self._edit_history.can_redo()
         self._act_back.setEnabled(
@@ -1146,13 +1288,18 @@ class App(QMainWindow):
         # Refresh a downstream step from the current alignment if it went stale
         if idx in self._DOWNSTREAM and idx in self._stale:
             self._refresh_downstream(idx)
+        # Cross-section overlays are only meaningful from their own step on;
+        # navigating back must not leave thousands of stale sample runs
+        # taxing every pan/zoom repaint.
+        if idx < S_CROSSSEC and self._current_step >= S_CROSSSEC:
+            self.map_widget.clear_cross_section()
         self._current_step = idx
         self._done_steps.add(idx)
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
-        # The element table belongs to the alignment-editing steps
-        self.element_table.setVisible(idx in (S_REFINE, S_CONSOLIDATE))
-        if idx not in (S_REFINE, S_CONSOLIDATE) and self._act_edit_mode.isChecked():
+        # The element table belongs to the alignment-editing step
+        self.element_table.setVisible(idx == S_DESIGN)
+        if idx != S_DESIGN and self._act_edit_mode.isChecked():
             self._act_edit_mode.setChecked(False)   # also disarms map dragging
         tip = self._STEP_TIPS.get(idx)
         if tip:
@@ -1438,6 +1585,17 @@ class App(QMainWindow):
         self._pi_model = getattr(candidate, "pi_model", None)
         self._elements = list(getattr(candidate, "elements", []) or [])
         self._level    = getattr(candidate, "algorithm_id", "")
+        # Level 1 (raw OSM polyline) has no PI model — its metrics never
+        # change post-selection, so cache the candidate's own numbers
+        # (already computed at generation time) for the metrics chip
+        # instead of re-running a fresh deviation pass on every refresh.
+        self._level1_metrics = None if self._pi_model is not None else {
+            "max_deviation":        getattr(candidate, "max_deviation", 0.0),
+            "rmse":                 getattr(candidate, "rmse", 0.0),
+            "mean_deviation":       getattr(candidate, "mean_deviation", 0.0),
+            "n_elements":           len(self._elements),
+            "max_heading_jump_deg": getattr(candidate, "max_heading_jump_deg", 0.0),
+        }
         self._edit_history.clear()   # fresh working alignment — no prior edits to undo
         self._refine_baseline = self._make_baseline(self._pi_model)
         self._mark_stale()
@@ -1446,17 +1604,14 @@ class App(QMainWindow):
         self.map_widget.clear_candidates()
         xy        = self._xy_list[0]        if self._xy_list        else None
         chainages = self._chainages_list[0] if self._chainages_list else None
-        self.step5_refine.prepare(candidate, xy, chainages, self._settings)
-        self.step6_consolidate.prepare(self._pi_model)
+        self.step5_design.prepare(
+            candidate, self._pi_model, xy, chainages, self._settings)
 
-        # Always draw the merged red polyline first so the user is guaranteed
-        # to see *something* even if the segmented call has any issue. Then
-        # overlay the per-element coloured polylines (which replace the merged
-        # one via clearAlignment() inside showAlignmentSegmented).
-        merged = getattr(candidate, "geo_wgs84", None)
-        if merged:
-            self.map_widget.show_alignment([[list(pt) for pt in merged]])
-
+        # One draw only: the per-element coloured polylines when available,
+        # else the merged red fallback. (Drawing both used to trigger two
+        # full layer builds and two competing 0.8 s flyToBounds animations —
+        # a visible red-then-coloured flash on every candidate selection.)
+        merged   = getattr(candidate, "geo_wgs84", None)
         segments = getattr(candidate, "geo_segments_wgs84", None) or []
         n_line   = sum(1 for s in segments if s.get("type") == "Line")
         n_arc    = sum(1 for s in segments if s.get("type") == "Arc")
@@ -1466,6 +1621,8 @@ class App(QMainWindow):
               f"merged_pts={len(merged) if merged else 0}")
         if segments:
             self.map_widget.show_alignment_segmented(segments)
+        elif merged:
+            self.map_widget.show_alignment([[list(pt) for pt in merged]])
 
         # Element table dock (editable when the candidate carries a PI model)
         self.element_table.prepare(
@@ -1473,13 +1630,14 @@ class App(QMainWindow):
             check_interval=self._settings.get("check_interval", 5.0),
         )
         self._show_pi_overlay(self._pi_model)
+        self._update_metrics_chip()
 
         self.statusBar().showMessage(
             f"Candidate '{getattr(candidate, 'label', '')}' selected — "
             f"{n_line} Lines · {n_arc} Arcs · {n_spiral} Spirals shown. "
             "Hover any segment for parameters."
         )
-        self._goto_step(S_REFINE)
+        self._goto_step(S_DESIGN)
 
     def _on_candidates_back(self):
         """Go back from Candidates to Configure — clear overlays."""
@@ -1488,49 +1646,99 @@ class App(QMainWindow):
         self.map_widget.clear_osm_reference()
         self._goto_step(S_CONFIG)
 
-    def _render_elements_on_map(self, elements: list, fit_view: bool = False):
+    def _update_metrics_chip(self):
+        """Single funnel refreshing the persistent deviation-metrics chip —
+        call after anything that changes `self._pi_model`/`self._elements`.
+        Cheap: reuses whatever stats the triggering rebuild already
+        computed (or the cached Level-1 metrics), never a fresh pass."""
+        chip = getattr(self, "_metrics_chip", None)
+        if chip is None:
+            return
+        if not self._prefs.get("show_metrics_chip", True):
+            chip.clear()
+            return
+        if self._pi_model is not None:
+            from geometry.candidates import metrics_from_stats
+            metrics = metrics_from_stats(
+                getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
+            xy_ref = getattr(self._pi_model, "xy_ref", None)
+            n_points = len(xy_ref) if xy_ref is not None else 0
+            chip.set_metrics(metrics, n_points=n_points, level=self._level)
+        elif self._elements and self._level1_metrics is not None:
+            chip.set_metrics(self._level1_metrics, level=self._level)
+        else:
+            chip.clear()
+
+    def _sample_segments(self, elements: list, interval: float) -> list | None:
+        """Sample + batch-project `elements` into the JS segment payload
+        shape ({type, params, points}, one dict per element). None on any
+        failure — the caller decides the fallback."""
+        from geometry.alignment import reconstruct_alignment_per_element
+        from geometry.projection import projected_to_wgs84
+        try:
+            from gui.worker import _serialise_element_params
+            per_el = reconstruct_alignment_per_element(
+                elements, sample_interval=interval)
+            # One batched projection for ALL samples (was one call per
+            # element → hundreds of transformer builds per refresh).
+            flat: list = []
+            spans: list = []
+            for el, pts in per_el:
+                spans.append((el, len(flat), len(pts)))
+                flat.extend(pts)
+            wgs_all = projected_to_wgs84(flat, self._work_epsg) if flat else []
+            payload = []
+            for el, off, n in spans:
+                if not n:
+                    continue
+                payload.append({
+                    "type":   el.get("type", "Line"),
+                    "params": _serialise_element_params(el),
+                    "points": [list(p) for p in wgs_all[off:off + n]],
+                })
+            return payload
+        except Exception:
+            return None
+
+    def _render_elements_on_map(self, elements: list, fit_view: bool = False,
+                                splice: dict | None = None):
         """Render an element chain as the segmented alignment overlay.
 
         fit_view=False (default) keeps the user's current zoom/pan — used
-        for edit-driven rebuilds from the element table."""
-        from geometry.alignment import (
-            reconstruct_alignment_projected,
-            reconstruct_alignment_per_element,
-        )
+        for edit-driven rebuilds from the element table. `splice` (from
+        `model.last_splice` after a `rebuild_pi_span` edit) lets a localized
+        change ship only the affected element span to the map — sampling,
+        projecting and serializing the WHOLE alignment on every PI drag or
+        radius keystroke was the single largest per-edit map cost on long
+        corridors, even though the JS side only ever kept the diffed layers."""
+        from geometry.alignment import reconstruct_alignment_projected
         from geometry.projection import projected_to_wgs84
 
         if not elements:
             return
         try:
-            segments_payload = []
-            try:
-                from gui.worker import _serialise_element_params
-                # Sample density scales with length: 2 m on short sections,
-                # up to 20 m on very long ones — keeps the JSON payload and
-                # the Leaflet layer work bounded on 50 km+ alignments.
-                total_len = sum(float(e.get("length", 0.0)) for e in elements)
-                interval = min(20.0, max(2.0, total_len / 4000.0))
-                per_el = reconstruct_alignment_per_element(
-                    elements, sample_interval=interval)
-                # One batched projection for ALL samples (was one call per
-                # element → hundreds of transformer builds per refresh).
-                flat: list = []
-                spans: list = []
-                for el, pts in per_el:
-                    spans.append((el, len(flat), len(pts)))
-                    flat.extend(pts)
-                wgs_all = projected_to_wgs84(flat, self._work_epsg) if flat else []
-                for el, off, n in spans:
-                    if not n:
-                        continue
-                    segments_payload.append({
-                        "type":   el.get("type", "Line"),
-                        "params": _serialise_element_params(el),
-                        "points": [list(p) for p in wgs_all[off:off + n]],
-                    })
-            except Exception:
-                segments_payload = []
+            total_len = sum(float(e.get("length", 0.0)) for e in elements)
+            # Sample density scales with length: 2 m on short sections, up
+            # to 20 m on very long ones — keeps the JSON payload and the
+            # Leaflet layer work bounded on 50 km+ alignments.
+            interval = min(20.0, max(2.0, total_len / 4000.0))
 
+            if splice is not None and not fit_view:
+                start, removed, added = (
+                    splice["start"], splice["removed"], splice["added"])
+                changed_segments = self._sample_segments(
+                    elements[start:start + added], interval)
+                if changed_segments is not None:
+                    from gui.worker import _serialise_element_params
+                    metas = [{"type": el.get("type", "Line"),
+                              "params": _serialise_element_params(el)}
+                             for el in elements]
+                    if self.map_widget.patch_alignment_segmented(
+                            start, removed, changed_segments, metas):
+                        return
+                    # bookkeeping mismatch — fall through to a full redraw
+
+            segments_payload = self._sample_segments(elements, interval)
             if segments_payload:
                 if fit_view:
                     self.map_widget.show_alignment_segmented(segments_payload, True)
@@ -1544,8 +1752,14 @@ class App(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ Map update failed: {exc}")
 
-    def _show_pi_overlay(self, pi_model):
-        """Draw PI markers + dashed virtual tangent stubs for the model."""
+    def _show_pi_overlay(self, pi_model, moved_only: int | None = None):
+        """Draw PI markers + dashed virtual tangent stubs for the model.
+
+        moved_only=k: only PI k's position changed (a drag/restore) and no
+        PI was added/removed/reindexed — patch just that marker + the
+        tangent stubs in place instead of tearing down and rebuilding every
+        marker on the map (which also made the dragged marker itself
+        visibly snap)."""
         from geometry.projection import projected_to_wgs84
         if pi_model is None or len(getattr(pi_model, "V", [])) < 3:
             self.map_widget.clear_pi_overlay()
@@ -1577,20 +1791,39 @@ class App(QMainWindow):
                 a, b, c = wgs[base + 3 * j], wgs[base + 3 * j + 1], wgs[base + 3 * j + 2]
                 tangents.append({"from": list(a), "to": list(b)})
                 tangents.append({"from": list(b), "to": list(c)})
-            self.map_widget.show_pi_overlay({"pis": pi_pts, "tangents": tangents})
+            payload = {"pis": pi_pts, "tangents": tangents}
+
+            if (moved_only is not None
+                    and getattr(self.map_widget, "_last_pi_overlay", None) is not None):
+                moved = next((p for p in pi_pts if p["id"] == moved_only), None)
+                if moved is not None:
+                    self.map_widget.move_pi_marker(moved_only, moved["latlon"])
+                    self.map_widget.update_pi_tangents(tangents)
+                    self.map_widget.sync_pi_overlay_cache(payload)
+                    return
+
+            self.map_widget.show_pi_overlay(payload)
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ PI overlay failed: {exc}")
 
-    def _on_elements_rebuilt(self, elements: list, metrics: dict):
-        """Element table edited → refresh Step 5, map, PI overlay and log."""
+    def _on_elements_rebuilt(self, elements: list, metrics: dict,
+                             splice: dict | None = None):
+        """Element table edited → refresh Step 5, map, PI overlay and log.
+
+        `splice` is `model.last_splice` from the edit that just ran
+        (element_table._rebuild always emits it) — a value edit, omit,
+        merge, split, delete, trim or undo-merge all route through
+        `rebuild_pi_span` internally, so it correctly describes exactly
+        this one change."""
         # App owns the alignment; any edit invalidates the downstream steps,
         # which re-read it when the user next opens them.
         self._elements = list(elements)
         self._mark_stale()
         self._refresh_nav()
-        self.step5_refine.set_elements(elements, metrics)
-        self._render_elements_on_map(elements)
+        self.step5_design.set_elements(elements, metrics)
+        self._render_elements_on_map(elements, splice=splice)
         self._show_pi_overlay(self.element_table._model)
+        self._update_metrics_chip()
         n_spirals = sum(1 for e in elements if e.get("type") == "Spiral")
         msg = (f"Alignment rebuilt — {len(elements)} elements "
                f"({n_spirals} spiral{'s' if n_spirals != 1 else ''}), "
@@ -1611,7 +1844,9 @@ class App(QMainWindow):
         """Step 2 split/merged/removed a track — the input data itself
         changed, so anything already fitted from the old tracks is invalid."""
         self._tracks = tracks
-        self.map_widget.show_tracks(tracks)
+        # fit=False: a split/merge/remove edit must not throw away the
+        # user's current zoom/pan mid-edit.
+        self.map_widget.show_tracks(tracks, fit=False)
         if self._selected_tracks or self._elements:
             self.log_panel.log(
                 "Tracks changed — re-select and confirm the section before "
@@ -1676,25 +1911,25 @@ class App(QMainWindow):
         self._goto_step(S_CANDIDATES)
 
     # ------------------------------------------------------------------
-    # Refinement accepted → suggest Consolidate (step 6)
+    # Refine & Consolidate accepted → Stations
     # ------------------------------------------------------------------
 
-    def _on_refinement_done(self, elements: list):
-        self._elements = elements
+    def _on_design_done(self, elements: list):
+        if elements:
+            self._elements = elements
         self._mark_stale()
-        self.step6_consolidate.prepare(self._pi_model)
-        self.statusBar().showMessage(
-            "Refinement accepted. Consolidate runs of same-direction curves, "
-            "or skip ahead — you can return and edit at any time."
-        )
-        self._goto_step(S_CONSOLIDATE)
+        self._goto_step(S_STATIONS)
 
-    # ------------------------------------------------------------------
-    # Consolidate (step 6)
-    # ------------------------------------------------------------------
+    def _on_consolidation_model_changed(self, moved_pi: int | None = None):
+        """Consolidation applied/undone (or a PI moved) — refresh table, map
+        and downstream.
 
-    def _on_consolidation_model_changed(self):
-        """Consolidation applied/undone — refresh table, map and downstream."""
+        `moved_pi`: set ONLY by `_on_pi_dragged`/`_on_pi_restore`, whose
+        preceding `move_pi` call is the single `rebuild_pi_span` that
+        produced `self._pi_model.last_splice` — every other caller here
+        (restore-default, undo/redo, consolidation apply/undo) either
+        replaces the model wholesale or applies several splices in one
+        call, so they always render the full alignment."""
         if self._pi_model is None:
             return
         from geometry.candidates import metrics_from_stats
@@ -1705,20 +1940,16 @@ class App(QMainWindow):
         self.element_table.prepare(
             self._pi_model, self._elements,
             check_interval=self._settings.get("check_interval", 5.0))
-        self.step5_refine.set_elements(self._elements, metrics)
-        self._render_elements_on_map(self._elements)
-        self._show_pi_overlay(self._pi_model)
+        self.step5_design.set_elements(self._elements, metrics)
+        splice = self._pi_model.last_splice if moved_pi is not None else None
+        self._render_elements_on_map(self._elements, splice=splice)
+        self._show_pi_overlay(self._pi_model, moved_only=moved_pi)
+        self._update_metrics_chip()
         self._mark_stale()
         self._refresh_nav()
         self.statusBar().showMessage(
             f"Alignment now has {len(self._elements)} elements "
             f"(max dev {metrics.get('max_deviation', 0.0):.2f} m).")
-
-    def _on_consolidation_done(self, elements: list):
-        if elements:
-            self._elements = elements
-        self._mark_stale()
-        self._goto_step(S_STATIONS)
 
     # ------------------------------------------------------------------
     # Stations done → go to Cross-section
@@ -1792,6 +2023,7 @@ class App(QMainWindow):
         self._pi_model           = None
         self._elements           = []
         self._level              = ""
+        self._level1_metrics     = None
         self._stations           = []
         self._xy_list            = []
         self._chainages_list     = []
@@ -1802,8 +2034,9 @@ class App(QMainWindow):
         self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
         self.element_table.clear()
         self.step6_stations.reset()
-        self.step6_consolidate.prepare(None)
+        self.step5_design.reset()
         self.sidebar.reset()
+        self._update_metrics_chip()
         self._goto_step(S_FIND)
         self.statusBar().showMessage(
             "Ready. Search for a new railway or use 'Lines in View'."

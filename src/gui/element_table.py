@@ -47,7 +47,7 @@ MIN_SPLIT_LINE_LENGTH = 15.0
 
 
 class ElementTableDock(QWidget):
-    rebuilt                  = Signal(list, dict)  # (elements, metrics) after rebuild
+    rebuilt                  = Signal(list, dict, object)  # (elements, metrics, splice|None)
     elements_selected        = Signal(list)        # selected element_ids (map highlight)
     log_message              = Signal(str, str)    # (text, level) → log panel
     show_alignment_requested = Signal()            # re-draw alignment on the map
@@ -507,7 +507,8 @@ class ElementTableDock(QWidget):
         if self._table.rowCount() and self._update_in_place():
             return
         if self._table.rowCount() and self._update_diff():
-            return
+            self._on_selection()   # rows were removed — re-emit the (possibly
+            return                 # shrunken) selection once, deliberately
 
         # Preserve the current selection (blue rows) across the repopulation
         # that follows every value edit / rebuild.
@@ -959,7 +960,7 @@ class ElementTableDock(QWidget):
         self._elements = els
         self._populate()
         self._refresh_metrics(metrics)
-        self.rebuilt.emit(els, metrics)
+        self.rebuilt.emit(els, metrics, getattr(self._model, "last_splice", None))
 
     def _refresh_metrics(self, metrics: dict | None = None):
         if metrics is None:
@@ -967,6 +968,7 @@ class ElementTableDock(QWidget):
             return
         self._metrics_lbl.setText(
             f"· {len(self._elements)} elements   "
+            f"mean dev {metrics.get('mean_deviation', 0.0):.2f} m   "
             f"max dev {metrics.get('max_deviation', 0.0):.2f} m   "
             f"RMSE {metrics.get('rmse', 0.0):.2f} m   "
             f"C1 {metrics.get('max_heading_jump_deg', 0.0):.3f}°"
@@ -1073,6 +1075,12 @@ class ElementTableDock(QWidget):
         return None
 
     def _on_selection(self):
+        # Row teardown during (re)population fires selectionChanged too —
+        # without this guard every repopulate leaked 2-3 spurious
+        # highlightElements IPCs (each a whole-canvas repaint on the map).
+        # The tail of _populate re-emits once deliberately.
+        if self._populating:
+            return
         rows = self._table.selectionModel().selectedRows()
         self._range_btn.setEnabled(
             self._model is not None and self._selected_pi_range() is not None)

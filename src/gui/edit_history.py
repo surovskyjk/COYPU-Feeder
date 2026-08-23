@@ -104,3 +104,7 @@ def apply_model_snapshot(model, snap) -> None:
     model.tangent_stubs  = snap.tangent_stubs
     model.last_stats     = snap.last_stats
     model.log            = snap.log
+    # A wholesale snapshot swap is not a localized edit — any splice left
+    # over from a PRIOR rebuild_pi_span call no longer describes this
+    # model's element list and must not be reused by a map-patch consumer.
+    model.last_splice    = None

@@ -1,5 +1,5 @@
 """
-9-step numbered sidebar, always visible.
+8-step numbered sidebar, always visible.
 
 Steps *suggest* an order rather than gating it: any step whose prerequisites
 are satisfied can be clicked at any time (including going back to Refine after
@@ -23,11 +23,10 @@ STEPS = [
     ("2", "Select Section"),
     ("3", "Configure"),
     ("4", "Candidates"),
-    ("5", "Refine"),
-    ("6", "Consolidate"),
-    ("7", "Stations"),
-    ("8", "Cross-Section"),
-    ("9", "Export"),
+    ("5", "Refine & Consolidate"),
+    ("6", "Stations"),
+    ("7", "Cross-Section"),
+    ("8", "Export"),
 ]
 
 

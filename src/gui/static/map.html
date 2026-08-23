@@ -30,6 +30,17 @@
   .aln-tip b { color: var(--accent); }
   .aln-tip span { color: var(--muted); }
 
+  .legend-box { padding: 8px 10px; line-height: 1.6; }
+  .legend-row { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .legend-swatch {
+    display: inline-block; width: 16px; height: 3px; border-radius: 1.5px;
+    flex: 0 0 auto;
+  }
+  .legend-swatch-dashed {
+    background: none; height: 0; border-top: 3px dashed; width: 16px;
+  }
+  .legend-label { color: var(--fg); font-size: 11px; }
+
   /* PI edit-mode markers (Part H): hover "bounce" invites interaction;
      locked PIs must be unlocked (click the lock badge) before they can be
      dragged; unlocked PIs also show a small restore-to-baseline badge. */
@@ -67,8 +78,12 @@
    — the canvas renderer padding bump below (see _alnRenderer/_glowRenderer)
    is what keeps OUR polylines from visibly popping/clipping during that
    animated transition. */
+/* preferCanvas routes every path layer without an explicit renderer into a
+   per-pane canvas renderer instead of one SVG DOM node per polyline —
+   tracks, candidates, the OSM reference and stations used to be SVG. */
 var map = L.map('map', {
   zoomControl: true, fadeAnimation: false, markerZoomAnimation: true,
+  preferCanvas: true,
 }).setView([50.05, 14.42], 7);
 
 /* Custom panes for z-ordering */
@@ -92,6 +107,7 @@ map.createPane('stationPane').style.zIndex     = '660';
    canvas — negligible next to the per-element draw cost this already pays. */
 var _alnRenderer  = L.canvas({ pane: 'alignmentPane',     padding: 2.0 });
 var _glowRenderer = L.canvas({ pane: 'alignmentGlowPane', padding: 2.0 });
+var _csRenderer   = L.canvas({ pane: 'crossSectionPane',  padding: 2.0 });
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -120,7 +136,12 @@ var _splitClickMode = false;   // click-to-pick a Line-split point (Refine)
 var _TILE_ANTI_FLICKER = { keepBuffer: 4, updateWhenZooming: false };
 
 /* ── Tile provider ─────────────────────────────────────────────── */
+var _baseUrl = null;
 function setTileProvider(url, subs, attr, maxZoom) {
+  /* Re-applying the same provider (startup queue drain, theme re-push)
+     used to tear down and refetch the whole basemap — visible blink. */
+  if (baseLayer && url === _baseUrl) return;
+  _baseUrl = url;
   if (baseLayer) { map.removeLayer(baseLayer); baseLayer = null; }
   var opts = Object.assign(
     { attribution: attr, maxZoom: maxZoom || 19 }, _TILE_ANTI_FLICKER);
@@ -187,7 +208,9 @@ function getMapBounds() {
 }
 
 /* ── Track display ──────────────────────────────────────────────  */
-function showTracks(tracks) {
+/* fit=false keeps the user's current zoom/pan (track split/merge edits). */
+function showTracks(tracks, fit) {
+  if (fit === undefined) fit = true;
   trackLayers.forEach(function(l) { map.removeLayer(l); });
   trackLayers = [];
   var all = [];
@@ -201,7 +224,7 @@ function showTracks(tracks) {
     pl.addTo(map);
     trackLayers.push(pl);
   });
-  if (all.length)
+  if (all.length && fit)
     try { map.fitBounds(L.latLngBounds(all), {padding:[20,20], maxZoom:14}); } catch(e){}
 }
 
@@ -237,7 +260,7 @@ function showOSMReference(alns) {
     var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
     if (latlngs.length < 2) return;
     var pl = L.polyline(latlngs, {
-      color: st.color || MAP_COLORS.osmReference, weight: 3, opacity: st.opacity,
+      color: st.color || MAP_COLORS.osmReference, weight: 2, opacity: st.opacity,
       dashArray: '8 6', pane: 'osmRefPane'
     });
     if (st.visible) pl.addTo(map);
@@ -316,6 +339,47 @@ function setPageTheme(theme) {
   }
 }
 
+/* ── Map legend (bottom-left) ────────────────────────────────────
+   Entries come from gui/palette.py's LEGEND_ENTRIES, pushed alongside the
+   colours themselves so the swatches can never drift out of sync with what
+   is actually drawn (Line/Arc/Spiral hues + the OSM-reference dash style). */
+var _legendControl = null;
+var _legendEntries = [];
+var _legendVisible = true;
+
+function _buildLegendHtml(entries) {
+  var rows = (entries || []).map(function(e) {
+    var swatch;
+    if (e.dashed) {
+      swatch = '<span class="legend-swatch legend-swatch-dashed" ' +
+               'style="border-top-color:' + e.color + ';"></span>';
+    } else {
+      swatch = '<span class="legend-swatch" style="background:' + e.color + ';"></span>';
+    }
+    return '<div class="legend-row">' + swatch +
+           '<span class="legend-label">' + e.label + '</span></div>';
+  }).join('');
+  return '<div class="aln-tip legend-box">' + rows + '</div>';
+}
+
+function setLegend(entries, visible) {
+  _legendEntries = entries || _legendEntries;
+  if (visible !== undefined) { _legendVisible = !!visible; }
+  if (_legendControl) { map.removeControl(_legendControl); _legendControl = null; }
+  if (!_legendVisible || !_legendEntries.length) { return; }
+  var Legend = L.Control.extend({
+    options: { position: 'bottomleft' },
+    onAdd: function() {
+      var div = L.DomUtil.create('div');
+      div.innerHTML = _buildLegendHtml(_legendEntries);
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    }
+  });
+  _legendControl = new Legend();
+  _legendControl.addTo(map);
+}
+
 function _fmtTooltip(seg) {
   var p = seg.params || {};
   var deg = function(rad) { return (rad * 180.0 / Math.PI).toFixed(2); };
@@ -391,11 +455,27 @@ function _ensureGlow(entry) {
 
 function _emphasize(entry, on, weight) {
   if (on) {
-    entry.main.setStyle({weight: weight || 7, opacity: 1.0});
-    _ensureGlow(entry).setStyle({opacity: 0.5});
+    var w = weight || 7;
+    entry.main.setStyle({weight: w, opacity: 1.0});
+    // A selected element (weight 8, from highlightElements) reads more
+    // prominently than a plain hover (weight 7) — its glow is brighter and
+    // brought to the front of the glow canvas so overlapping selections
+    // don't bury it under an unselected element's hover glow.
+    var selected = w >= 8;
+    var glow = _ensureGlow(entry);
+    glow.setStyle({opacity: selected ? 0.6 : 0.5});
+    if (selected) { try { glow.bringToFront(); } catch(e){} }
   } else {
     entry.main.setStyle({weight: 4, opacity: 0.95});
-    if (entry.glow) entry.glow.setStyle({opacity: 0.0});
+    /* Remove (don't just hide) the glow: an invisible glow polyline still
+       sits in the canvas draw list, and hovering across hundreds of
+       elements used to accumulate them for the rest of the session. */
+    if (entry.glow) {
+      try { map.removeLayer(entry.glow); } catch(e){}
+      var gi = alignmentLayers.indexOf(entry.glow);
+      if (gi >= 0) alignmentLayers.splice(gi, 1);
+      entry.glow = null;
+    }
   }
 }
 
@@ -478,6 +558,7 @@ function showAlignmentSegmented(segments, fitView) {
     alignEntries.push(entry);
   });
   _rebuildSegIndex();
+  _recomputeHighlighted();
   if (all.length && fitView)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
 }
@@ -537,23 +618,80 @@ function updateAlignmentSegmented(segments) {
     if (e.glow) alignmentLayers.push(e.glow);
   });
   _rebuildSegIndex();
+  _recomputeHighlighted();
+}
+
+/* Span-local patch after a `rebuild_pi_span` edit (PI drag, radius/spiral
+   edit, merge, omit, …): Python already knows the exact splice — replace
+   alignEntries[start:start+deleteCount] with newSegments (full geometry),
+   and retarget every OTHER entry's tooltip/params from the parallel `metas`
+   list (ids/stations shift after a merge even for elements whose geometry
+   didn't move). Returns false on a bookkeeping mismatch so the caller can
+   fall back to a full update — this is a rare defensive path since
+   MapWidget already checks its own entry count before calling. */
+function patchAlignmentSegmented(start, deleteCount, newSegments, metas) {
+  var removed = alignEntries.splice(start, deleteCount);
+  removed.forEach(function(e){
+    try { map.removeLayer(e.main); } catch(err){}
+    if (e.glow) try { map.removeLayer(e.glow); } catch(err){}
+  });
+  var inserted = [];
+  for (var q = 0; q < newSegments.length; q++) {
+    var entry = _addSegmentLayer(newSegments[q]);
+    if (entry) inserted.push(entry);
+  }
+  Array.prototype.splice.apply(alignEntries, [start, 0].concat(inserted));
+  if (alignEntries.length !== metas.length) {
+    return false;    // desync — caller falls back to a full redraw
+  }
+  for (var i = 0; i < metas.length; i++) {
+    if (i >= start && i < start + inserted.length) continue;  // just built
+    alignEntries[i].seg = metas[i];
+    alignEntries[i].eid = (metas[i].params || {}).element_id || null;
+  }
+  alignmentLayers = [];
+  alignEntries.forEach(function(e){
+    alignmentLayers.push(e.main);
+    if (e.glow) alignmentLayers.push(e.glow);
+  });
+  _rebuildSegIndex();
+  _recomputeHighlighted();
+  return true;
 }
 
 /* Emphasize the selected elements (called from Python on every table
-   selection change). Accepts an array of ids or a single id string. */
+   selection change). Accepts an array of ids or a single id string.
+   Diff-based: only entries whose highlight state actually changes are
+   touched — the old all-entries setStyle sweep grew the canvas redraw
+   bounds to the whole line on every selection change. */
+var _highlightedIds = {};
+function _recomputeHighlighted() {
+  _highlightedIds = {};
+  alignEntries.forEach(function(e){
+    if (e.selected && e.eid) _highlightedIds[e.eid] = true;
+  });
+}
 function highlightElements(elementIds) {
   if (typeof elementIds === 'string') elementIds = [elementIds];
   var wanted = {};
   (elementIds || []).forEach(function(id) { wanted[id] = true; });
-  var firstSel = null;
-  Object.keys(segIndex).forEach(function(k) {
+  var touch = {};
+  Object.keys(_highlightedIds).forEach(function(k){ touch[k] = true; });
+  Object.keys(wanted).forEach(function(k){ touch[k] = true; });
+  Object.keys(touch).forEach(function(k) {
     var e = segIndex[k];
+    if (!e) return;
     e.selected = !!wanted[k];
     _emphasize(e, e.selected, 8);   // creates the glow lazily, only if needed
     if (e.selected) {
       try { e.main.bringToFront(); } catch(err){}
-      if (!firstSel) firstSel = e;
     }
+  });
+  _highlightedIds = wanted;
+  var firstSel = null;
+  (elementIds || []).some(function(id){
+    if (segIndex[id]) { firstSel = segIndex[id]; return true; }
+    return false;
   });
   if (firstSel) {
     try {
@@ -577,6 +715,14 @@ var _lastPIPayload = null; // re-rendered by setPIEditMode without a Python roun
    hover (pure CSS) as a "this is interactive, unlock me" affordance. */
 var _piLocked = {};
 
+/* Part I: live preview while dragging. Throttled to ~20/sec in the 'drag'
+   handler above; setLiveDragPreview(false) turns it off entirely (Python
+   pref) — only dragend then updates anything, exactly as before this
+   feature existed. */
+var _liveDragPreviewEnabled = true;
+var _lastDragPreview = 0;
+function setLiveDragPreview(on) { _liveDragPreviewEnabled = !!on; }
+
 /* Small divIcon standing in for a draggable marker — Leaflet's CircleMarker
    has no built-in drag support, only L.marker does. Composed of a dot (the
    plain non-edit-mode look), a lock/unlock badge (click to toggle — this is
@@ -597,6 +743,48 @@ function _piDragIcon(omitted, locked) {
                      iconSize: [22, 22], iconAnchor: [11, 11] });
 }
 
+/* (Re)bind the lock/restore badge click handlers on a marker's CURRENT DOM
+   element — setIcon() replaces that element, so this must be re-run after
+   every _setPILocked() as well as at creation time. */
+function _bindPIMarkerBadges(mk, pi) {
+  var el = mk.getElement();
+  if (!el) return;
+  var lockBadge = el.querySelector('.pi-lock-badge');
+  if (lockBadge) {
+    L.DomEvent.disableClickPropagation(lockBadge);
+    L.DomEvent.on(lockBadge, 'click', function(ev) {
+      L.DomEvent.stop(ev);
+      var wasLocked = _piLocked[pi.id] !== false;
+      _setPILocked(mk, pi, !wasLocked);
+    });
+  }
+  var restoreBadge = el.querySelector('.pi-restore-badge');
+  if (restoreBadge) {
+    L.DomEvent.disableClickPropagation(restoreBadge);
+    L.DomEvent.on(restoreBadge, 'click', function(ev) {
+      L.DomEvent.stop(ev);
+      if (backend && backend.on_pi_restore_requested)
+        backend.on_pi_restore_requested(pi.id);
+    });
+  }
+}
+
+/* Toggle ONE PI's lock state in place — icon, drag capability, tooltip and
+   badge bindings only. Used to full-rebuild EVERY PI marker on the map for
+   a single padlock click. */
+function _setPILocked(mk, pi, newLocked) {
+  _piLocked[pi.id] = newLocked;
+  var omitted = !!pi.omitted;
+  mk.setIcon(_piDragIcon(omitted, newLocked));
+  if (mk.dragging) { newLocked ? mk.dragging.disable() : mk.dragging.enable(); }
+  var d = (pi.defl_deg === undefined || pi.defl_deg === null)
+          ? "" : " · δ=" + Number(pi.defl_deg).toFixed(1) + "°";
+  var tip = "PI " + pi.id + d + (omitted ? " (omitted)" : "") +
+            (newLocked ? " — click the lock to unlock" : " — drag to move");
+  if (mk.setTooltipContent) mk.setTooltipContent(tip);
+  _bindPIMarkerBadges(mk, pi);
+}
+
 function showPIOverlay(payload) {
   clearPIOverlay();
   _lastPIPayload = payload || null;
@@ -606,6 +794,7 @@ function showPIOverlay(payload) {
       color: MAP_COLORS.piOmitted, weight: 2, opacity: 0.55,
       dashArray: '6 6', pane: 'piPane'
     }).addTo(map);
+    pl._isTangent = true;
     piLayers.push(pl);
   });
   (payload.pis || []).forEach(function(pi) {
@@ -621,33 +810,27 @@ function showPIOverlay(payload) {
         icon: _piDragIcon(omitted, locked), draggable: !locked,
         pane: 'piPane', autoPan: true,
       }).addTo(map);
+      mk._piId = pi.id;
+      mk.on('dragstart', function() {
+        if (!_liveDragPreviewEnabled) return;
+        if (backend && backend.on_pi_drag_start) backend.on_pi_drag_start(pi.id);
+      });
+      mk.on('drag', function() {
+        if (!_liveDragPreviewEnabled) return;
+        var now = Date.now();
+        if (now - _lastDragPreview < 50) return;   // ~20 updates/sec cap
+        _lastDragPreview = now;
+        var ll = mk.getLatLng();
+        if (backend && backend.on_pi_drag_preview)
+          backend.on_pi_drag_preview(pi.id, ll.lat, ll.lng);
+      });
       mk.on('dragend', function() {
         var ll = mk.getLatLng();
         if (backend && backend.on_pi_dragged)
           backend.on_pi_dragged(pi.id, ll.lat, ll.lng);
       });
       mk.bindTooltip(tip, {direction: 'top', className: 'aln-tip'});
-      var el = mk.getElement();
-      if (el) {
-        var lockBadge = el.querySelector('.pi-lock-badge');
-        if (lockBadge) {
-          L.DomEvent.disableClickPropagation(lockBadge);
-          L.DomEvent.on(lockBadge, 'click', function(ev) {
-            L.DomEvent.stop(ev);
-            _piLocked[pi.id] = !locked;   // toggle
-            showPIOverlay(_lastPIPayload);
-          });
-        }
-        var restoreBadge = el.querySelector('.pi-restore-badge');
-        if (restoreBadge) {
-          L.DomEvent.disableClickPropagation(restoreBadge);
-          L.DomEvent.on(restoreBadge, 'click', function(ev) {
-            L.DomEvent.stop(ev);
-            if (backend && backend.on_pi_restore_requested)
-              backend.on_pi_restore_requested(pi.id);
-          });
-        }
-      }
+      _bindPIMarkerBadges(mk, pi);
       piLayers.push(mk);
       return;
     }
@@ -656,10 +839,48 @@ function showPIOverlay(payload) {
       fillColor: omitted ? 'transparent' : MAP_COLORS.piFill,
       fillOpacity: omitted ? 0.0 : 0.9, pane: 'piPane',
     }).addTo(map);
+    mk._piId = pi.id;
     mk.bindTooltip("PI " + pi.id + d + (omitted ? " (omitted)" : ""),
                    {direction: 'top', className: 'aln-tip'});
     piLayers.push(mk);
   });
+}
+
+/* Move ONE PI marker in place (during/after a drag) instead of tearing down
+   and recreating every marker — the old showPIOverlay(_lastPIPayload) full
+   rebuild was also why the marker under the cursor visibly snapped. */
+function movePIMarker(id, latlon) {
+  if (_lastPIPayload) {
+    (_lastPIPayload.pis || []).forEach(function(pi) {
+      if (pi.id === id) pi.latlon = latlon;
+    });
+  }
+  for (var i = 0; i < piLayers.length; i++) {
+    var l = piLayers[i];
+    if (l._piId === id && typeof l.setLatLng === 'function') {
+      l.setLatLng(latlon);
+      return;
+    }
+  }
+}
+
+/* Rebuild only the dashed virtual-tangent stubs, leaving PI markers alone. */
+function updatePITangents(tangents) {
+  var kept = [];
+  piLayers.forEach(function(l) {
+    if (l._isTangent) { try { map.removeLayer(l); } catch(e){} }
+    else kept.push(l);
+  });
+  piLayers = kept;
+  (tangents || []).forEach(function(t) {
+    var pl = L.polyline([t.from, t.to], {
+      color: MAP_COLORS.piOmitted, weight: 2, opacity: 0.55,
+      dashArray: '6 6', pane: 'piPane'
+    }).addTo(map);
+    pl._isTangent = true;
+    piLayers.push(pl);
+  });
+  if (_lastPIPayload) _lastPIPayload.tangents = tangents;
 }
 
 function clearPIOverlay() {
@@ -742,6 +963,7 @@ function clearAlignment() {
   alignmentLayers = [];
   alignEntries = [];
   segIndex = {};
+  _highlightedIds = {};
   _clearHover();
 }
 
@@ -777,15 +999,26 @@ function clearCandidates() {
 }
 
 /* ── Cross-section overlays (left / right, colour-coded) ──────── */
+/* Consecutive same-colour samples are grouped into ONE multi-vertex canvas
+   polyline per run — the old one-polyline-per-5m-sample-pair built ~20 000
+   SVG paths on a 50 km line and made pan/zoom permanently stutter. */
 function showCrossSection(leftPts, rightPts) {
   clearCrossSection();
   function buildLayer(pts) {
     var layer = L.layerGroup();
-    for (var i = 0; i < pts.length - 1; i++) {
-      L.polyline(
-        [[pts[i][0], pts[i][1]], [pts[i+1][0], pts[i+1][1]]],
-        {color: pts[i][2], weight: 4, opacity: 0.85, pane: 'crossSectionPane'}
-      ).addTo(layer);
+    var i = 0;
+    while (i < pts.length - 1) {
+      var color = pts[i][2];
+      var run = [[pts[i][0], pts[i][1]]];
+      var j = i;
+      while (j < pts.length - 1 && pts[j][2] === color) {
+        run.push([pts[j+1][0], pts[j+1][1]]);
+        j++;
+      }
+      L.polyline(run, {color: color, weight: 4, opacity: 0.85,
+                       pane: 'crossSectionPane', renderer: _csRenderer,
+                       interactive: false}).addTo(layer);
+      i = j;
     }
     return layer;
   }

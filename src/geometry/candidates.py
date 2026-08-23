@@ -39,6 +39,7 @@ class CandidateAlignment:
     elements:            list
     max_deviation:       float = 0.0
     rmse:                float = 0.0
+    mean_deviation:      float = 0.0
     n_elements:          int   = 0
     color_hex:           str   = "#ffffff"
     geo_wgs84:           list  = field(default_factory=list)
@@ -50,6 +51,10 @@ class CandidateAlignment:
     # Editable PI model (Level 2/3 only; None otherwise). Source of truth
     # for interactive editing in Step 5 — see PIAlignment.
     pi_model:            object = None
+    # Curve runs auto-consolidated during generation (geometry.candidates.
+    # auto_consolidate) before this candidate was scored — 0 if the setting
+    # was off or nothing qualified.
+    auto_merged:         int    = 0
 
 
 @dataclass
@@ -121,6 +126,12 @@ class PIAlignment:
     # Deviation stats from the last rebuild (compute_deviation_stats result);
     # reused by the GUI so a rebuild costs exactly one pass.
     last_stats:     dict = field(default_factory=dict)
+    # Element-list splice from the last `rebuild_pi_span` success — lets the
+    # GUI ship only the changed elements to the map instead of the whole
+    # alignment. {"start": i, "removed": n, "added": m} or None after a full
+    # rebuild (rebuild_from_pi_model / fallback), where no localized splice
+    # exists.
+    last_splice:    dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +195,7 @@ def compute_deviation_stats(elements: list[dict], xy: np.ndarray) -> dict:
 
     Returns
     -------
-    {"max_deviation": float, "rmse": float,
+    {"max_deviation": float, "rmse": float, "mean_deviation": float,
      "per_element": [(max_dev, mean_dev, n_points), ...],   # one per element
      "point_dist": (P,) float array,   # per-OSM-point nearest distance
      "point_elem": (P,) int array}     # per-OSM-point nearest element index
@@ -193,7 +204,7 @@ def compute_deviation_stats(elements: list[dict], xy: np.ndarray) -> dict:
     stats incrementally instead of re-running this whole E×P pass.
     """
     n_el = len(elements)
-    empty = {"max_deviation": 0.0, "rmse": 0.0,
+    empty = {"max_deviation": 0.0, "rmse": 0.0, "mean_deviation": 0.0,
              "per_element": [(0.0, 0.0, 0)] * n_el}
     if n_el == 0 or xy is None or len(xy) == 0:
         return empty
@@ -226,7 +237,7 @@ def _stats_from_point_arrays(point_dist: np.ndarray, point_elem: np.ndarray,
     """
     ok = np.isfinite(point_dist)
     if not ok.any() or n_el == 0:
-        return {"max_deviation": 0.0, "rmse": 0.0,
+        return {"max_deviation": 0.0, "rmse": 0.0, "mean_deviation": 0.0,
                 "per_element": [(0.0, 0.0, 0)] * n_el}
     b  = point_dist[ok]
     bi = point_elem[ok]
@@ -243,9 +254,10 @@ def _stats_from_point_arrays(point_dist: np.ndarray, point_elem: np.ndarray,
         for i in range(n_el)
     ]
     return {
-        "max_deviation": float(b.max()),
-        "rmse":          float(math.sqrt(float(np.mean(b * b)))),
-        "per_element":   per_element,
+        "max_deviation":  float(b.max()),
+        "rmse":           float(math.sqrt(float(np.mean(b * b)))),
+        "mean_deviation": float(b.mean()),
+        "per_element":    per_element,
     }
 
 
@@ -258,6 +270,7 @@ def metrics_from_stats(stats: dict, elements: list[dict]) -> dict:
     return {
         "max_deviation":        float(stats.get("max_deviation", 0.0)),
         "rmse":                 float(stats.get("rmse", 0.0)),
+        "mean_deviation":       float(stats.get("mean_deviation", 0.0)),
         "n_elements":           len(elements),
         "max_heading_jump_deg": float(math.degrees(jj_rad)),
     }
@@ -277,11 +290,12 @@ def evaluate_candidate(
     stations relative to the original OSM chainages), hence `chainages` and
     `check_interval` are accepted for API compatibility but not needed.
 
-    Returns dict with keys: max_deviation, rmse, n_elements, max_heading_jump_deg
+    Returns dict with keys: max_deviation, rmse, mean_deviation, n_elements,
+    max_heading_jump_deg
     """
     if not elements or xy is None or len(xy) < 2:
-        return {"max_deviation": 0.0, "rmse": 0.0, "n_elements": len(elements),
-                "max_heading_jump_deg": 0.0}
+        return {"max_deviation": 0.0, "rmse": 0.0, "mean_deviation": 0.0,
+                "n_elements": len(elements), "max_heading_jump_deg": 0.0}
     return metrics_from_stats(compute_deviation_stats(elements, xy), elements)
 
 
@@ -980,11 +994,19 @@ class CandidateGenerator:
             use_spirals   = False,
             progress_cb   = _p,
         )
+        auto_merged = 0
+        if self.settings.get("auto_consolidate", True) and len(model.V) >= 4:
+            _p("Auto-consolidating same-direction curve runs…")
+            auto_merged = auto_consolidate(model, max_dev_m=self.max_deviation)
+            if auto_merged:
+                _p(f"Auto-merged {auto_merged} curve run(s)")
         elements = model.elements
         _p("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
-        return CandidateAlignment("level2", self.LABELS["level2"], elements,
-                                  pi_model=model, **metrics)
+        c = CandidateAlignment("level2", self.LABELS["level2"], elements,
+                               pi_model=model, **metrics)
+        c.auto_merged = auto_merged
+        return c
 
     def _run_level3(self, progress_cb=None) -> CandidateAlignment:
         """
@@ -1009,11 +1031,19 @@ class CandidateGenerator:
             use_spirals   = True,
             progress_cb   = _p,
         )
+        auto_merged = 0
+        if self.settings.get("auto_consolidate", True) and len(model.V) >= 4:
+            _p("Auto-consolidating same-direction curve runs…")
+            auto_merged = auto_consolidate(model, max_dev_m=self.max_deviation)
+            if auto_merged:
+                _p(f"Auto-merged {auto_merged} curve run(s)")
         elements = model.elements
         _p("Evaluating quality…")
         metrics = evaluate_candidate(elements, self.xy, self.chainages, self.check_interval)
-        return CandidateAlignment("level3", self.LABELS["level3"], elements,
-                                  pi_model=model, **metrics)
+        c = CandidateAlignment("level3", self.LABELS["level3"], elements,
+                               pi_model=model, **metrics)
+        c.auto_merged = auto_merged
+        return c
 
 
 # ---------------------------------------------------------------------------
@@ -3162,15 +3192,20 @@ def _merge_pi_clusters(
     V   : (m, 2) tangent-polygon vertices (V[0], V[-1] are the endpoints)
     idx : original polyline index of each vertex (for radius estimation)
     """
-    V   = V.copy()
+    # A python list (slice-assignment) instead of repeated np.vstack: same
+    # per-merge arithmetic and merge order (so the result is identical),
+    # but avoids reallocating + copying the whole float64 buffer on every
+    # single merge — np.vstack shows up as O(m) allocations per pass on a
+    # long, cluster-heavy polyline.
+    V_list: list = list(V)
     idx = list(idx)
     for _ in range(max_passes):
-        if len(V) < 4:
+        if len(V_list) < 4:
             break
         merged_any = False
         k = 1
-        while k < len(V) - 2:
-            A, P1, P2, B = V[k - 1], V[k], V[k + 1], V[k + 2]
+        while k < len(V_list) - 2:
+            A, P1, P2, B = V_list[k - 1], V_list[k], V_list[k + 1], V_list[k + 2]
             d_mid = float(np.hypot(*(P2 - P1)))
             if d_mid > merge_dist:
                 k += 1
@@ -3194,11 +3229,12 @@ def _merge_pi_clusters(
                 k += 1
                 continue
             PI_new = P1 + t * np.array([math.cos(phi_in), math.sin(phi_in)])
-            V   = np.vstack([V[:k], PI_new[None, :], V[k + 2:]])
-            idx = idx[:k] + [(idx[k] + idx[k + 1]) // 2] + idx[k + 2:]
+            V_list[k:k + 2] = [PI_new]
+            idx[k:k + 2]    = [(idx[k] + idx[k + 1]) // 2]
             merged_any = True
         if not merged_any:
             break
+    V = np.array(V_list, dtype=float)
     return V, idx
 
 
@@ -3818,6 +3854,7 @@ def rebuild_from_pi_model(model: "PIAlignment", progress_cb=None) -> list[dict]:
 
     model.tangent_stubs = []
     model.log = []
+    model.last_splice = None   # a full rebuild has no localized splice
 
     if m < 2:
         model.elements = []
@@ -3963,9 +4000,10 @@ def _span_snapshot(model: "PIAlignment") -> dict:
     """Everything a splice mutates, for O(span) rollback without a rebuild."""
     st = model.last_stats or {}
     stats_copy: dict = {
-        "max_deviation": st.get("max_deviation", 0.0),
-        "rmse":          st.get("rmse", 0.0),
-        "per_element":   list(st.get("per_element") or []),
+        "max_deviation":  st.get("max_deviation", 0.0),
+        "rmse":           st.get("rmse", 0.0),
+        "mean_deviation": st.get("mean_deviation", 0.0),
+        "per_element":    list(st.get("per_element") or []),
     }
     if st.get("point_dist") is not None:
         stats_copy["point_dist"] = st["point_dist"].copy()
@@ -3991,6 +4029,9 @@ def restore_span_snapshot(model: "PIAlignment", snap: dict) -> None:
     model.elements = snap["elements"]
     model.tangent_stubs = snap["stubs"]
     model.last_stats = snap["stats"]
+    # A rollback reverts to a prior known-good state, not a fresh localized
+    # edit — no splice describes it meaningfully to a GUI-side patch.
+    model.last_splice = None
     # The splice may have overwritten _max_dev / ids / sta on the kept
     # prefix dicts — rewrite them from the restored stats (all O(E)-cheap).
     annotate_element_deviations(model.elements, model.xy_ref,
@@ -4225,6 +4266,7 @@ def rebuild_pi_span(model: "PIAlignment", k_lo: int, k_hi: int, *,
     model.tangent_stubs = kept_before + built_stubs + kept_after
     model.elements = new_list
     model.last_stats = stats
+    model.last_splice = {"start": i0, "removed": i1_end - i0, "added": len(built)}
     return snap
 
 
@@ -4338,16 +4380,22 @@ def extract_pi_model(
         # curves via the self-healing construction, so C1 continuity is
         # unaffected — but a spurious PI would clip the radius-estimation
         # window of its neighbour and bias the fitted radius.
+        # Deleting vertex k only changes the deflection AT k-1 (its right
+        # neighbour moved) and at the vertex that shifts into k (its left
+        # neighbour moved) — every position left of k-1 is provably
+        # unaffected (its own neighbours didn't move) and was already
+        # confirmed >= threshold. Resuming at k-1 instead of restarting the
+        # whole scan from 1 therefore visits the identical leftmost-first
+        # deletion order, just without re-walking the confirmed prefix.
         MIN_PI_DEFL = math.radians(0.7)
-        changed = True
-        while changed and len(V) > 2:
-            changed = False
-            for k in range(1, len(V) - 1):
-                if abs(_polygon_deflection(V, k)) < MIN_PI_DEFL:
-                    V   = np.delete(V, k, axis=0)
-                    idx = idx[:k] + idx[k + 1:]
-                    changed = True
-                    break
+        k = 1
+        while k < len(V) - 1:
+            if abs(_polygon_deflection(V, k)) < MIN_PI_DEFL:
+                V   = np.delete(V, k, axis=0)
+                idx = idx[:k] + idx[k + 1:]
+                k = max(1, k - 1)
+            else:
+                k += 1
         _p(f"{len(V) - 2} PIs found")
 
     model = PIAlignment(
@@ -4362,6 +4410,10 @@ def extract_pi_model(
         return model
 
     # ── Construct; merge split curves; reconstruct (bounded loop) ────────
+    # Only the first rebuild needs to be full: each split-curve re-merge
+    # touches exactly one PI pair, so the span-local rebuild used for every
+    # interactive edit applies here too — up to 6 full O(E·P) passes
+    # (this loop's old cost) collapse to 6 span-local ones.
     elements = rebuild_from_pi_model(model, progress_cb)
     for _ in range(6):
         if len(model.V) < 4:
@@ -4372,10 +4424,32 @@ def extract_pi_model(
         merged = _merge_polygon_pair(model.V, model.idx, pair[0])
         if merged is None:
             break
-        model.V, model.idx = merged
-        model.pis = _fresh_pis(model.V)
-        _p(f"Merged split curve at PI {pair[0]} — {len(model.V) - 2} PIs")
-        elements = rebuild_from_pi_model(model, progress_cb)
+        k = pair[0]
+        new_V, new_idx = merged
+        # Only the merged PI needs a fresh PIData — _fresh_pis(model.V)
+        # would rebuild EVERY PI, discarding the auto radius/spiral_len
+        # rebuild_pi_span below is about to write back for one PI only,
+        # silently reverting every OTHER (untouched) PI's applied value to
+        # the unset sentinel every time this loop runs.
+        old_pis = model.pis
+        new_pis: list = []
+        for p in old_pis:
+            if p.index < k:
+                new_pis.append(p)
+            elif p.index > k + 1:
+                p.index -= 1
+                new_pis.append(p)
+            # PIs at k and k+1 (the merged pair) are dropped
+        model.V, model.idx = new_V, new_idx
+        new_pis.insert(k - 1, PIData(
+            index=k, xy=(float(new_V[k, 0]), float(new_V[k, 1])),
+            deflection=_polygon_deflection(new_V, k)))
+        model.pis = new_pis
+        _p(f"Merged split curve at PI {k} — {len(model.V) - 2} PIs")
+        # Falls back to a full rebuild internally on any edge case — model
+        # is valid either way, we just read the result back.
+        rebuild_pi_span(model, k, k, old_lo=k, old_hi=k + 1, k_shift=-1)
+        elements = model.elements
 
     return model
 
@@ -5336,6 +5410,46 @@ def apply_consolidation(model: "PIAlignment", groups: list[dict],
         if progress_cb:
             progress_cb(n_done, len(todo))
     return applied, msgs
+
+
+def auto_consolidate(model: "PIAlignment", max_straight_m: float = 30.0,
+                     max_dev_m: float = 2.0, max_passes: int = 3) -> int:
+    """
+    Automatically consolidate every within-tolerance curve run — the same
+    scan/apply machinery the manual "Consolidate curve runs" tool uses
+    (`find_consolidation_groups` / `apply_consolidation`), run unattended
+    during candidate generation so the fitting engine hands back clean
+    tangent polygons instead of 4-5 micro-arcs per physical curve.
+
+    Loops because applying a run can bring a PREVIOUSLY non-adjacent curve
+    into direct contact with its neighbour (e.g. three curves A-B-C where
+    only A-B qualified on the first pass; merging A-B may now put the
+    result close enough to C to qualify too). Stops when a pass finds
+    nothing left to merge, or after `max_passes`.
+
+    Deviation bound is `max_dev_m` (the same OSM-fit tolerance the caller
+    is already using for the candidate) — a run that would exceed it is
+    left un-merged, exactly like the manual tool. `apply_consolidation` is
+    back-to-front per pass, and each pass re-scans, so looping is index-
+    safe. Called only during candidate generation, before the model is
+    exposed to the GUI — no threading precautions are needed here (compare
+    `find_consolidation_groups`' own thread-safety note).
+
+    Returns the number of curve runs merged across all passes (0 if none).
+    """
+    total_applied = 0
+    for _ in range(max_passes):
+        groups = find_consolidation_groups(model, max_straight_m, max_dev_m)
+        ok_groups = [g for g in groups if g["ok"]]
+        if not ok_groups:
+            break
+        n, msgs = apply_consolidation(model, ok_groups)
+        if n == 0:
+            break
+        total_applied += n
+        for m in msgs:
+            model.log.append(f"Auto-consolidate: {m}")
+    return total_applied
 
 
 # ---------------------------------------------------------------------------

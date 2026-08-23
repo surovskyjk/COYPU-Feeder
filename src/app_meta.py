@@ -7,7 +7,7 @@ LandXML builder and the packaging spec.
 from __future__ import annotations
 
 APP_NAME    = "COYPU Feeder"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_TAGLINE = "OSM railways → LandXML alignments"
 
 REPO_URL    = "https://github.com/surovskyjk/COYPU-Feeder"
