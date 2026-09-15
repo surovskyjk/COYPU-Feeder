@@ -24,8 +24,22 @@ class Step3Configure(QWidget):
     config_confirmed = Signal(dict)
     back_requested   = Signal()   # user wants to go back to Select Section
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, defaults: dict | None = None):
         super().__init__(parent)
+        # App-wide engineering defaults (Settings → Preferences) pre-fill
+        # this step for a NEW project; every value below stays a per-
+        # project override the user can still change right here. The last
+        # five have no dedicated widget in this step at all — they flow
+        # straight from the preference into the emitted settings dict.
+        d = defaults or {}
+        self._default_max_deviation      = float(d.get("default_max_deviation", 1.0))
+        self._default_min_radius         = float(d.get("default_min_radius", 150.0))
+        self._default_spiral_length      = float(d.get("default_spiral_length", 20.0))
+        self._default_pi_min_tangent     = float(d.get("default_pi_min_tangent", 60.0))
+        self._default_min_tangent_length = float(d.get("default_min_tangent_length", 30.0))
+        self._default_min_line_length    = float(d.get("default_min_line_length", 10.0))
+        self._default_min_arc_length     = float(d.get("default_min_arc_length", 10.0))
+        self._default_min_spiral_length  = float(d.get("default_min_spiral_length", 10.0))
         self._build()
 
     def _build(self):
@@ -61,7 +75,7 @@ class Step3Configure(QWidget):
         self._max_dev_spin = QDoubleSpinBox()
         self._max_dev_spin.setRange(0.1, 10.0)
         self._max_dev_spin.setSingleStep(0.1)
-        self._max_dev_spin.setValue(1.0)
+        self._max_dev_spin.setValue(self._default_max_deviation)
         self._max_dev_spin.setSuffix(" m")
         self._max_dev_spin.setToolTip(
             "Douglas-Peucker tolerance used to extract the tangent polygon\n"
@@ -78,7 +92,7 @@ class Step3Configure(QWidget):
         self._min_radius_spin.setRange(50.0, 10000.0)
         self._min_radius_spin.setSingleStep(25.0)
         self._min_radius_spin.setDecimals(0)
-        self._min_radius_spin.setValue(150.0)
+        self._min_radius_spin.setValue(self._default_min_radius)
         self._min_radius_spin.setSuffix(" m")
         self._min_radius_spin.setToolTip(
             "Minimum horizontal curve radius for all circular arcs.\n"
@@ -94,7 +108,7 @@ class Step3Configure(QWidget):
         self._spiral_length_spin.setRange(0.0, 200.0)
         self._spiral_length_spin.setSingleStep(5.0)
         self._spiral_length_spin.setDecimals(0)
-        self._spiral_length_spin.setValue(20.0)
+        self._spiral_length_spin.setValue(self._default_spiral_length)
         self._spiral_length_spin.setSuffix(" m")
         self._spiral_length_spin.setSpecialValueText("Disabled")
         self._spiral_length_spin.setToolTip(
@@ -199,17 +213,20 @@ class Step3Configure(QWidget):
             "min_radius":      self._min_radius_spin.value(),
             "spiral_length":   self._spiral_length_spin.value(),
             "auto_consolidate": self._auto_consolidate_chk.isChecked(),
+            "pi_min_tangent":     self._default_pi_min_tangent,
+            "min_tangent_length": self._default_min_tangent_length,
+            "min_line_length":    self._default_min_line_length,
+            "min_arc_length":     self._default_min_arc_length,
+            "min_spiral_length":  self._default_min_spiral_length,
             # Defaults for keys still referenced by legacy code paths
-            # (old algorithms remain callable from CandidateGenerator).
+            # (old algorithms remain callable from CandidateGenerator) —
+            # not exposed as engineering-default preferences since they're
+            # internal fitting-search knobs, not railway design parameters.
             "smooth_window":      21,
             "merge_radius_pct":   15.0,
             "time_budget_s":      60.0,
             "division_length":    500.0,
-            "min_tangent_length": 30.0,
             "min_kappa_radius":   0.0,
             "min_kappa_length":   200.0,
             "check_interval":     5.0,
-            "min_line_length":    10.0,
-            "min_arc_length":     10.0,
-            "min_spiral_length":  10.0,
         })

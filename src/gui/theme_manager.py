@@ -312,6 +312,26 @@ QPushButton[seriesToggle="true"]:!checked {{
     border: 1px solid {TOGGLE_OFF_BORDER};
     border-radius: 3px;
 }}
+QWidget#MainToolbarRow {{
+    background: {tokens['window']};
+    border-bottom: 1px solid {tokens['border']};
+}}
+QScrollArea#MainToolbarScroll {{
+    background: {tokens['window']};
+    border: none;
+}}
+QScrollArea#MainToolbarScroll > QWidget > QWidget {{
+    background: {tokens['window']};
+}}
+QToolButton#ToolbarScrollArrow {{
+    background: {tokens['window']};
+    border: none;
+    padding: 2px;
+}}
+QToolButton#ToolbarScrollArrow:hover {{
+    background: {tokens['alternateBase']};
+    border: 1px solid {tokens['border']};
+}}
 QHeaderView::section {{
     background: {tokens['button']};
     color: {tokens['text']};
@@ -334,6 +354,67 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
     color: {tokens['disabledText']};
     background: {tokens['alternateBase']};
+}}
+/* Step-arrow visibility (Req 8): styling QSpinBox/QDoubleSpinBox at all
+   hands their subcontrol layout to QStyleSheetStyle, which then needs an
+   explicit ::up-button/::down-button rect or its default one collides with
+   the rule above's padding — the arrows end up squeezed behind the text or
+   entirely unclickable. Reserve the room and draw them explicitly instead
+   of relying on the platform style's (now bypassed) default. */
+QSpinBox, QDoubleSpinBox {{
+    padding-right: 16px;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 15px;
+    height: 10px;
+    border-left: 1px solid {tokens['border']};
+    border-bottom: 1px solid {tokens['border']};
+    border-top-right-radius: 3px;
+    background: {tokens['button']};
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 15px;
+    height: 10px;
+    border-left: 1px solid {tokens['border']};
+    border-top: 1px solid {tokens['border']};
+    border-bottom-right-radius: 3px;
+    background: {tokens['button']};
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {tokens['alternateBase']};
+}}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background: {tokens['highlight']};
+}}
+QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled,
+QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled {{
+    background: {tokens['alternateBase']};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: none;
+    width: 0; height: 0;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-bottom: 4px solid {tokens['text']};
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: none;
+    width: 0; height: 0;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 4px solid {tokens['text']};
+}}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {{
+    border-bottom-color: {tokens['disabledText']};
+}}
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+    border-top-color: {tokens['disabledText']};
 }}
 QComboBox::drop-down {{
     border-left: 1px solid {tokens['border']};

@@ -88,12 +88,16 @@ var map = L.map('map', {
 
 /* Custom panes for z-ordering */
 map.createPane('tracksPane').style.zIndex      = '410';
-map.createPane('piPane').style.zIndex          = '615';
 map.createPane('osmRefPane').style.zIndex      = '630';
 map.createPane('candidatesPane').style.zIndex  = '620';
 map.createPane('alignmentGlowPane').style.zIndex = '640';
 map.createPane('alignmentPane').style.zIndex   = '650';
 map.createPane('crossSectionPane').style.zIndex = '625';
+/* piPane/stationPane hold interactive marker DOM, not canvas — they must sit
+   ABOVE every preferCanvas vector pane above, or that pane's <canvas> (which
+   has no per-pixel pointer-events, unlike SVG) physically intercepts clicks
+   over the whole viewport before a marker/badge underneath ever sees them. */
+map.createPane('piPane').style.zIndex          = '655';
 map.createPane('stationPane').style.zIndex     = '660';
 
 /* Canvas renderers for the alignment: a long line has hundreds of elements,
@@ -108,6 +112,20 @@ map.createPane('stationPane').style.zIndex     = '660';
 var _alnRenderer  = L.canvas({ pane: 'alignmentPane',     padding: 2.0 });
 var _glowRenderer = L.canvas({ pane: 'alignmentGlowPane', padding: 2.0 });
 var _csRenderer   = L.canvas({ pane: 'crossSectionPane',  padding: 2.0 });
+/* piPane/stationPane hold only a handful of shapes each (unlike the
+   alignment's hundreds of elements, where canvas is the right call) — give
+   them an EXPLICIT SVG renderer instead of falling through to preferCanvas's
+   default. An SVG renderer sets pointer-events:none on its own root and
+   opts individual shapes back in, so empty space is truly click-through;
+   the default canvas renderer preferCanvas would otherwise create is one
+   opaque, full-viewport element that swallows every click over it — the
+   exact bug already fixed once for alignmentPane vs piPane (see the pane
+   z-index comment above), which resurfaces at the NEXT pane up (station
+   markers, sitting above piPane) the moment any station exists on the map
+   at the same time PIs are being edited (Refine & Consolidate always shows
+   both once a project has stations recorded). */
+var _piRenderer      = L.svg({ pane: 'piPane' });
+var _stationRenderer = L.svg({ pane: 'stationPane' });
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -285,18 +303,32 @@ function setOSMReferenceStyle(visible, color, opacity) {
   });
 }
 
-/* ── Fitted alignment overlay (solid red) ───────────────────────  */
-function showAlignment(alns) {
+/* ── Fitted alignment overlay (solid red, or a muted "degraded" look) ── */
+function showAlignment(alns, style) {
   clearAlignment();
   var all = [];
+  // "degraded": an edit-driven refresh's segmented render failed and this
+  // is an unplanned fallback (see App._sample_segments) — draw thin/muted
+  // in a pane BELOW osmRefPane so it never buries the OSM reference the
+  // way the bold "selected" preview (meant for candidate/export contexts,
+  // where nothing else is competing for attention) deliberately does.
+  var degraded = style === 'degraded';
   alns.forEach(function(aln) {
     var latlngs = aln.nodes.map(function(n){ return [n[0],n[1]]; });
     if (latlngs.length < 2) return;
     all = all.concat(latlngs);
-    var glow = L.polyline(latlngs, {color:MAP_COLORS.glow, weight:14, opacity:0.2, pane:'alignmentGlowPane'}).addTo(map);
-    var bright = L.polyline(latlngs, {color:MAP_COLORS.selected, weight:5, opacity:1.0, pane:'alignmentPane'}).addTo(map);
-    alignmentLayers.push(glow);
-    alignmentLayers.push(bright);
+    if (degraded) {
+      var plain = L.polyline(latlngs, {
+        color: MAP_COLORS.alignmentDegraded, weight: 3, opacity: 0.65,
+        pane: 'candidatesPane'
+      }).addTo(map);
+      alignmentLayers.push(plain);
+    } else {
+      var glow = L.polyline(latlngs, {color:MAP_COLORS.glow, weight:14, opacity:0.2, pane:'alignmentGlowPane'}).addTo(map);
+      var bright = L.polyline(latlngs, {color:MAP_COLORS.selected, weight:5, opacity:1.0, pane:'alignmentPane'}).addTo(map);
+      alignmentLayers.push(glow);
+      alignmentLayers.push(bright);
+    }
   });
   if (all.length)
     try { map.flyToBounds(L.latLngBounds(all), {padding:[30,30], duration:0.8}); } catch(e){}
@@ -492,7 +524,10 @@ function _rebuildSegIndex() {
 function _addSegmentLayer(seg) {
   var pts = (seg.points || []).map(function(n){ return [n[0], n[1]]; });
   if (pts.length < 2) return null;
-  var col = ELEMENT_COLOR[seg.type] || MAP_COLORS.elementFallback;
+  /* seg.color (Req 9b: deviation heatmap mode) overrides the type-based
+     colour when Python sends one — hover/click/highlight are unaffected,
+     they all key off entry.eid, never colour. */
+  var col = seg.color || ELEMENT_COLOR[seg.type] || MAP_COLORS.elementFallback;
   /* Coloured main element (canvas-rendered: far cheaper for many paths) */
   var pl = L.polyline(pts, {
     color: col, weight: 4, opacity: 0.95,
@@ -624,11 +659,14 @@ function updateAlignmentSegmented(segments) {
 /* Span-local patch after a `rebuild_pi_span` edit (PI drag, radius/spiral
    edit, merge, omit, …): Python already knows the exact splice — replace
    alignEntries[start:start+deleteCount] with newSegments (full geometry),
-   and retarget every OTHER entry's tooltip/params from the parallel `metas`
-   list (ids/stations shift after a merge even for elements whose geometry
-   didn't move). Returns false on a bookkeeping mismatch so the caller can
-   fall back to a full update — this is a rare defensive path since
-   MapWidget already checks its own entry count before calling. */
+   and retarget every OTHER entry FROM `start` ONWARD's tooltip/params from
+   the parallel `metas` list (ids/stations shift for everything after the
+   edit point even when an element's own geometry didn't move). `metas`
+   covers new-list indices [start, end) only — entries before `start` are
+   untouched by construction and were never sent. Returns false on a
+   bookkeeping mismatch so the caller can fall back to a full update — this
+   is a rare defensive path since MapWidget already checks its own entry
+   count before calling. */
 function patchAlignmentSegmented(start, deleteCount, newSegments, metas) {
   var removed = alignEntries.splice(start, deleteCount);
   removed.forEach(function(e){
@@ -641,13 +679,14 @@ function patchAlignmentSegmented(start, deleteCount, newSegments, metas) {
     if (entry) inserted.push(entry);
   }
   Array.prototype.splice.apply(alignEntries, [start, 0].concat(inserted));
-  if (alignEntries.length !== metas.length) {
+  if (alignEntries.length !== start + metas.length) {
     return false;    // desync — caller falls back to a full redraw
   }
   for (var i = 0; i < metas.length; i++) {
-    if (i >= start && i < start + inserted.length) continue;  // just built
-    alignEntries[i].seg = metas[i];
-    alignEntries[i].eid = (metas[i].params || {}).element_id || null;
+    if (i < inserted.length) continue;   // just built — metas[0] aligns with alignEntries[start]
+    var idx = start + i;
+    alignEntries[idx].seg = metas[i];
+    alignEntries[idx].eid = (metas[i].params || {}).element_id || null;
   }
   alignmentLayers = [];
   alignEntries.forEach(function(e){
@@ -792,7 +831,7 @@ function showPIOverlay(payload) {
   (payload.tangents || []).forEach(function(t) {
     var pl = L.polyline([t.from, t.to], {
       color: MAP_COLORS.piOmitted, weight: 2, opacity: 0.55,
-      dashArray: '6 6', pane: 'piPane'
+      dashArray: '6 6', pane: 'piPane', renderer: _piRenderer
     }).addTo(map);
     pl._isTangent = true;
     piLayers.push(pl);
@@ -837,7 +876,7 @@ function showPIOverlay(payload) {
     mk = L.circleMarker(pi.latlon, {
       radius: 5, color: omitted ? MAP_COLORS.piOmitted : MAP_COLORS.piBorder, weight: 2,
       fillColor: omitted ? 'transparent' : MAP_COLORS.piFill,
-      fillOpacity: omitted ? 0.0 : 0.9, pane: 'piPane',
+      fillOpacity: omitted ? 0.0 : 0.9, pane: 'piPane', renderer: _piRenderer,
     }).addTo(map);
     mk._piId = pi.id;
     mk.bindTooltip("PI " + pi.id + d + (omitted ? " (omitted)" : ""),
@@ -875,7 +914,7 @@ function updatePITangents(tangents) {
   (tangents || []).forEach(function(t) {
     var pl = L.polyline([t.from, t.to], {
       color: MAP_COLORS.piOmitted, weight: 2, opacity: 0.55,
-      dashArray: '6 6', pane: 'piPane'
+      dashArray: '6 6', pane: 'piPane', renderer: _piRenderer
     }).addTo(map);
     pl._isTangent = true;
     piLayers.push(pl);
@@ -886,6 +925,8 @@ function updatePITangents(tangents) {
 function clearPIOverlay() {
   piLayers.forEach(function(l){ try{ map.removeLayer(l); }catch(e){} });
   piLayers = [];
+  _lastPIPayload = null;
+  _piLocked = {};
 }
 
 /* Toggling edit mode re-renders the CURRENT PI set with the appropriate
@@ -903,7 +944,8 @@ function showStations(stations) {
   (stations || []).forEach(function(s) {
     var mk = L.circleMarker(s.latlon, {
       radius: 7, color: MAP_COLORS.stationBorder, weight: 2,
-      fillColor: MAP_COLORS.stationFill, fillOpacity: 0.95, pane: 'stationPane'
+      fillColor: MAP_COLORS.stationFill, fillOpacity: 0.95, pane: 'stationPane',
+      renderer: _stationRenderer,
     }).addTo(map);
     mk.bindTooltip("🚉 " + (s.name || "?") +
                    " · km " + Number(s.km || 0).toFixed(3),

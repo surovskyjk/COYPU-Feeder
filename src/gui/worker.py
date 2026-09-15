@@ -359,6 +359,11 @@ class FinalExportWorker(QThread):
     osm_track_ready           = Signal(list)
     alignment_ready           = Signal(list)
     alignment_segments_ready  = Signal(list)   # per-element segments payload
+    # Non-fatal: the per-element-segments build (tooltip-rich map display)
+    # failed for one track, but the export itself still completed — Req 4's
+    # fix means the map no longer depends on this succeeding, but a silent
+    # failure here was undiagnosable before, so it's surfaced now.
+    segment_build_warning     = Signal(str)
     finished                  = Signal(str, int)   # filepath, output_epsg
     failed                    = Signal(str)
 
@@ -460,8 +465,11 @@ class FinalExportWorker(QThread):
                             "params": _serialise_element_params(el),
                             "points": [list(p) for p in wgs_all[off:off + n]],
                         })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self.segment_build_warning.emit(
+                        f"⚠ Map: per-element segment build failed for "
+                        f"{track.name} ({exc}) — the post-export map falls "
+                        "back to a plain merged view for this track.")
 
             # ── Elevation (uses work_epsg xy for chainage) ───────────────────
             self.stage_changed.emit(
@@ -827,5 +835,41 @@ class ConsolidationApplyWorker(QThread):
                 progress_cb=lambda done, total: self.progress.emit(done, total),
             )
             self.finished.emit(applied, msgs)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class BatchSpiralExtendWorker(QThread):
+    """
+    Runs `batch_extend_spirals` off the GUI thread (Part D).
+
+    Signals
+    -------
+    progress(done: int, total: int)  — PIs processed so far
+    finished(result: BatchExtendResult)
+    failed(error: str)
+    """
+
+    progress = Signal(int, int)
+    finished = Signal(object)
+    failed   = Signal(str)
+
+    def __init__(self, model, target_length: float, mode: str,
+                min_radius: float | None = None, parent=None):
+        super().__init__(parent)
+        self._model = model
+        self._target_length = target_length
+        self._mode = mode
+        self._min_radius = min_radius
+
+    def run(self):
+        try:
+            from geometry.candidates import batch_extend_spirals
+            result = batch_extend_spirals(
+                self._model, self._target_length, mode=self._mode,
+                min_radius=self._min_radius,
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+            )
+            self.finished.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))

@@ -434,6 +434,13 @@ class MapWidget(QWidget):
         self._legend_visible = bool(visible)
         self._run_js(f"setLegend(null, {'true' if visible else 'false'})")
 
+    def set_legend_entries(self, entries: list):
+        """Swap the legend's own entries (Req 9b: "Colour: deviation" mode
+        uses a green/amber/red ramp legend instead of Line/Arc/Spiral) —
+        keeps whatever visibility `set_legend_visible` last set."""
+        self._run_js(f"setLegend({json.dumps(entries)}, "
+                     f"{'true' if self._legend_visible else 'false'})")
+
     def set_theme(self, dark: bool):
         self._dark = dark
         # Auto-switch to a sensible provider for the new theme — but never
@@ -473,6 +480,17 @@ class MapWidget(QWidget):
     def clear_osm_reference(self):
         self._run_js("clearOSMReference()")
 
+    def clear_tracks(self):
+        """Remove the raw OSM track layer (`tracksPane`, drawn by
+        `show_tracks`) — distinct from `clear_osm_reference`'s dashed
+        overlay. `TRACK_COLORS[0]` is opaque red and NOT governed by
+        `set_osm_reference_style`'s popover, so once editing has begun and
+        the styled dashed reference (`show_osm_reference`) has taken over,
+        the raw track layer left behind reads as an uncontrollable red
+        relict (Req: "remaining relicts... of the initial OSM polyline
+        that does not change its colour")."""
+        self._run_js_call("showTracks", [], False)
+
     def set_osm_reference_style(self, visible: bool, color: str, opacity: float):
         """
         Part E: user control of the original (OSM) alignment's appearance.
@@ -483,11 +501,19 @@ class MapWidget(QWidget):
             f"setOSMReferenceStyle({'true' if visible else 'false'}, "
             f"{json.dumps(color)}, {float(opacity)})")
 
-    def show_alignment(self, alignments: list):
+    def show_alignment(self, alignments: list, style: str = "selected"):
+        """style="selected" (default) is the bold merged-red preview used
+        when a candidate/export has no per-element breakdown yet — a
+        legitimate, deliberate look. style="degraded" is for the OTHER
+        reason this gets called: `_sample_segments` failed on an edit-driven
+        refresh (e.g. right after a split) and the map is falling back to a
+        merged redraw it didn't ask for — muted/thin so it reads as
+        "temporary" and never buries the OSM reference layer underneath it
+        the way the bold "selected" look would."""
         payload = [{"nodes": nodes} for nodes in alignments]
         self._last_highlight_ids = None
         self._js_aln_count = 0   # this path doesn't populate alignEntries
-        self._run_js_call("showAlignment", payload)
+        self._run_js_call("showAlignment", payload, style)
 
     def show_alignment_segmented(self, segments: list, fit_view: bool = True):
         """
@@ -527,9 +553,13 @@ class MapWidget(QWidget):
         Span-local update after a `rebuild_pi_span` edit: replaces
         `alignEntries[start : start+removed]` with `new_segments` (each a
         full {type, params, points} dict) and retargets every OTHER kept
-        entry's tooltip/params from the parallel `metas` list (light
-        {type, params} dicts, no points — ids and stations shift after a
-        merge/omit even for elements whose geometry didn't move).
+        entry FROM `start` ONWARD's tooltip/params from the parallel `metas`
+        list (light {type, params} dicts, no points — ids and stations
+        shift for everything after the edit point even when an element's
+        own geometry didn't move; entries BEFORE `start` are untouched by
+        construction, so `metas` covers new-list indices [start, end) only
+        — not the whole alignment, which used to be sent/retargeted on
+        every single edit regardless of where in the corridor it happened).
 
         Returns False (doing nothing) when the entry count currently on the
         page doesn't match what this splice expects — e.g. the map was
@@ -537,11 +567,12 @@ class MapWidget(QWidget):
         desynced — so the caller can fall back to a full redraw instead of
         corrupting the page's layer bookkeeping.
         """
-        old_count_expected = len(metas) - len(new_segments) + removed
+        new_total = start + len(metas)
+        old_count_expected = new_total - len(new_segments) + removed
         if getattr(self, "_js_aln_count", None) != old_count_expected:
             return False   # caller should fall back to a full redraw
         self._last_highlight_ids = None
-        self._js_aln_count = len(metas)
+        self._js_aln_count = new_total
 
         def _on_patch_result(ok):
             # The JS side can still refuse the patch (e.g. a degenerate
@@ -713,4 +744,12 @@ class MapWidget(QWidget):
         self._run_js("clearCrossSection()")
 
     def clear_all(self):
+        # clearAll() (JS) already clears tracks/osmRef/alignment/candidates/
+        # cross-section/PI-overlay; reset the Python-side dedupe caches too —
+        # otherwise a reload whose PI/highlight payload happens to JSON-match
+        # what was cached before this clear would silently no-op the next
+        # show_pi_overlay()/highlight_elements() call (a stale-map bug on
+        # project reload / New project).
+        self._last_pi_overlay = None
+        self._last_highlight_ids = None
         self._run_js("clearAll()")   # clears tracks + osmRef + alignment + candidates + cross-section

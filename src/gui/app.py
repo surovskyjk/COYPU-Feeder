@@ -12,7 +12,7 @@ from PySide6.QtGui import QGuiApplication, QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget,
     QSizePolicy, QMessageBox, QApplication, QSplitter,
-    QToolBar, QLabel,
+    QToolBar, QLabel, QScrollArea, QFrame, QToolButton, QComboBox,
 )
 
 from gui import icons
@@ -41,6 +41,36 @@ N_STEPS = 8
 
 # Maximum map-view span (km) allowed for "search in view"
 _MAX_VIEW_KM = 20.0
+
+
+def _replay_tail(log: list, already_replayed: int) -> tuple[list, int]:
+    """`log` (e.g. a PIAlignment's `.log`) only ever GROWS across edits
+    within one model's lifetime — only a full rebuild resets it to `[]`.
+    Returns (new_entries_since_last_call, updated_replayed_count):
+    just the new tail on an ordinary edit; the whole (usually short/empty)
+    log again if `log` is shorter than what was already replayed, which
+    only happens right after a reset."""
+    if len(log) < already_replayed:
+        already_replayed = 0
+    return log[already_replayed:], len(log)
+
+
+class _ToolbarScrollArea(QScrollArea):
+    """Horizontally-scrollable host for the main toolbar (Part C).
+
+    A plain QScrollArea only reacts to wheel events along the axis the
+    wheel itself reports; there's nothing to scroll vertically in a
+    single-row bar, so any wheel tick over it (Shift-held or not) pans the
+    toolbar horizontally instead of doing nothing."""
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
 
 class App(QMainWindow):
@@ -92,6 +122,14 @@ class App(QMainWindow):
         self._project_path          = None
         self._dirty                 = False
         self._split_pick_target: str | None = None   # "line" | "track" | None
+        # How much of model.log (candidates.rebuild_pi_span's accumulating
+        # clamp/skip notes — only ever reset by a full rebuild) has already
+        # been replayed to the log panel. Without this, _on_elements_rebuilt
+        # used to re-log the ENTIRE history on every single edit, so a
+        # session's Nth radius tweak cost O(N) just for logging — the one
+        # part of "editing gets slower the more you've done" that scaled
+        # with edits-so-far rather than alignment size (see _on_elements_rebuilt).
+        self._pi_log_replayed = 0
 
         self._qsettings = QSettings("COYPU", "COYPU-Feeder")
         self._prefs = self._load_prefs()
@@ -120,12 +158,28 @@ class App(QMainWindow):
             "show_toolbar": s.value("show_toolbar", True, bool),
             "show_metrics_chip": s.value("show_metrics_chip", True, bool),
             "show_map_legend": s.value("show_map_legend", True, bool),
+            # Req 9b: "type" (Line/Arc/Spiral colours) or "deviation" (green
+            # -> yellow -> red heatmap against the project's max-deviation
+            # tolerance).
+            "map_color_mode": s.value("map_color_mode", "type", str),
             "live_drag_preview": s.value("live_drag_preview", True, bool),
             "confirm_start_over": s.value("confirm_start_over", True, bool),
             # Original-alignment (OSM reference) appearance — Part E
             "osm_ref_visible": s.value("osm_ref_visible", True, bool),
             "osm_ref_color":   s.value("osm_ref_color", OSM_REF_DEFAULT, str),
             "osm_ref_opacity": float(s.value("osm_ref_opacity", 0.45, float)),
+            # Engineering defaults pre-filling Step 3 for a NEW project (see
+            # SettingsDialog.ENGINEERING_DEFAULTS for the matching fallbacks
+            # — every one a railway-engineering parameter, never an
+            # internal numerical-stability constant).
+            "default_max_deviation":     float(s.value("default_max_deviation", 1.0, float)),
+            "default_min_radius":        float(s.value("default_min_radius", 150.0, float)),
+            "default_spiral_length":     float(s.value("default_spiral_length", 20.0, float)),
+            "default_pi_min_tangent":    float(s.value("default_pi_min_tangent", 60.0, float)),
+            "default_min_tangent_length": float(s.value("default_min_tangent_length", 30.0, float)),
+            "default_min_line_length":   float(s.value("default_min_line_length", 10.0, float)),
+            "default_min_arc_length":    float(s.value("default_min_arc_length", 10.0, float)),
+            "default_min_spiral_length": float(s.value("default_min_spiral_length", 10.0, float)),
         }
 
     def _save_prefs(self):
@@ -161,6 +215,14 @@ class App(QMainWindow):
             self._prefs["osm_ref_opacity"])
         self.map_widget.set_legend_visible(self._prefs["show_map_legend"])
         self.map_widget.set_live_drag_preview(self._prefs["live_drag_preview"])
+        self.element_table.set_live_preview(self._prefs["live_drag_preview"])
+        combo = getattr(self, "_color_mode_combo", None)
+        if combo is not None:
+            i = combo.findData(self._prefs.get("map_color_mode", "type"))
+            if i >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(i)
+                combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Layout
@@ -177,17 +239,24 @@ class App(QMainWindow):
         file_menu = mb.addMenu("&File")
         new_act = QAction(icons.makeIcon("newProject"), "New project", self)
         new_act.setShortcut("Ctrl+N")
+        new_act.setToolTip(
+            "Start over with a blank project — clears the current "
+            "tracks, alignment and edit history.")
         new_act.triggered.connect(self._on_new_project)
         file_menu.addAction(new_act)
         self._act_file_new = new_act
         open_act = QAction(icons.makeIcon("open"), "Open project…", self)
         open_act.setShortcut("Ctrl+O")
+        open_act.setToolTip("Open a saved .coypuf project file.")
         open_act.triggered.connect(self._on_open_project)
         file_menu.addAction(open_act)
         self._act_file_open = open_act
         file_menu.addSeparator()
         save_act = QAction(icons.makeIcon("save"), "Save project", self)
         save_act.setShortcut("Ctrl+S")
+        save_act.setToolTip(
+            "Save tracks, alignment and edit state to the current .coypuf "
+            "file (or prompts for a location the first time).")
         save_act.triggered.connect(self._on_save_project)
         file_menu.addAction(save_act)
         self._act_file_save = save_act
@@ -224,11 +293,12 @@ class App(QMainWindow):
         view_menu.addAction(self._act_show_legend)
 
         self._act_live_drag_preview = QAction(
-            "Live PI-drag preview", self, checkable=True)
+            "Live preview while editing", self, checkable=True)
         self._act_live_drag_preview.setChecked(self._prefs["live_drag_preview"])
         self._act_live_drag_preview.setToolTip(
-            "Update the alignment continuously while dragging a PI, instead "
-            "of only when you release it.")
+            "Update the map continuously while dragging a PI or adjusting a "
+            "radius/spiral length, instead of only once you release it/stop "
+            "typing. Turn off on very long alignments if edits feel laggy.")
         self._act_live_drag_preview.toggled.connect(self._on_toggle_live_drag_preview)
         view_menu.addAction(self._act_live_drag_preview)
 
@@ -282,13 +352,15 @@ class App(QMainWindow):
         # previous single-row icon-beside-text layout.
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         tb.setIconSize(QSize(18, 18))
-        self.addToolBar(tb)
-        self._toolbar = tb   # View menu's "Show toolbar" uses tb.toggleViewAction()
+        self._toolbar = tb
 
         style = self.style()
 
         brand = QLabel("COYPU Feeder")
         brand.setObjectName("brandLabel")
+        brand.setToolTip(
+            "COYPU Feeder — converts OSM railway polylines into "
+            "C1-continuous LandXML alignments for COYPU.")
         self._brand = brand   # restyled from tokens in _on_theme_changed
         tb.addWidget(brand)
         tb.addSeparator()
@@ -313,6 +385,7 @@ class App(QMainWindow):
 
         self._step_label = QLabel("")
         self._step_label.setStyleSheet("font-weight: bold; padding: 0 10px;")
+        self._step_label.setToolTip("The wizard step currently shown.")
         tb.addWidget(self._step_label)
 
         tb.addSeparator()
@@ -377,11 +450,36 @@ class App(QMainWindow):
         # Map settings (Part J): owned/wired by MapWidget itself, laid out
         # here instead of a separate row above the map.
         tb.addSeparator()
-        tb.addWidget(QLabel("Map:"))
+        map_label = QLabel("Map:")
+        map_label.setToolTip("Base map, overlays and layer opacity.")
+        tb.addWidget(map_label)
+        self.map_widget._provider_combo.setToolTip("Base map tile provider.")
         tb.addWidget(self.map_widget._provider_combo)
+        self.map_widget._rail_chk.setToolTip(
+            "Overlay OSM railway lines on the base map.")
         tb.addWidget(self.map_widget._rail_chk)
+        self.map_widget._cadastre_chk.setToolTip(
+            "Overlay the ČÚZK cadastre (land-register) map layer.")
         tb.addWidget(self.map_widget._cadastre_chk)
+        self.map_widget._cadastre_opacity_slider.setToolTip(
+            "Cadastre layer opacity.")
         tb.addWidget(self.map_widget._cadastre_opacity_slider)
+
+        # Req 9b: alignment colour mode — element type (default) or a
+        # deviation-from-baseline heatmap.
+        self._color_mode_combo = QComboBox()
+        self._color_mode_combo.addItem("Colour: type", "type")
+        self._color_mode_combo.addItem("Colour: deviation", "deviation")
+        self._color_mode_combo.setToolTip(
+            "How the alignment is coloured on the map.\n"
+            "Type: Line / Arc / Spiral, as usual.\n"
+            "Deviation: green -> yellow -> red heatmap against the "
+            "project's max-deviation tolerance — quickly spot the worst-\n"
+            "fitting sections of a long alignment."
+        )
+        self._color_mode_combo.currentIndexChanged.connect(
+            self._on_color_mode_changed)
+        tb.addWidget(self._color_mode_combo)
 
         tb.addSeparator()
         self._act_coypu_repo = QAction(
@@ -391,6 +489,8 @@ class App(QMainWindow):
             "exports for — open its GitHub repository.")
         self._act_coypu_repo.triggered.connect(self._open_coypu_repo)
         tb.addAction(self._act_coypu_repo)
+
+        self._mount_toolbar_scroll(tb)
 
         # Back routing: each step's OWN back handler (some do overlay
         # cleanup) keyed by the step it goes back FROM — mirrors exactly
@@ -404,6 +504,64 @@ class App(QMainWindow):
             S_CROSSSEC:    lambda: self._goto_step(S_STATIONS),
             S_EXPORT:      lambda: self._goto_step(S_CROSSSEC),
         }
+
+    def _mount_toolbar_scroll(self, tb: QToolBar):
+        """Host `tb` in a horizontally-scrollable row instead of
+        QMainWindow's native toolbar area (see _build_layout). A QScrollArea
+        with `setWidgetResizable(False)` never shrinks its child below its
+        natural size, so the toolbar's own internal overflow-chevron logic
+        (which only kicks in when it's GIVEN less width than it wants) never
+        triggers — the overflow becomes scrollable instead of hidden behind
+        a bare "»" button. Small `<`/`>` buttons flank the scroll area,
+        shown only while there's something to scroll to."""
+        row = QWidget()
+        row.setObjectName("MainToolbarRow")
+        row_l = QHBoxLayout(row)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(0)
+
+        left_arrow = QToolButton()
+        left_arrow.setObjectName("ToolbarScrollArrow")
+        left_arrow.setArrowType(Qt.ArrowType.LeftArrow)
+        left_arrow.setAutoRepeat(True)
+        left_arrow.setFixedWidth(16)
+        left_arrow.setVisible(False)
+
+        right_arrow = QToolButton()
+        right_arrow.setObjectName("ToolbarScrollArrow")
+        right_arrow.setArrowType(Qt.ArrowType.RightArrow)
+        right_arrow.setAutoRepeat(True)
+        right_arrow.setFixedWidth(16)
+        right_arrow.setVisible(False)
+
+        scroll = _ToolbarScrollArea(self)
+        scroll.setObjectName("MainToolbarScroll")
+        scroll.setWidget(tb)
+        scroll.setWidgetResizable(False)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedHeight(tb.sizeHint().height())
+
+        bar = scroll.horizontalScrollBar()
+        step = 120
+
+        def _update_arrows(*_):
+            overflow = bar.maximum() > 0
+            left_arrow.setVisible(overflow)
+            right_arrow.setVisible(overflow)
+
+        left_arrow.clicked.connect(lambda: bar.setValue(bar.value() - step))
+        right_arrow.clicked.connect(lambda: bar.setValue(bar.value() + step))
+        bar.rangeChanged.connect(_update_arrows)
+
+        row_l.addWidget(left_arrow)
+        row_l.addWidget(scroll, 1)
+        row_l.addWidget(right_arrow)
+
+        self._toolbar_scroll = scroll
+        self._toolbar_row = row
+        self._central_layout.insertWidget(0, row)
 
     def _finish_menu_toolbar_wiring(self):
         """
@@ -427,17 +585,19 @@ class App(QMainWindow):
                    self._act_edit_mode, self._act_original_appearance):
             edit_menu.addAction(act)
 
-        # "Show toolbar" — Qt gives every QToolBar a ready-made, visibility-
-        # synced checkable action; just relabel and persist it.
-        self._act_show_toolbar = self._toolbar.toggleViewAction()
-        self._act_show_toolbar.setText("Show toolbar")
+        # "Show toolbar" — the toolbar is now a plain widget row (Part C's
+        # scrollable host, not QMainWindow's native toolbar area), so there's
+        # no ready-made toggleViewAction(); mirror the exact same
+        # checkable-action + _prefs["show_toolbar"] pattern by hand instead.
+        self._act_show_toolbar = QAction("Show toolbar", self, checkable=True)
         self._act_show_toolbar.setChecked(self._prefs["show_toolbar"])
-        self._toolbar.setVisible(self._prefs["show_toolbar"])
+        self._toolbar_row.setVisible(self._prefs["show_toolbar"])
         self._act_show_toolbar.toggled.connect(self._on_toggle_toolbar)
         self._view_menu.addAction(self._act_show_toolbar)
 
     def _on_toggle_toolbar(self, on: bool):
         self._prefs["show_toolbar"] = bool(on)
+        self._toolbar_row.setVisible(on)
         self._save_prefs()
 
     def _build_original_appearance_action(self, tb, style):
@@ -551,6 +711,8 @@ class App(QMainWindow):
         self.log_panel.log("Alignment restored to its default (unedited) state.", "ok")
 
     def _on_edit_mode_toggled(self, on: bool):
+        if on:
+            self._deactivate_all_tools(keep="edit")
         self.map_widget.set_pi_edit_mode(on)
         if not on:
             # Defensive: leaving edit mode mid-drag (shouldn't normally
@@ -646,6 +808,17 @@ class App(QMainWindow):
         self._render_elements_on_map(self._elements, splice=self._pi_model.last_splice)
         self._show_pi_overlay(self._pi_model, moved_only=pi_index)
 
+    def _on_radius_spiral_preview(self, elements: list, splice: dict | None):
+        """A live radius/spiral-length preview tick (element_table's own
+        coalesced timer — see ElementTableDock._apply_preview_tick).
+        Map-only refresh, same deliberate omissions as _apply_pending_drag:
+        no element-table rebuild, metrics chip or staleness marking — the
+        debounced full commit (element_table._apply_pending) catches up on
+        those once the user stops. No PI-overlay refresh either: unlike a
+        drag, a radius/spiral edit never moves a PI vertex."""
+        self._elements = list(elements)
+        self._render_elements_on_map(self._elements, splice=splice)
+
     def _on_pi_restore(self, pi_index: int):
         """The map's restore badge (Part H) asked to snap PI `pi_index`
         back to its position in `_refine_baseline`."""
@@ -734,10 +907,21 @@ class App(QMainWindow):
         self._save_prefs()
         self.map_widget.set_legend_visible(on)
 
+    def _on_color_mode_changed(self, _index: int):
+        from gui.palette import LEGEND_ENTRIES, DEVIATION_LEGEND_ENTRIES
+        mode = self._color_mode_combo.currentData() or "type"
+        self._prefs["map_color_mode"] = mode
+        self._save_prefs()
+        self.map_widget.set_legend_entries(
+            DEVIATION_LEGEND_ENTRIES if mode == "deviation" else LEGEND_ENTRIES)
+        if self._elements:
+            self._render_elements_on_map(self._elements, color_mode=mode)
+
     def _on_toggle_live_drag_preview(self, on: bool):
         self._prefs["live_drag_preview"] = bool(on)
         self._save_prefs()
         self.map_widget.set_live_drag_preview(on)
+        self.element_table.set_live_preview(on)
 
     def _reset_layout(self):
         self._map_splitter.setSizes([460, 300])
@@ -931,6 +1115,17 @@ class App(QMainWindow):
         # Repopulate the steps that own UI state
         self.step2.populate(self._tracks)
         self.map_widget.show_tracks(self._tracks)
+        if not self._elements and self._tracks:
+            # No alignment to draw at all — the map shows only the raw OSM
+            # track(s) (non-interactive, no per-element click/hover), which
+            # reads exactly like "everything is a plain red line and nothing
+            # is clickable" if this goes unnoticed. Surface it loudly rather
+            # than silently falling back to that.
+            self.log_panel.log(
+                "⚠ This project has no alignment elements to display "
+                "(no PI model in the file, or it rebuilt to nothing) — only "
+                "the raw OSM track is shown, and it isn't interactive. Re-run "
+                "Candidates for this section to rebuild the alignment.", "warn")
         if self._elements:
             metrics = metrics_from_stats(
                 getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
@@ -971,9 +1166,21 @@ class App(QMainWindow):
     def _build_layout(self):
         central = QWidget()
         self.setCentralWidget(central)
-        h = QHBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # _build_toolbar (runs after this) inserts the toolbar's scrollable
+        # row at index 0 — kept as a real full-width row in the central
+        # widget's own layout, not QMainWindow's native toolbar area, so it
+        # can be given a QScrollArea instead of being clipped behind Qt's
+        # native "»" overflow chevron when actions don't fit the window.
+        self._central_layout = outer
+
+        body = QWidget()
+        h = QHBoxLayout(body)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
+        outer.addWidget(body, 1)
 
         self.sidebar = StepSidebar()
         self.sidebar.setFixedWidth(200)
@@ -1018,7 +1225,7 @@ class App(QMainWindow):
 
         self.step1              = Step1Find()
         self.step2              = Step2Section()
-        self.step3              = Step3Configure()
+        self.step3              = Step3Configure(defaults=self._prefs)
         self.step4_candidates   = Step4Candidates()
         self.step5_design       = Step5Design()          # step 5 in the UI
         self.step6_stations     = Step6Stations()        # step 6 in the UI
@@ -1092,10 +1299,13 @@ class App(QMainWindow):
 
         # Element table (bottom dock) → rebuilds + row selection + log
         self.element_table.rebuilt.connect(self._on_elements_rebuilt)
+        self.element_table.preview_changed.connect(self._on_radius_spiral_preview)
         self.element_table.elements_selected.connect(self._on_element_rows_selected)
         self.element_table.log_message.connect(self.log_panel.log)
         self.element_table.show_alignment_requested.connect(
             self._on_show_alignment_clicked)
+        self.element_table.sync_parameters_requested.connect(
+            self._on_sync_parameters)
         self.element_table.split_pick_mode.connect(self._on_split_pick_mode)
         self.element_table.on_before_edit = self._history_push
         self.element_table.on_edit_failed = self._edit_history.discard_last_push
@@ -1106,11 +1316,13 @@ class App(QMainWindow):
         self.map_widget.pi_drag_preview.connect(self._on_pi_drag_preview)
         # Map element click (Ctrl = toggle into multiselect) → table selection
         self.map_widget.element_clicked.connect(self.element_table.select_element)
+        # Metrics chip click (Req 9a) → highlight + pan to the worst element,
+        # same round trip a table-row click already does.
+        self._metrics_chip.metric_clicked.connect(self._on_metric_clicked)
 
         # Step 6 (stations) → map markers / click mode / navigation
         self.step6_stations.stations_changed.connect(self._on_stations_changed)
-        self.step6_stations.map_click_mode.connect(
-            self.map_widget.set_station_click_mode)
+        self.step6_stations.map_click_mode.connect(self._on_station_pick_mode)
         self.step6_stations.stations_done.connect(self._on_stations_done)
         self.step6_stations.back_requested.connect(lambda: self._goto_step(S_DESIGN))
         self.map_widget.map_clicked.connect(self.step6_stations.on_map_clicked)
@@ -1126,6 +1338,7 @@ class App(QMainWindow):
         self.step7_export.osm_track_ready.connect(self._on_osm_track_ready)
         self.step7_export.alignment_ready.connect(self._on_alignment_ready)
         self.step7_export.alignment_segments_ready.connect(self._on_alignment_segments_ready)
+        self.step7_export.log_message.connect(self.log_panel.log)
         self.step7_export.fit_to_alignment_requested.connect(self._on_fit_to_alignment)
         self.step7_export.export_finished.connect(self._on_export_finished)
         self.step7_export.start_over_requested.connect(self._start_over)
@@ -1285,6 +1498,7 @@ class App(QMainWindow):
         self._refresh_toolbar_edit_actions()
 
     def _goto_step(self, idx: int):
+        changed_step = idx != self._current_step
         # Refresh a downstream step from the current alignment if it went stale
         if idx in self._DOWNSTREAM and idx in self._stale:
             self._refresh_downstream(idx)
@@ -1297,15 +1511,61 @@ class App(QMainWindow):
         self._done_steps.add(idx)
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_step(idx)
-        # The element table belongs to the alignment-editing step
-        self.element_table.setVisible(idx == S_DESIGN)
-        if idx != S_DESIGN and self._act_edit_mode.isChecked():
-            self._act_edit_mode.setChecked(False)   # also disarms map dragging
+        # The table/stats matter more than which step is being viewed once
+        # there's a real alignment to inspect — the wizard sidebar remains
+        # free, advisory-only navigation (see CLAUDE.md).
+        self.element_table.setVisible(self._pi_model is not None)
+        if changed_step:
+            self._deactivate_all_tools()   # also disarms map dragging/pick modes
+            self._ensure_interactive_alignment_shown(idx)
+            self._clear_osm_relict_tracks(idx)
         tip = self._STEP_TIPS.get(idx)
         if tip:
             self.log_panel.log_step(tip[0], tip[1])
             self._step_label.setText(tip[0])
         self._refresh_nav()
+
+    # Steps whose map view is expected to show the interactive per-element
+    # alignment (hover/click/highlight bindings) rather than tracks/
+    # candidates/nothing.
+    _ALIGNMENT_STEPS = (S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT)
+
+    def _ensure_interactive_alignment_shown(self, idx: int):
+        """Req 4, defense-in-depth: if navigation lands on a step that
+        expects the interactive alignment view but the map is currently
+        showing the non-interactive merged draw (or nothing at all) while
+        `self._elements` says there SHOULD be something to show, re-render
+        it. `MapWidget._js_aln_count` is 0 after the non-interactive
+        `show_alignment`/`clear_alignment` path and None before anything is
+        ever drawn; it's the element count after the interactive
+        `show_alignment_segmented`/`update_alignment_segmented` path — so a
+        falsy value here alongside real elements means "should be
+        interactive, isn't", not just "nothing to show yet"."""
+        if idx not in self._ALIGNMENT_STEPS or not self._elements:
+            return
+        if getattr(self.map_widget, "_js_aln_count", None):
+            return
+        self._render_elements_on_map(self._elements)
+        self._show_pi_overlay(self._pi_model)
+
+    def _clear_osm_relict_tracks(self, idx: int):
+        """The raw OSM track layer (`tracksPane`, opaque `TRACK_COLORS[0]`
+        red) is drawn once in Step 2 and nothing ever removed it on step
+        advance — once the styled dashed OSM reference
+        (`show_osm_reference`) takes over for editing, the track layer left
+        underneath reads as an uncontrollable red relict that the "Original
+        appearance" popover can't touch (it only governs the dashed
+        reference). Once an alignment is actually being designed, the raw
+        tracks have served their purpose (Step 2's own view) — clear them
+        and make sure the properly-styled reference is the one showing."""
+        if idx not in self._ALIGNMENT_STEPS:
+            return
+        self.map_widget.clear_tracks()
+        if self._selected_tracks:
+            osm_ref = [[[lat, lon] for lat, lon in t.nodes]
+                       for t in self._selected_tracks]
+            if any(len(r) > 0 for r in osm_ref):
+                self.map_widget.show_osm_reference(osm_ref)
 
     def _mark_stale(self):
         """The alignment changed — downstream steps must re-read it."""
@@ -1375,14 +1635,36 @@ class App(QMainWindow):
             )
 
     def _on_alignment_ready(self, alignments: list):
+        """Export finished — redraw the alignment.
+
+        Req 4 fix: this used to unconditionally call `show_alignment(...)`
+        — the merged, non-interactive draw (no hover/click/highlight
+        bindings at all, `map.html`'s `showAlignment`) — and rely on the
+        worker's OWN, separately-recomputed `alignment_segments_ready`
+        signal to supersede it with the interactive per-element view. That
+        signal only fires `if per_element_segments` (`worker.py`), built
+        inside a bare `except Exception: pass` — any hiccup there left the
+        map permanently non-interactive after export, silently, with no
+        error anywhere. `self._elements` is the SAME element list the
+        export just wrote to disk (App owns it — CLAUDE.md), so route
+        through the one interactive render path every other step already
+        uses instead of trusting a second, fragile recomputation.
+        """
+        if self._elements:
+            self._render_elements_on_map(self._elements, fit_view=True)
+            self.statusBar().showMessage(
+                f"Export complete — alignment shown on map "
+                f"({len(self._elements)} elements). Hover any segment for "
+                "parameters.")
+            return
         if not alignments or not any(len(a) > 0 for a in alignments):
             self.statusBar().showMessage(
                 "⚠ Export finished but alignment contains no points — "
                 "nothing drawn on map."
             )
             return
-        # Default merged-red drawing; superseded by per-element rendering
-        # below when alignment_segments_ready fires.
+        # No working element list at all (shouldn't normally happen — export
+        # requires a selected candidate) — fall back to the old merged draw.
         self.map_widget.show_alignment(alignments)
         total_pts = sum(len(a) for a in alignments)
         self.statusBar().showMessage(
@@ -1391,7 +1673,14 @@ class App(QMainWindow):
         )
 
     def _on_alignment_segments_ready(self, segments: list):
-        """Per-element coloured rendering after final export."""
+        """Per-element coloured rendering after final export.
+
+        `_on_alignment_ready` above already draws the interactive view from
+        `self._elements` when one exists — this only still draws when it
+        didn't (the same rare fallback case), so the two signals never
+        race/redraw over each other."""
+        if self._elements:
+            return
         if not segments:
             return
         self.map_widget.show_alignment_segmented(segments)
@@ -1646,11 +1935,16 @@ class App(QMainWindow):
         self.map_widget.clear_osm_reference()
         self._goto_step(S_CONFIG)
 
-    def _update_metrics_chip(self):
+    def _update_metrics_chip(self, metrics: dict | None = None):
         """Single funnel refreshing the persistent deviation-metrics chip —
         call after anything that changes `self._pi_model`/`self._elements`.
         Cheap: reuses whatever stats the triggering rebuild already
-        computed (or the cached Level-1 metrics), never a fresh pass."""
+        computed (or the cached Level-1 metrics), never a fresh pass.
+
+        `metrics`, when given, is the dict the caller's own rebuild already
+        computed (e.g. element_table's `rebuilt` signal) — reuse it instead
+        of recomputing via `metrics_from_stats`, which used to run a second,
+        redundant O(N_elements) heading-jump scan on every single edit."""
         chip = getattr(self, "_metrics_chip", None)
         if chip is None:
             return
@@ -1658,9 +1952,10 @@ class App(QMainWindow):
             chip.clear()
             return
         if self._pi_model is not None:
-            from geometry.candidates import metrics_from_stats
-            metrics = metrics_from_stats(
-                getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
+            if metrics is None:
+                from geometry.candidates import metrics_from_stats
+                metrics = metrics_from_stats(
+                    getattr(self._pi_model, "last_stats", {}) or {}, self._elements)
             xy_ref = getattr(self._pi_model, "xy_ref", None)
             n_points = len(xy_ref) if xy_ref is not None else 0
             chip.set_metrics(metrics, n_points=n_points, level=self._level)
@@ -1669,10 +1964,23 @@ class App(QMainWindow):
         else:
             chip.clear()
 
-    def _sample_segments(self, elements: list, interval: float) -> list | None:
+    def _on_metric_clicked(self, element_id: str):
+        """Metrics chip clicked (Req 9a) — highlight + select the worst-
+        deviation element, same round trip a table-row click already does
+        (`highlightElements` pans to it automatically when off-screen)."""
+        self.map_widget.highlight_elements([element_id])
+        self.element_table.select_element(element_id)
+
+    def _sample_segments(self, elements: list, interval: float,
+                         color_mode: str = "type") -> list | None:
         """Sample + batch-project `elements` into the JS segment payload
         shape ({type, params, points}, one dict per element). None on any
-        failure — the caller decides the fallback."""
+        failure — the caller decides the fallback.
+
+        `color_mode="deviation"` (Req 9b) additionally stamps a `"color"`
+        per segment from that element's `_max_dev` — map.html's
+        `_addSegmentLayer` prefers `seg.color` over the type-based lookup
+        when present, so hover/click/highlight are completely unaffected."""
         from geometry.alignment import reconstruct_alignment_per_element
         from geometry.projection import projected_to_wgs84
         try:
@@ -1687,21 +1995,38 @@ class App(QMainWindow):
                 spans.append((el, len(flat), len(pts)))
                 flat.extend(pts)
             wgs_all = projected_to_wgs84(flat, self._work_epsg) if flat else []
+            threshold = float(self._settings.get("max_deviation", 1.0) or 1.0)
             payload = []
             for el, off, n in spans:
                 if not n:
                     continue
-                payload.append({
+                seg = {
                     "type":   el.get("type", "Line"),
                     "params": _serialise_element_params(el),
                     "points": [list(p) for p in wgs_all[off:off + n]],
-                })
+                }
+                if color_mode == "deviation":
+                    from gui.palette import deviation_color
+                    seg["color"] = deviation_color(
+                        float(el.get("_max_dev", 0.0) or 0.0), threshold)
+                payload.append(seg)
             return payload
-        except Exception:
+        except Exception as exc:
+            # Was silent — degraded the ENTIRE map to a non-interactive
+            # merged redraw (see _render_elements_on_map's fallback) with no
+            # trace of why. The load path and every edit-driven refresh
+            # (splits included) go through this every time, unlike the
+            # fresh-wizard path which draws a pre-baked payload instead —
+            # so a real failure here needs to be visible, not swallowed.
+            self.log_panel.log(
+                f"⚠ Map: per-element sampling failed ({exc}) — falling back "
+                "to a plain merged redraw (no hover/click on the map until "
+                "the next successful refresh).", "warn")
             return None
 
     def _render_elements_on_map(self, elements: list, fit_view: bool = False,
-                                splice: dict | None = None):
+                                splice: dict | None = None,
+                                color_mode: str | None = None):
         """Render an element chain as the segmented alignment overlay.
 
         fit_view=False (default) keeps the user's current zoom/pan — used
@@ -1710,12 +2035,18 @@ class App(QMainWindow):
         change ship only the affected element span to the map — sampling,
         projecting and serializing the WHOLE alignment on every PI drag or
         radius keystroke was the single largest per-edit map cost on long
-        corridors, even though the JS side only ever kept the diffed layers."""
+        corridors, even though the JS side only ever kept the diffed layers.
+
+        `color_mode` (Req 9b): None reuses whatever mode the map prefs say
+        (`self._prefs["map_color_mode"]`, "type" or "deviation") — pass it
+        explicitly only to override that for one call."""
         from geometry.alignment import reconstruct_alignment_projected
         from geometry.projection import projected_to_wgs84
 
         if not elements:
             return
+        if color_mode is None:
+            color_mode = self._prefs.get("map_color_mode", "type")
         try:
             total_len = sum(float(e.get("length", 0.0)) for e in elements)
             # Sample density scales with length: 2 m on short sections, up
@@ -1727,18 +2058,30 @@ class App(QMainWindow):
                 start, removed, added = (
                     splice["start"], splice["removed"], splice["added"])
                 changed_segments = self._sample_segments(
-                    elements[start:start + added], interval)
+                    elements[start:start + added], interval, color_mode)
                 if changed_segments is not None:
                     from gui.worker import _serialise_element_params
+                    # Elements before `start` are untouched by this edit —
+                    # no station/id shift, nothing to retarget — so only
+                    # [start:] needs sending; that used to be the WHOLE
+                    # alignment on every single edit regardless of where
+                    # in a long corridor the edit happened.
                     metas = [{"type": el.get("type", "Line"),
                               "params": _serialise_element_params(el)}
-                             for el in elements]
+                             for el in elements[start:]]
+                    if color_mode == "deviation":
+                        from gui.palette import deviation_color
+                        threshold = float(
+                            self._settings.get("max_deviation", 1.0) or 1.0)
+                        for meta, el in zip(metas, elements[start:]):
+                            meta["color"] = deviation_color(
+                                float(el.get("_max_dev", 0.0) or 0.0), threshold)
                     if self.map_widget.patch_alignment_segmented(
                             start, removed, changed_segments, metas):
                         return
                     # bookkeeping mismatch — fall through to a full redraw
 
-            segments_payload = self._sample_segments(elements, interval)
+            segments_payload = self._sample_segments(elements, interval, color_mode)
             if segments_payload:
                 if fit_view:
                     self.map_widget.show_alignment_segmented(segments_payload, True)
@@ -1748,7 +2091,13 @@ class App(QMainWindow):
             else:
                 geo_xy     = reconstruct_alignment_projected(elements, sample_interval=5.0)
                 geo_latlon = projected_to_wgs84(geo_xy, self._work_epsg)
-                self.map_widget.show_alignment([[[lat, lon] for lat, lon in geo_latlon]])
+                # _sample_segments already logged why — draw muted/thin so
+                # this unplanned fallback never buries the OSM reference
+                # layer the way the bold "selected" export-preview look
+                # would (that look stays reserved for its two deliberate
+                # call sites: candidate selection and export-ready).
+                self.map_widget.show_alignment(
+                    [[[lat, lon] for lat, lon in geo_latlon]], style="degraded")
         except Exception as exc:
             self.statusBar().showMessage(f"⚠ Map update failed: {exc}")
 
@@ -1823,7 +2172,7 @@ class App(QMainWindow):
         self.step5_design.set_elements(elements, metrics)
         self._render_elements_on_map(elements, splice=splice)
         self._show_pi_overlay(self.element_table._model)
-        self._update_metrics_chip()
+        self._update_metrics_chip(metrics)
         n_spirals = sum(1 for e in elements if e.get("type") == "Spiral")
         msg = (f"Alignment rebuilt — {len(elements)} elements "
                f"({n_spirals} spiral{'s' if n_spirals != 1 else ''}), "
@@ -1832,9 +2181,25 @@ class App(QMainWindow):
         self.statusBar().showMessage(msg)
         self.log_panel.log(msg, "ok")
         # Geometry notes from the rebuild (radius clamps, skipped curves, …)
+        # — replay just the new tail, not the whole history every time.
         model = self.element_table._model
-        for note in (getattr(model, "log", None) or []):
+        new_notes, self._pi_log_replayed = _replay_tail(
+            getattr(model, "log", None) or [], self._pi_log_replayed)
+        for note in new_notes:
             self.log_panel.log(note, "warn" if note.startswith("⚠") else "info")
+        # The route statistics' C1 number should read ~0.000° (the solver
+        # builds elements exactly C1 by construction) — a non-empty report
+        # here means a genuine continuity break, not the old small-angle
+        # measurement artifact, and is worth a specific warning.
+        junctions = metrics.get("c1_junctions") or []
+        if junctions:
+            worst = max(junctions, key=lambda j: j["jump_deg"])
+            self.log_panel.log(
+                f"⚠ C1 continuity break at {len(junctions)} junction"
+                f"{'s' if len(junctions) != 1 else ''} — worst "
+                f"{worst['jump_deg']:.3f}° between {worst['a_type']} "
+                f"{worst.get('a_id') or '?'} and {worst['b_type']} "
+                f"{worst.get('b_id') or '?'}.", "warn")
 
     def _on_element_rows_selected(self, element_ids: list):
         self.map_widget.highlight_elements(element_ids)
@@ -1865,6 +2230,8 @@ class App(QMainWindow):
         # Refine's "split a Line" and Step 2's "split a track" share the
         # same JS click-mode/signal (the two are never armed at once — one
         # per step's own UI); this flag decides who the next click is for.
+        if on:
+            self._deactivate_all_tools(keep="split")
         self._split_pick_target = "line" if on else None
         self.map_widget.set_split_click_mode(on)
         if on:
@@ -1873,8 +2240,31 @@ class App(QMainWindow):
                 "insert a PI there.", "info")
 
     def _on_track_split_pick_mode(self, on: bool):
+        if on:
+            self._deactivate_all_tools(keep="split")
         self._split_pick_target = "track" if on else None
         self.map_widget.set_split_click_mode(on)
+
+    def _on_station_pick_mode(self, on: bool):
+        if on:
+            self._deactivate_all_tools(keep="station")
+        self.map_widget.set_station_click_mode(on)
+
+    def _deactivate_all_tools(self, keep: str | None = None):
+        """Force-disarm every modal map tool (Edit mode, split-pick — shared
+        by Refine's "split a Line" and Step 2's "split a track" — and
+        Stations' "place station") so switching steps, or arming one of
+        these tools, never leaves another one stuck armed with its map
+        click-mode flag still live (each tool's own `toggled` handler does
+        the actual disarming once its button flips back to unchecked)."""
+        if keep != "edit" and self._act_edit_mode.isChecked():
+            self._act_edit_mode.setChecked(False)
+        if keep != "split" and self.element_table._pick_split_btn.isChecked():
+            self.element_table._pick_split_btn.setChecked(False)
+        if keep != "split" and self.step2._split_track_btn.isChecked():
+            self.step2._split_track_btn.setChecked(False)
+        if keep != "station" and self.step6_stations._place_btn.isChecked():
+            self.step6_stations._place_btn.setChecked(False)
 
     def _on_split_point_clicked(self, lat: float, lon: float):
         if self._split_pick_target == "track":
@@ -1893,6 +2283,21 @@ class App(QMainWindow):
         self._render_elements_on_map(elements, fit_view=True)
         self._show_pi_overlay(self._pi_model)
         self.log_panel.log("Alignment re-drawn on the map.", "ok")
+
+    def _on_sync_parameters(self):
+        """"⟳ Sync" button (Part 2B): force a full table↔map↔metrics resync
+        on demand — covers any edit path that left the halo/table/metrics
+        chip momentarily out of step with the model (e.g. a fast-path table
+        update that didn't re-emit the selection)."""
+        elements = self._elements or self.element_table.current_elements()
+        if not elements:
+            self.log_panel.log("No alignment to sync yet.", "warn")
+            return
+        self._render_elements_on_map(elements)
+        self._show_pi_overlay(self._pi_model)
+        self.element_table._on_selection()   # re-push the halo
+        self._update_metrics_chip()
+        self.log_panel.log("Table, map and metrics resynced.", "ok")
 
     def _on_refine_back(self):
         """Go back from Refine to Candidates — restore all candidate overlays."""

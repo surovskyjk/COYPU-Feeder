@@ -349,3 +349,65 @@ class TestSoak:
             applied += 1
             assert_identical(m_span, m_full, ctx)
         assert applied >= 30
+
+
+# ---------------------------------------------------------------------------
+# Part A3 — the finalize step must not re-walk the untouched prefix
+# ---------------------------------------------------------------------------
+
+class TestFinalizeSpanLocality:
+    """Correctness alone (TestSpanOps/TestSoak above) doesn't prove the
+    finalize step (stations/ids) actually skips the untouched prefix — a
+    version that recomputes everything and happens to produce the same
+    values would also pass those. These check object IDENTITY: editing the
+    LAST curve of a multi-curve alignment must leave every element dict
+    BEFORE the edited splice as the exact same object, not just equal-
+    valued — proving the O(N_total) rewrite this was fixed to avoid isn't
+    happening, without a flaky timing assertion."""
+
+    def test_late_edit_leaves_prefix_elements_untouched_by_identity(self):
+        model = build_model(SOAK)
+        arc_pis = [p for p in model.pis if not p.omitted]
+        assert len(arc_pis) >= 3
+        target = arc_pis[-1]   # edit the LAST curve — biggest possible prefix
+        before_elements = list(model.elements)
+
+        target.radius = max(160.0, (target.radius * 0.8) if target.radius > 0 else 400.0)
+        snap = C.rebuild_pi_span(model, target.index, target.index)
+        assert snap is not None, "fell back to a full rebuild"
+        start = model.last_splice["start"]
+        assert start > 0, (
+            "expected editing the LAST curve to leave a real unchanged "
+            "prefix — test setup problem, not a span-locality regression")
+
+        prefix_after = model.elements[:start]
+        prefix_before = before_elements[:start]
+        assert len(prefix_after) == len(prefix_before)
+        assert [id(e) for e in prefix_after] == [id(e) for e in prefix_before], (
+            "rebuild_pi_span's finalize step rewrote element dicts BEFORE "
+            "the edited splice — no longer span-local (see A3)")
+
+    def test_edited_and_downstream_elements_still_get_fresh_ids_and_stations(self):
+        """The flip side: elements FROM the splice onward must still be
+        correctly recomputed — this isn't a "skip everything" regression."""
+        model = build_model(SOAK)
+        arc_pis = [p for p in model.pis if not p.omitted]
+        target = arc_pis[-1]
+        old_radius_element = next(
+            e for e in model.elements
+            if e.get("type") == "Arc" and e.get("_pi") == target.index)
+        old_length = old_radius_element["length"]
+
+        target.radius = max(160.0, (target.radius * 0.8) if target.radius > 0 else 400.0)
+        C.rebuild_pi_span(model, target.index, target.index)
+
+        new_radius_element = next(
+            e for e in model.elements
+            if e.get("type") == "Arc" and e.get("_pi") == target.index)
+        assert new_radius_element["length"] != old_length
+        assert new_radius_element["element_id"] == f"A{target.index}"
+        # Full-list station/id fingerprint still matches an independent
+        # full rebuild from the same (post-edit) PI values.
+        m_full = clone(model)
+        C.rebuild_from_pi_model(m_full)
+        assert fp_elements(model) == fp_elements(m_full)
