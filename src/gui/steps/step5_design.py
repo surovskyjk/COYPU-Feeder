@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QToolButton, QGroupBox, QFormLayout, QDoubleSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar,
+    QComboBox, QCheckBox, QMessageBox, QScrollArea,
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -61,22 +62,39 @@ class Step5Design(ThemedPanel, QWidget):
     # ------------------------------------------------------------------
 
     def _build(self):
+        # Req 7 (1080p clipping): this panel lives in the main window's
+        # FIXED-width step stack. Its content — the info blurb, metrics
+        # frame, and two collapsible sections — can add up to more height
+        # than a 1080p-tall window leaves for it; without a scroll area the
+        # Back/Accept buttons at the bottom become unreachable. They're kept
+        # OUTSIDE the scroll area (pinned) so they're always visible; only
+        # the middle content scrolls.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        content_l = QVBoxLayout(content)
+        content_l.setContentsMargins(10, 10, 10, 10)
+        content_l.setSpacing(8)
 
         self._title_lbl = QLabel("Refine & Consolidate")
         self.bolded(self._title_lbl, 4)
-        outer.addWidget(self._title_lbl)
+        content_l.addWidget(self._title_lbl)
 
         self._algo_lbl = QLabel("")
         self.themed(self._algo_lbl, sk.muted_label)
-        outer.addWidget(self._algo_lbl)
+        content_l.addWidget(self._algo_lbl)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sk.set_role(sep, "separator")
-        outer.addWidget(sep)
+        content_l.addWidget(sep)
 
         info = QLabel(
             "All elements are listed in the table below the map:\n\n"
@@ -96,7 +114,7 @@ class Step5Design(ThemedPanel, QWidget):
         )
         self.themed(info, sk.muted_label)
         info.setWordWrap(True)
-        outer.addWidget(info)
+        content_l.addWidget(info)
 
         # Metrics (persistent deviation numbers also live in the status-bar
         # chip; this panel keeps its own copy for readability inside Step 5)
@@ -107,13 +125,18 @@ class Step5Design(ThemedPanel, QWidget):
         self._metrics_lbl = QLabel("No candidate selected.")
         self.themed(self._metrics_lbl, sk.muted_label)
         mf.addWidget(self._metrics_lbl)
-        outer.addWidget(metrics_frame)
+        content_l.addWidget(metrics_frame)
 
-        outer.addWidget(self._build_consolidate_section())
+        content_l.addWidget(self._build_consolidate_section())
+        content_l.addWidget(self._build_batch_spiral_section())
 
-        outer.addStretch()
+        content_l.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
 
         nav_row = QHBoxLayout()
+        nav_row.setContentsMargins(10, 8, 10, 10)
         nav_row.setSpacing(6)
 
         self._back_btn = QPushButton("← Back")
@@ -171,6 +194,10 @@ class Step5Design(ThemedPanel, QWidget):
 
         params = QGroupBox("Rules")
         pf = QFormLayout(params)
+        # Req 7: the 340 px-wide step stack leaves little room for a label
+        # column beside a spinbox (padding-right + step arrows) — wrap
+        # instead of letting the row clip or the box shrink to unreadable.
+        pf.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self._straight_spin = QDoubleSpinBox()
         self._straight_spin.setRange(0.0, 1000.0)
@@ -241,6 +268,106 @@ class Step5Design(ThemedPanel, QWidget):
             Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
         self._consolidate_body.setVisible(on)
 
+    def _build_batch_spiral_section(self) -> QWidget:
+        """Sibling collapsible tool to Consolidate — same toggle/body/
+        progress-bar shape, whole-alignment scope instead of a picked run."""
+        section = QWidget()
+        sv = QVBoxLayout(section)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(4)
+
+        self._batch_spiral_toggle = QToolButton()
+        self._batch_spiral_toggle.setCheckable(True)
+        self._batch_spiral_toggle.setChecked(False)
+        self._batch_spiral_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._batch_spiral_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._batch_spiral_toggle.setText("Batch extend spirals")
+        self._batch_spiral_toggle.setStyleSheet(
+            "QToolButton { border: none; font-weight: 600; }")
+        self._batch_spiral_toggle.toggled.connect(self._on_batch_spiral_toggled)
+        sv.addWidget(self._batch_spiral_toggle)
+
+        self._batch_spiral_body = QWidget()
+        self._batch_spiral_body.setVisible(False)
+        body = QVBoxLayout(self._batch_spiral_body)
+        body.setContentsMargins(0, 4, 0, 0)
+        body.setSpacing(8)
+
+        info = QLabel(
+            "Lengthens every eligible curve's transition spirals toward a "
+            "target length, wherever the adjoining straights and "
+            "neighbouring curves leave room. Never shrinks a spiral that's "
+            "already at or beyond the target."
+        )
+        self.themed(info, sk.muted_label)
+        info.setWordWrap(True)
+        body.addWidget(info)
+
+        params = QGroupBox("Target")
+        pf = QFormLayout(params)
+        pf.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+
+        self._target_len_spin = QDoubleSpinBox()
+        self._target_len_spin.setRange(2.0, 1000.0)
+        self._target_len_spin.setSingleStep(5.0)
+        self._target_len_spin.setValue(60.0)
+        self._target_len_spin.setDecimals(0)
+        self._target_len_spin.setSuffix(" m")
+        pf.addRow("Target spiral length:", self._target_len_spin)
+
+        self._batch_mode_combo = QComboBox()
+        # Req 7: a combo sizes itself to its widest item — shortened so it
+        # doesn't force the 340 px step panel wider than it has; the detail
+        # moved into the tooltip.
+        self._batch_mode_combo.addItem("Minimize deviation", "minimize_deviation")
+        self._batch_mode_combo.addItem("Keep radius", "fixed_radius")
+        self._batch_mode_combo.setToolTip(
+            "Minimize deviation also searches each curve's radius at the\n"
+            "new spiral length to hug the OSM baseline as tightly as\n"
+            "possible. Keep radius only changes the spiral length."
+        )
+        pf.addRow("Mode:", self._batch_mode_combo)
+
+        self._min_radius_chk = QCheckBox("Override minimum radius")
+        self._min_radius_chk.setToolTip(
+            "Only matters in \"Minimize deviation\" mode — a floor the\n"
+            "re-fitted radius search will never go below.")
+        pf.addRow(self._min_radius_chk)
+
+        self._min_radius_spin = QDoubleSpinBox()
+        self._min_radius_spin.setRange(10.0, 100000.0)
+        self._min_radius_spin.setSingleStep(50.0)
+        self._min_radius_spin.setValue(150.0)
+        self._min_radius_spin.setDecimals(0)
+        self._min_radius_spin.setSuffix(" m")
+        self._min_radius_spin.setEnabled(False)
+        self._min_radius_chk.toggled.connect(self._min_radius_spin.setEnabled)
+        pf.addRow("Minimum radius:", self._min_radius_spin)
+        body.addWidget(params)
+
+        self._batch_run_btn = QPushButton("▶ Extend spirals")
+        self._batch_run_btn.clicked.connect(self._on_batch_extend_run)
+        body.addWidget(self._batch_run_btn)
+
+        self._batch_progress_bar = QProgressBar()
+        self._batch_progress_bar.setVisible(False)
+        self._batch_progress_bar.setTextVisible(True)
+        body.addWidget(self._batch_progress_bar)
+
+        self._batch_status_lbl = QLabel("")
+        self.themed(self._batch_status_lbl, sk.muted_label)
+        self._batch_status_lbl.setWordWrap(True)
+        body.addWidget(self._batch_status_lbl)
+
+        sv.addWidget(self._batch_spiral_body)
+        return section
+
+    def _on_batch_spiral_toggled(self, on: bool):
+        self._batch_spiral_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self._batch_spiral_body.setVisible(on)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -266,6 +393,7 @@ class Step5Design(ThemedPanel, QWidget):
         self._groups = []
         self._table.setRowCount(0)
         self._progress_bar.setVisible(False)
+        self._reset_batch_spiral_ui(editable)
         auto_merged = int(getattr(candidate, "auto_merged", 0) or 0)
         if pi_model is None:
             self._status_lbl.setText(
@@ -281,6 +409,13 @@ class Step5Design(ThemedPanel, QWidget):
                  if auto_merged > 0 else
                  "Press Scan to look for mergeable runs.")
             )
+
+    def _reset_batch_spiral_ui(self, enabled: bool):
+        """Shared by prepare()/bind()/reset() — mirrors how each resets the
+        Consolidate section's transient state alongside it."""
+        self._batch_progress_bar.setVisible(False)
+        self._batch_run_btn.setEnabled(enabled)
+        self._batch_status_lbl.setText("")
 
     def set_elements(self, elements: list, metrics: dict | None = None):
         """Called by App after every table-driven rebuild."""
@@ -298,6 +433,7 @@ class Step5Design(ThemedPanel, QWidget):
         self._groups = []
         self._table.setRowCount(0)
         self._progress_bar.setVisible(False)
+        self._reset_batch_spiral_ui(pi_model is not None)
         if pi_model is None:
             self._status_lbl.setText(
                 "This level has no editable PI model (Level 1 is the raw "
@@ -324,6 +460,7 @@ class Step5Design(ThemedPanel, QWidget):
         self._scan_btn.setEnabled(False)
         self._apply_btn.setEnabled(False)
         self._status_lbl.setText("Press Scan to look for mergeable runs.")
+        self._reset_batch_spiral_ui(False)
 
     # ------------------------------------------------------------------
     # Internal — metrics
@@ -510,3 +647,82 @@ class Step5Design(ThemedPanel, QWidget):
             self.on_edit_failed()
         self._status_lbl.setText(f"⚠ Apply failed: {error}")
         self.log_message.emit(f"Consolidate apply failed: {error}", "error")
+
+    # ------------------------------------------------------------------
+    # Batch extend spirals (Part D)
+    # ------------------------------------------------------------------
+
+    def _on_batch_extend_run(self):
+        from gui.worker import BatchSpiralExtendWorker
+        from gui.progress_util import ElapsedTimer
+        if self._model is None or self._worker is not None:
+            return
+        target = self._target_len_spin.value()
+        mode = self._batch_mode_combo.currentData()
+        min_radius = (self._min_radius_spin.value()
+                     if self._min_radius_chk.isChecked() else None)
+        if self.on_before_edit is not None:
+            self.on_before_edit(f"batch extend spirals to {target:.0f} m")
+        self._batch_run_btn.setEnabled(False)
+        self._batch_progress_bar.setRange(0, 0)   # indeterminate until the first tick
+        self._batch_progress_bar.setValue(0)
+        self._batch_progress_bar.setVisible(True)
+        self._batch_status_lbl.setText("Extending…")
+        self._timer = ElapsedTimer()
+        self._worker = BatchSpiralExtendWorker(
+            self._model, target, mode, min_radius, self)
+        self._worker.progress.connect(self._on_batch_extend_progress)
+        self._worker.finished.connect(self._on_batch_extend_finished)
+        self._worker.failed.connect(self._on_batch_extend_failed)
+        self._worker.start()
+
+    def _on_batch_extend_progress(self, done: int, total: int):
+        from gui.progress_util import format_eta
+        if self._batch_progress_bar.maximum() == 0 and total > 0:
+            self._batch_progress_bar.setRange(0, total)
+        self._batch_progress_bar.setValue(done)
+        elapsed = self._timer.elapsed() if self._timer else 0.0
+        self._batch_status_lbl.setText(f"Extending… {format_eta(elapsed, done, total)}")
+
+    def _on_batch_extend_finished(self, result):
+        self._worker = None
+        self._batch_progress_bar.setVisible(False)
+        self._batch_run_btn.setEnabled(True)
+        if result.lengthened == 0 and result.clamped == 0 and self.on_edit_failed is not None:
+            # Nothing was actually applied — don't leave a do-nothing entry
+            # in the undo stack.
+            self.on_edit_failed()
+        summary = (f"{result.lengthened} lengthened, {result.clamped} clamped, "
+                  f"{result.skipped} skipped.")
+        self._batch_status_lbl.setText(summary)
+        self.log_message.emit(f"Batch extend spirals: {summary}", "ok")
+        for k, status, note in result.notes:
+            if status != "lengthened" and note:
+                self.log_message.emit(f"  PI {k} ({status}): {note}", "info")
+        if result.lengthened or result.clamped:
+            self.model_changed.emit()
+
+        # Reasons repeat across many PIs on a real alignment — group
+        # identical ones instead of listing every PI in the report.
+        reason_groups: dict[str, list[int]] = {}
+        for k, status, note in result.notes:
+            if status == "lengthened":
+                continue
+            key = f"{status}: {note}" if note else status
+            reason_groups.setdefault(key, []).append(k)
+        lines = [summary]
+        for reason, pis in sorted(reason_groups.items()):
+            pis_txt = ", ".join(str(p) for p in pis[:10])
+            if len(pis) > 10:
+                pis_txt += f", +{len(pis) - 10} more"
+            lines.append(f"PI {pis_txt}: {reason}")
+        QMessageBox.information(self, "Batch extend spirals", "\n".join(lines))
+
+    def _on_batch_extend_failed(self, error: str):
+        self._worker = None
+        self._batch_progress_bar.setVisible(False)
+        self._batch_run_btn.setEnabled(True)
+        if self.on_edit_failed is not None:
+            self.on_edit_failed()
+        self._batch_status_lbl.setText(f"⚠ Batch extend failed: {error}")
+        self.log_message.emit(f"Batch extend spirals failed: {error}", "error")

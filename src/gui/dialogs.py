@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget,
     QWidget, QTextBrowser, QComboBox, QSpinBox, QFormLayout, QDialogButtonBox,
-    QGroupBox, QCheckBox,
+    QGroupBox, QCheckBox, QDoubleSpinBox, QScrollArea,
 )
 from PySide6.QtGui import QPixmap
 
@@ -128,14 +128,55 @@ class SettingsDialog(QDialog):
     caller persists them (QSettings) and applies them live.
     """
 
+    # Engineering-default keys this dialog edits, with (label, suffix,
+    # range, decimals, fallback, tooltip) — every one a genuine railway
+    # engineering parameter (radius/length floors and tolerances), never an
+    # internal numerical-stability constant (span-rebuild tolerances, the
+    # ~180° singular-band threshold, etc. stay hardcoded — see CLAUDE.md's
+    # "bit-identical" proof obligation, which makes those correctness
+    # knobs, not design knobs). Pre-fills Step 3 for a NEW project; Step 3
+    # remains the per-project override point, this only changes what it
+    # starts from.
+    ENGINEERING_DEFAULTS = [
+        ("default_max_deviation", "Max deviation (PI tolerance):", " m",
+         (0.1, 10.0), 2, 1.0,
+         "Douglas-Peucker tolerance used to extract the tangent polygon."),
+        ("default_min_radius", "Minimum curve radius:", " m",
+         (50.0, 10000.0), 0, 150.0,
+         "Radius floor for all circular arcs."),
+        ("default_spiral_length", "Spiral length:", " m",
+         (0.0, 200.0), 0, 20.0,
+         "Length of each entry/exit clothoid spiral."),
+        ("default_pi_min_tangent", "Auto-merge tangent gate:", " m",
+         (0.0, 500.0), 0, 60.0,
+         "Lines shorter than this between two same-rotation curves\n"
+         "auto-merge into one PI when a project is first fitted."),
+        ("default_min_tangent_length", "Min. tangent (initial fit):", " m",
+         (0.0, 500.0), 0, 30.0,
+         "Minimum straight length before two same-sign arcs merge\n"
+         "during the initial candidate fit."),
+        ("default_min_line_length", "Min. line length:", " m",
+         (0.0, 200.0), 0, 10.0, "Shortest Line element kept as its own segment."),
+        ("default_min_arc_length", "Min. arc length:", " m",
+         (0.0, 200.0), 0, 10.0, "Shortest Arc element kept as its own segment."),
+        ("default_min_spiral_length", "Min. spiral length:", " m",
+         (0.0, 200.0), 0, 10.0, "Shortest Spiral element kept as its own segment."),
+    ]
+
     def __init__(self, current: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(380, 260)
+        self.resize(420, 520)
         self._build(current)
 
     def _build(self, cur: dict):
-        v = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        v = QVBoxLayout(inner)
 
         appearance = QGroupBox("Appearance")
         form = QFormLayout(appearance)
@@ -166,18 +207,41 @@ class SettingsDialog(QDialog):
         bform.addRow(self._confirm_start_over)
         v.addWidget(behaviour)
 
+        engineering = QGroupBox("Engineering defaults (new projects)")
+        engineering.setToolTip(
+            "Pre-fills Step 3 — Configure for a new project. Each project "
+            "can still override these there; changing them here only "
+            "affects projects started AFTER this change.")
+        eform = QFormLayout(engineering)
+        self._engineering_spins: dict[str, QDoubleSpinBox] = {}
+        for key, label, suffix, rng, decimals, fallback, tip in self.ENGINEERING_DEFAULTS:
+            spin = QDoubleSpinBox()
+            spin.setRange(*rng)
+            spin.setDecimals(decimals)
+            spin.setSuffix(suffix)
+            spin.setValue(float(cur.get(key, fallback)))
+            spin.setToolTip(tip)
+            eform.addRow(label, spin)
+            self._engineering_spins[key] = spin
+        v.addWidget(engineering)
+
         v.addStretch()
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
 
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        v.addWidget(bb)
+        outer.addWidget(bb)
 
     def values(self) -> dict:
-        return {
+        out = {
             "theme_mode": self._theme.currentData(),
             "font_pt":    self._font.value(),
             "show_log":   self._show_log.isChecked(),
             "confirm_start_over": self._confirm_start_over.isChecked(),
         }
+        for key, spin in self._engineering_spins.items():
+            out[key] = spin.value()
+        return out

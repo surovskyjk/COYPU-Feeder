@@ -59,6 +59,11 @@ MAP_COLORS = {
     "osmReference":    "#8a8a8a",
     "glow":            "#ffffff",   # halo drawn under an emphasised line
     "selected":        "#ff1744",   # the exported alignment preview
+    # An UNPLANNED edit-time fallback (segmented rendering failed after a
+    # split/edit, see App._sample_segments) — muted and thin so it never
+    # reads as "here's your result" the way "selected" deliberately does,
+    # and never visually buries the OSM reference layer under it.
+    "alignmentDegraded": "#78909c",
     "piBorder":        "#37474f",   # PI marker outline / fill / omitted
     "piFill":          "#ffffff",
     "piOmitted":       "#9e9e9e",
@@ -80,10 +85,57 @@ LEGEND_ENTRIES = [
     {"label": "OSM reference", "color": MAP_COLORS["osmReference"], "dashed": True},
 ]
 
-
 def element_color(kind: str, default: str = "#ffffff") -> str:
     """Colour for an element type name ('Line' | 'Arc' | 'Spiral')."""
     return ELEMENT_COLORS.get(kind, default)
+
+
+# Deviation heatmap (Req 9b) — "Colour by baseline deviation" render mode:
+# a continuous green -> yellow -> red ramp, keyed on an element's `_max_dev`
+# (annotate_element_deviations) against a caller-supplied threshold (usually
+# the project's own max-deviation tolerance, so "red" means "outside the
+# tolerance the user actually configured", not an arbitrary fixed number).
+DEVIATION_RAMP_STOPS = [
+    (0.00, "#2e9e4f"),   # good — within tolerance
+    (0.50, "#d68f2e"),   # amber — approaching the limit
+    (1.00, "#d64545"),   # red — at/over the limit
+]
+
+
+def deviation_color(max_dev: float, threshold: float) -> str:
+    """Hex colour for one element's `_max_dev` on the ramp above, where
+    `max_dev == 0` is fully green and `max_dev >= threshold` is fully red
+    (clamped — a track well outside tolerance doesn't get an even angrier
+    colour, it just stays at the ramp's worst stop)."""
+    threshold = max(1e-6, float(threshold))
+    t = max(0.0, min(1.0, float(max_dev) / threshold))
+    for (t0, c0), (t1, c1) in zip(DEVIATION_RAMP_STOPS, DEVIATION_RAMP_STOPS[1:]):
+        if t <= t1:
+            local = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return _lerp_hex(c0, c1, local)
+    return DEVIATION_RAMP_STOPS[-1][1]
+
+
+def _lerp_hex(c0: str, c1: str, t: float) -> str:
+    def rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r0, g0, b0 = rgb(c0)
+    r1, g1, b1 = rgb(c1)
+    r = round(r0 + (r1 - r0) * t)
+    g = round(g0 + (g1 - g0) * t)
+    b = round(b0 + (b1 - b0) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# Legend shown while the map is in "Colour: deviation" mode (Req 9b) —
+# swapped in for LEGEND_ENTRIES above, same setLegend(entries, visible) call.
+DEVIATION_LEGEND_ENTRIES = [
+    {"label": "Within tolerance", "color": DEVIATION_RAMP_STOPS[0][1]},
+    {"label": "Approaching limit", "color": DEVIATION_RAMP_STOPS[1][1]},
+    {"label": "At/over limit",    "color": DEVIATION_RAMP_STOPS[2][1]},
+    {"label": "OSM reference",    "color": MAP_COLORS["osmReference"], "dashed": True},
+]
 
 
 def contrast_text(hex_color: str) -> str:

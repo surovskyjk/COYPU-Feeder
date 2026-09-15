@@ -115,8 +115,11 @@ class TestAutoConsolidate:
         assert applied > 0, "expected at least one run to merge"
         assert n_arcs_after < n_arcs_before, (
             f"{n_arcs_before} -> {n_arcs_after} arcs; expected a reduction")
-        # C1 continuity must hold — construction guarantees it, but prove it
-        assert C._max_heading_jump_rad(model.elements) < 1e-3
+        # C1 continuity must hold — construction guarantees it, but prove it.
+        # Tightened from 1e-3 now that _heading_at_start/_end use the exact
+        # clothoid chord-to-tangent angle instead of the α ≈ θ_s/3
+        # approximation (see geometry.candidates._clothoid_chord_angle).
+        assert C._max_heading_jump_rad(model.elements) < 1e-9
 
     def test_idempotent(self):
         model, _ = _build_model(gap=70.0)

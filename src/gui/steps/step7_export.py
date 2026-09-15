@@ -38,6 +38,7 @@ class Step7Export(ThemedPanel, QWidget):
     osm_track_ready            = Signal(list)      # raw OSM [[lat,lon],...] per track
     alignment_ready            = Signal(list)      # reconstructed geometric points
     alignment_segments_ready   = Signal(list)      # per-element WGS84 segments
+    log_message                = Signal(str, str)  # (text, level) -> log panel
     fit_to_alignment_requested = Signal()
     start_over_requested       = Signal()
     back_requested             = Signal()          # user wants to go back to Refine
@@ -343,6 +344,8 @@ class Step7Export(ThemedPanel, QWidget):
         self._worker.osm_track_ready.connect(self.osm_track_ready.emit)
         self._worker.alignment_ready.connect(self.alignment_ready.emit)
         self._worker.alignment_segments_ready.connect(self.alignment_segments_ready.emit)
+        self._worker.segment_build_warning.connect(
+            lambda msg: self.log_message.emit(msg, "warn"))
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()

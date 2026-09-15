@@ -48,6 +48,13 @@ class CandidateAlignment:
     geo_segments_wgs84:  list  = field(default_factory=list)
     # Maximum heading mismatch (degrees) across all junctions; sanity metric.
     max_heading_jump_deg: float = 0.0
+    # Junctions whose EXACT tangent-bearing mismatch exceeds a small
+    # threshold — see `_c1_junction_report`. Normally empty; the PI-model
+    # rebuild is exactly C1 by construction.
+    c1_junctions:         list  = field(default_factory=list)
+    # The element_id carrying the worst per-element deviation (Req 9a); None
+    # when there's nothing to point at.
+    worst_element_id:    str | None = None
     # Editable PI model (Level 2/3 only; None otherwise). Source of truth
     # for interactive editing in Step 5 — see PIAlignment.
     pi_model:            object = None
@@ -63,23 +70,33 @@ class PIData:
     One editable Point of Intersection of the tangent polygon.
 
     Convention for the editable fields:
-      radius     > 0  → user/applied value used verbatim (still guarded)
+      radius     > 0  → user/requested value, honoured as closely as the
+                        tangent-room geometry allows (still guarded)
       radius    <= 0  → auto-estimate from the OSM points
-      spiral_len > 0  → user/applied spiral length (still guarded)
+      spiral_len > 0  → user/requested spiral length (still guarded)
       spiral_len == 0 → explicitly no spiral (plain arc)
       spiral_len  < 0 → auto (use the model's default spiral length)
 
-    After every rebuild the *applied* values are written back into
-    `radius` / `spiral_len`, so the table always shows real numbers and
-    subsequent rebuilds are reproducible.
+    `radius` / `spiral_len` are the REQUEST and a rebuild never overwrites
+    them with a clamped/infeasible result — the one exception is the very
+    first time a value resolves out of "auto" (<=0 / <0), which legitimately
+    becomes the concrete request from then on (matches `_reset_pi`'s "restore
+    auto" semantics: set back to the sentinel to re-resolve). What the
+    geometry actually achieved after every rebuild — possibly less than the
+    request, if the tangent room ran out — lives in `radius_applied` /
+    `spiral_len_applied`; read those, not `radius`/`spiral_len`, when you
+    need "what did the solver actually build." A request that cannot be
+    fully honoured is flagged in `model.log`, never silently discarded.
     """
     index:            int                 # vertex index into PIAlignment.V (stable per build)
     xy:               tuple               # PI coordinates (projected)
     deflection:       float               # polygon deflection (rad, signed, informational)
     radius:           float = -1.0
     radius_auto:      float = 0.0         # last auto-estimated radius (for reset)
+    radius_applied:   float = 0.0         # radius the last rebuild actually built
     spiral_len:       float = -1.0
     spiral_len_auto:  float = 0.0
+    spiral_len_applied: float = 0.0       # spiral length the last rebuild actually built
     omitted:          bool  = False
     merged_with_next: bool  = False       # spiral-merge state (feature: merge)
     merged_with_prev: bool  = False       # set on the partner PI
@@ -267,12 +284,31 @@ def metrics_from_stats(stats: dict, elements: list[dict]) -> dict:
         jj_rad = _max_heading_jump_rad(elements)
     except Exception:
         jj_rad = 0.0
+    try:
+        c1_junctions = _c1_junction_report(elements)
+    except Exception:
+        c1_junctions = []
+    # The element carrying the worst per-element deviation (Req 9a: lets the
+    # GUI's metrics chip jump straight to it on click) — `per_element` is
+    # `[(max_dev, mean_dev, n_points), ...]`, one entry per element, already
+    # computed by `compute_deviation_stats`; None when there's nothing to
+    # point at (no elements, or an element carries no id).
+    worst_element_id = None
+    per_element = stats.get("per_element") or []
+    if per_element and len(per_element) == len(elements):
+        i_worst = max(range(len(per_element)), key=lambda i: per_element[i][0])
+        worst_element_id = elements[i_worst].get("element_id")
     return {
         "max_deviation":        float(stats.get("max_deviation", 0.0)),
         "rmse":                 float(stats.get("rmse", 0.0)),
         "mean_deviation":       float(stats.get("mean_deviation", 0.0)),
         "n_elements":           len(elements),
         "max_heading_jump_deg": float(math.degrees(jj_rad)),
+        # Non-empty only for a genuine continuity break (see
+        # `_c1_junction_report`'s docstring) — the GUI log panel surfaces
+        # this list only when it isn't empty.
+        "c1_junctions":         c1_junctions,
+        "worst_element_id":     worst_element_id,
     }
 
 
@@ -295,7 +331,8 @@ def evaluate_candidate(
     """
     if not elements or xy is None or len(xy) < 2:
         return {"max_deviation": 0.0, "rmse": 0.0, "mean_deviation": 0.0,
-                "n_elements": len(elements), "max_heading_jump_deg": 0.0}
+                "n_elements": len(elements), "max_heading_jump_deg": 0.0,
+                "c1_junctions": [], "worst_element_id": None}
     return metrics_from_stats(compute_deviation_stats(elements, xy), elements)
 
 
@@ -346,6 +383,26 @@ def _spiral_R_eff(el: dict) -> float:
     return float("inf")
 
 
+def _clothoid_chord_angle(L: float, R: float) -> float:
+    """
+    Exact chord-to-tangent angle (radians, unsigned) for a clothoid spiral of
+    arc-length L and radius R: the angle between the tangent at the
+    zero-curvature end and the straight chord joining both ends, assuming the
+    ccw/"curving toward +y" convention `_compute_clothoid_shift` uses.
+
+    This replaces the small-angle approximation α ≈ θ_s/3 = L/(6R) that used
+    to drive `_heading_at_start`/`_heading_at_end`: that approximation's
+    error grows as θ_s³ (negligible for a gentle transition, but ~0.04° at a
+    tight R=200 m / L=250 m spiral) and was being read as a genuine C1
+    continuity defect in the route statistics even though the solver's
+    element geometry is exactly C1 by construction (`_build_zone_range`
+    always measures the incoming tangent from the actual current point).
+    """
+    from geometry.alignment import _compute_clothoid_shift
+    x_end, y_end = _compute_clothoid_shift(L, R)
+    return math.atan2(y_end, x_end)
+
+
 def _heading_at_start(el: dict) -> float | None:
     """Tangent heading (radians) at the start of an element."""
     et = el.get("type")
@@ -361,9 +418,10 @@ def _heading_at_start(el: dict) -> float | None:
         except Exception:
             return None
     if et == "Spiral":
-        # Chord-to-tangent relations for a clothoid (α ≈ θ_s/3 = L/(6R)):
-        #   entry (∞→R): start = chord − sign·L/(6R), end = chord + sign·L/(3R)
-        #   exit  (R→∞): start = chord − sign·L/(3R), end = chord + sign·L/(6R)
+        # Exact chord-to-tangent relations for a clothoid (θ_s = L/(2R),
+        # α = _clothoid_chord_angle(L, R) — see its docstring):
+        #   entry (∞→R): start = chord − sign·α,       end = chord + sign·(θ_s − α)
+        #   exit  (R→∞): start = chord − sign·(θ_s − α), end = chord + sign·α
         try:
             sx, sy = el["start"][0], el["start"][1]
             ex, ey = el["end"][0],   el["end"][1]
@@ -372,11 +430,13 @@ def _heading_at_start(el: dict) -> float | None:
             R_eff = _spiral_R_eff(el)
             if not math.isfinite(R_eff) or R_eff <= 0 or L <= 0:
                 return chord_dir
-            sign = +1.0 if el.get("rot") == "ccw" else -1.0
+            sign  = +1.0 if el.get("rot") == "ccw" else -1.0
+            theta_s = L / (2.0 * R_eff)
+            alpha   = _clothoid_chord_angle(L, R_eff)
             r_st = float(el.get("radius_start", float("inf")))
             if math.isinf(r_st):                       # entry spiral
-                return chord_dir - sign * (L / (6.0 * R_eff))
-            return chord_dir - sign * (L / (3.0 * R_eff))   # exit spiral
+                return chord_dir - sign * alpha
+            return chord_dir - sign * (theta_s - alpha)   # exit spiral
         except Exception:
             return None
     return None
@@ -405,11 +465,13 @@ def _heading_at_end(el: dict) -> float | None:
             R_eff = _spiral_R_eff(el)
             if not math.isfinite(R_eff) or R_eff <= 0 or L <= 0:
                 return chord_dir
-            sign = +1.0 if el.get("rot") == "ccw" else -1.0
+            sign  = +1.0 if el.get("rot") == "ccw" else -1.0
+            theta_s = L / (2.0 * R_eff)
+            alpha   = _clothoid_chord_angle(L, R_eff)
             r_st = float(el.get("radius_start", float("inf")))
             if math.isinf(r_st):                       # entry spiral
-                return chord_dir + sign * (L / (3.0 * R_eff))
-            return chord_dir + sign * (L / (6.0 * R_eff))   # exit spiral
+                return chord_dir + sign * (theta_s - alpha)
+            return chord_dir + sign * alpha   # exit spiral
         except Exception:
             return None
     return None
@@ -432,6 +494,32 @@ def _max_heading_jump_rad(elements: list[dict]) -> float:
         diff = (hb - ha + math.pi) % (2.0 * math.pi) - math.pi
         worst = max(worst, abs(diff))
     return worst
+
+
+def _c1_junction_report(elements: list[dict], threshold_deg: float = 0.05) -> list[dict]:
+    """
+    Every element junction whose exact tangent-bearing mismatch exceeds
+    `threshold_deg`. With `_heading_at_start`/`_heading_at_end` now using the
+    exact clothoid chord-to-tangent angle, this should normally return an
+    empty list — the PI-model rebuild is exactly C1 by construction. A
+    non-empty result means a genuine continuity break, not a measurement
+    artifact, and is worth surfacing in the log panel rather than only in the
+    single worst-case scalar `_max_heading_jump_rad` returns.
+    """
+    out: list[dict] = []
+    for i, (a, b) in enumerate(zip(elements[:-1], elements[1:])):
+        ha = _heading_at_end(a)
+        hb = _heading_at_start(b)
+        if ha is None or hb is None:
+            continue
+        diff_deg = math.degrees(abs((hb - ha + math.pi) % (2.0 * math.pi) - math.pi))
+        if diff_deg > threshold_deg:
+            out.append({
+                "index": i, "a_type": a.get("type"), "b_type": b.get("type"),
+                "a_id": a.get("element_id"), "b_id": b.get("element_id"),
+                "jump_deg": diff_deg,
+            })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +558,7 @@ class CandidateGenerator:
         self.min_kappa_radius   = settings.get("min_kappa_radius",     0.0)
         self.min_kappa_length   = settings.get("min_kappa_length",   200.0)
         self.spiral_length      = settings.get("spiral_length",       20.0)
+        self.pi_min_tangent     = settings.get("pi_min_tangent", _PI_MIN_TANGENT)
 
         # Precompute forced-line chainage ranges once (shared by all algorithms)
         self._forced_ch_ranges: list[tuple[float, float]] = _compute_forced_line_ranges(
@@ -993,6 +1082,7 @@ class CandidateGenerator:
             spiral_length = 0.0,
             use_spirals   = False,
             progress_cb   = _p,
+            pi_min_tangent = self.pi_min_tangent,
         )
         auto_merged = 0
         if self.settings.get("auto_consolidate", True) and len(model.V) >= 4:
@@ -1030,6 +1120,7 @@ class CandidateGenerator:
             spiral_length = self.spiral_length,
             use_spirals   = True,
             progress_cb   = _p,
+            pi_min_tangent = self.pi_min_tangent,
         )
         auto_merged = 0
         if self.settings.get("auto_consolidate", True) and len(model.V) >= 4:
@@ -3454,6 +3545,12 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
             if T_s is None and L > 0.0:
                 L = 0.0
                 T_s = _reflex_tangent(R, L)
+                if T_s is not None:
+                    model.log.append(
+                        f"⚠ PI {k}: transition spiral does not fit this "
+                        f"{math.degrees(delta):+.1f}° curve — built as a "
+                        "plain arc (request kept; will retry on the next "
+                        "rebuild).")
             if T_s is None:
                 # Do NOT silently shrink R to make it fit — that would
                 # build a curve that no longer matches the OSM points the
@@ -3511,9 +3608,18 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
                 "tc": TC.tolist(), "ct": np.array(CT, dtype=float).tolist(),
             })
             cur_pt = np.array(CT, dtype=float)
-            pi_data.radius = R
+            # `radius`/`spiral_len` are the REQUEST — never overwritten by a
+            # clamp; only the one-time auto→concrete resolution locks them
+            # in (mirrors `_reset_pi`'s "set back to the sentinel" contract).
+            # `radius_applied`/`spiral_len_applied` always reflect what this
+            # rebuild actually built. See PIData's docstring.
+            pi_data.radius_applied = R
+            if pi_data.radius <= 0:
+                pi_data.radius = R
             if use_spirals:
-                pi_data.spiral_len = L
+                pi_data.spiral_len_applied = L
+                if pi_data.spiral_len < 0:
+                    pi_data.spiral_len = L
                 if pi_data.spiral_len_auto <= 0.0 and L > 0.0:
                     pi_data.spiral_len_auto = L
             continue
@@ -3800,11 +3906,24 @@ def _build_zone_range(model: "PIAlignment", k_lo: int, k_hi: int,
             })
             cur_pt = ST.copy()
 
-        # Write back the *applied* values so the table shows reality and
-        # the next rebuild reproduces this result exactly.
-        pi_data.radius = R
+        if L_target >= _PI_L_MIN and L <= 0.0:
+            model.log.append(
+                f"⚠ PI {k}: transition spiral does not fit here (only "
+                f"{T_max:.0f} m of tangent room) — built as a plain arc "
+                "(request kept; will retry on the next rebuild).")
+
+        # `radius`/`spiral_len` are the REQUEST — never overwritten by a
+        # clamp; only the one-time auto→concrete resolution locks them in
+        # (mirrors `_reset_pi`'s "set back to the sentinel" contract).
+        # `radius_applied`/`spiral_len_applied` always reflect what this
+        # rebuild actually built. See PIData's docstring.
+        pi_data.radius_applied = R
+        if pi_data.radius <= 0:
+            pi_data.radius = R
         if use_spirals:
-            pi_data.spiral_len = L
+            pi_data.spiral_len_applied = L
+            if pi_data.spiral_len < 0:
+                pi_data.spiral_len = L
             if pi_data.spiral_len_auto <= 0.0 and L > 0.0:
                 pi_data.spiral_len_auto = L
 
@@ -3910,13 +4029,22 @@ def annotate_element_deviations(elements: list[dict], xy: np.ndarray,
     return stats
 
 
-def _assign_element_ids(elements: list[dict]) -> None:
+def _assign_element_ids(elements: list[dict], start: int = 0) -> None:
     """
     Stable, human-readable ids: Lines numbered sequentially (L1, L2, …);
     Arcs/Spirals tied to their PI index (A3, S3-in, S3-out).
+
+    `start`: only (re)assign elements[start:] — elements before it are
+    provably unchanged by a span-local edit (same dict objects, never
+    touched) and already carry a correct id from whatever earlier call
+    assigned it; recomputing the Line counter from `elements[:start]` here
+    each time keeps this self-consistent without re-walking the untouched
+    prefix (used by rebuild_pi_span's finalize step — the default start=0
+    reproduces the exact full-list behavior every other caller relies on).
     """
-    line_no = 0
-    for i, e in enumerate(elements):
+    line_no = sum(1 for e in elements[:start] if e.get("type") == "Line")
+    for i in range(start, len(elements)):
+        e = elements[i]
         et = e.get("type")
         if et == "Line":
             line_no += 1
@@ -4015,17 +4143,18 @@ def _span_snapshot(model: "PIAlignment") -> dict:
         "stats":    stats_copy,
         # write-back fields by PIData *reference*: shared objects survive
         # any list swap the caller does during its own rollback
-        "pi_vals":  [(p, p.radius, p.radius_auto, p.spiral_len,
-                      p.spiral_len_auto) for p in model.pis],
+        "pi_vals":  [(p, p.radius, p.radius_auto, p.radius_applied,
+                      p.spiral_len, p.spiral_len_auto, p.spiral_len_applied)
+                     for p in model.pis],
     }
 
 
 def restore_span_snapshot(model: "PIAlignment", snap: dict) -> None:
     """Rollback of a rebuild_pi_span splice (call BEFORE restoring caller-
     managed PIData fields — this rewrites the rebuild write-backs)."""
-    for p, r, ra, sl, sla in snap["pi_vals"]:
-        p.radius, p.radius_auto = r, ra
-        p.spiral_len, p.spiral_len_auto = sl, sla
+    for p, r, ra, rapp, sl, sla, slapp in snap["pi_vals"]:
+        p.radius, p.radius_auto, p.radius_applied = r, ra, rapp
+        p.spiral_len, p.spiral_len_auto, p.spiral_len_applied = sl, sla, slapp
     model.elements = snap["elements"]
     model.tangent_stubs = snap["stubs"]
     model.last_stats = snap["stats"]
@@ -4248,11 +4377,23 @@ def rebuild_pi_span(model: "PIAlignment", k_lo: int, k_hi: int, *,
     stats["point_elem"] = pe
 
     # ── finalize: stations, ids, annotations, stubs ──────────────────────────
-    sta = 0.0
-    for e in new_list:
+    # new_list[:i0] is old_elements[:i0] by direct reference — same dict
+    # objects, untouched by this edit — so their sta_start/element_id are
+    # already correct from whatever earlier call last assigned them; only
+    # the spliced-in span and everything after it (whose stations/Line
+    # numbering cascade from it) need recomputing. This used to walk the
+    # WHOLE list on every single edit regardless of how small or how late
+    # in a long corridor it was.
+    sta = new_list[i0 - 1]["sta_start"] + new_list[i0 - 1].get("length", 0.0) \
+        if i0 > 0 else 0.0
+    for e in new_list[i0:]:
         e["sta_start"] = sta
         sta += e.get("length", 0.0)
-    _assign_element_ids(new_list)
+    _assign_element_ids(new_list, start=i0)
+    # Deviation reassignment can (rarely) pull an OSM point from a PREFIX
+    # element onto a newly-built one that's now closer (see the "outside
+    # the window" sweep above) — stats["per_element"] can legitimately
+    # differ for i < i0, so this one stays a full-list pass.
     annotate_element_deviations(new_list, xy, stats=stats)
 
     kept_before = [s for s in snap["stubs"] if s["pi"] < a]
@@ -4303,10 +4444,12 @@ def _light_copy(model: "PIAlignment") -> "PIAlignment":
     return c
 
 
-def _find_split_curve_pair(elements: list[dict]) -> tuple[int, int] | None:
+def _find_split_curve_pair(elements: list[dict],
+                           min_tangent: float = _PI_MIN_TANGENT
+                           ) -> tuple[int, int] | None:
     """
     Find the first pair of adjacent PIs whose curves are separated by a
-    Line shorter than _PI_MIN_TANGENT and turn in the same direction —
+    Line shorter than `min_tangent` and turn in the same direction —
     i.e. Douglas-Peucker split one physical curve in two.
     """
     curve_of: list[tuple[int, str]] = []   # (pi_index, rot) per curve group
@@ -4319,7 +4462,7 @@ def _find_split_curve_pair(elements: list[dict]) -> tuple[int, int] | None:
         elif e["type"] == "Line" and last_pi is not None:
             gap_after[last_pi] = gap_after.get(last_pi, 0.0) + e["length"]
     for (p1, r1), (p2, r2) in zip(curve_of[:-1], curve_of[1:]):
-        if p2 == p1 + 1 and r1 == r2 and gap_after.get(p1, 1e9) < _PI_MIN_TANGENT:
+        if p2 == p1 + 1 and r1 == r2 and gap_after.get(p1, 1e9) < min_tangent:
             return (p1, p2)
     return None
 
@@ -4350,12 +4493,19 @@ def extract_pi_model(
     spiral_length: float,
     use_spirals:   bool,
     progress_cb=None,
+    pi_min_tangent: float = _PI_MIN_TANGENT,
 ) -> "PIAlignment":
     """
     Extract the editable PI model from the OSM polyline:
     Douglas-Peucker tangent polygon → cluster merge → noise-PI prefilter →
     construct → iterative split-curve re-merge. Returns a PIAlignment with
     the built element chain and auto values written into each PIData.
+
+    `pi_min_tangent`: lines shorter than this between two same-rotation
+    curves auto-merge into one PI during that last step (default matches
+    the module constant `_PI_MIN_TANGENT`) — exposed as a parameter so a
+    project-level default (Settings → Preferences) can override it without
+    touching this module.
     """
     def _p(msg):
         if progress_cb:
@@ -4418,7 +4568,7 @@ def extract_pi_model(
     for _ in range(6):
         if len(model.V) < 4:
             break
-        pair = _find_split_curve_pair(elements)
+        pair = _find_split_curve_pair(elements, pi_min_tangent)
         if pair is None:
             break
         merged = _merge_polygon_pair(model.V, model.idx, pair[0])
@@ -4511,6 +4661,98 @@ def _pi_zone_info(model: "PIAlignment", pi_index: int):
     return arc, entry, exit_, abs_delta
 
 
+def add_spirals(model: "PIAlignment", k: int, length: float | None = None
+                ) -> tuple[bool, str]:
+    """
+    Add symmetric transition spirals to PI `k`'s curve: L-C-L -> L-S-C-S-L.
+    `length` defaults to `model.spiral_default`. Feasibility is exactly what
+    `rebuild_pi_span`/`_build_zone_range`'s existing clamp logic already
+    enforces (tangent-room budget, neighbour non-encroachment, `_PI_L_MIN`)
+    — reused here rather than reimplemented. On a total infeasibility (no
+    spiral fits at all) the model is rolled back unchanged; a PARTIAL
+    infeasibility (some length fits, just less than requested) is not a
+    failure — the request is kept and the achieved length is reported, same
+    as every other radius/spiral edit (see PIData's docstring).
+
+    Returns (ok, message).
+    """
+    if not model.use_spirals:
+        return False, ("This level has no spirals (Level 2) — switch to "
+                       "Level 3 to add transition spirals.")
+    pid = next((p for p in model.pis if p.index == k), None)
+    if pid is None:
+        return False, "PI not found in the model."
+    if pid.omitted:
+        return False, "This PI is omitted."
+    zone = _pi_zone_info(model, k)
+    if zone is None:
+        return False, "This PI does not currently carry a curve."
+    _, entry, exit_, _ = zone
+    if entry is not None or exit_ is not None:
+        return False, "This PI already has transition spirals."
+
+    L_req = float(length) if length is not None else float(model.spiral_default)
+    if L_req < _PI_L_MIN:
+        return False, f"Spiral length must be at least {_PI_L_MIN:.0f} m."
+
+    old_spiral_len = pid.spiral_len
+    pid.spiral_len = L_req
+    # `rebuild_pi_span` returning None means it fell back to a full rebuild
+    # (e.g. a tiny model) — a perfectly valid, successful path in its own
+    # right; only the ACHIEVED length (spiral_len_applied) decides success,
+    # exactly like `merge_intermediate_line`'s ok-check.
+    result = rebuild_pi_span(model, k, k)
+    applied = float(pid.spiral_len_applied)
+    if applied < _PI_L_MIN:
+        if result is not None:
+            restore_span_snapshot(model, result)
+        pid.spiral_len = old_spiral_len
+        if result is None:
+            rebuild_from_pi_model(model)
+        return False, (f"No transition spiral fits at PI {k} — there is no "
+                       "tangent room left by the neighbouring geometry.")
+    if applied < L_req - 0.5:
+        return True, (f"Added transition spirals at PI {k}, clamped to "
+                      f"{applied:.1f} m (tangent room). Requested "
+                      f"{L_req:.0f} m is kept — widen the neighbouring "
+                      "straights to recover it.")
+    return True, f"Added {applied:.1f} m transition spirals at PI {k}."
+
+
+def remove_spirals(model: "PIAlignment", k: int) -> tuple[bool, str]:
+    """
+    Remove PI `k`'s transition spirals: L-S-C-S-L -> L-C-L, extending the
+    circular arc back to meet the tangents directly. Returns (ok, message).
+    """
+    pid = next((p for p in model.pis if p.index == k), None)
+    if pid is None:
+        return False, "PI not found in the model."
+    if pid.omitted:
+        return False, "This PI is omitted."
+    zone = _pi_zone_info(model, k)
+    if zone is None:
+        return False, "This PI does not currently carry a curve."
+    _, entry, exit_, _ = zone
+    if entry is None and exit_ is None:
+        return False, "This PI has no transition spirals to remove."
+
+    old_spiral_len = pid.spiral_len
+    pid.spiral_len = 0.0
+    # As in add_spirals: `result is None` only means "fell back to a full
+    # rebuild" — success is judged from the geometry actually built.
+    result = rebuild_pi_span(model, k, k)
+    zone2 = _pi_zone_info(model, k)
+    removed = zone2 is not None and zone2[1] is None and zone2[2] is None
+    if not removed:
+        if result is not None:
+            restore_span_snapshot(model, result)
+        pid.spiral_len = old_spiral_len
+        if result is None:
+            rebuild_from_pi_model(model)
+        return False, f"Could not remove the transition spirals at PI {k}."
+    return True, f"Removed transition spirals at PI {k}."
+
+
 def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
                             ) -> tuple[bool, str]:
     """
@@ -4601,8 +4843,10 @@ def merge_intermediate_line(model: "PIAlignment", pi_a: int, pi_b: int
     b.merged_with_prev = True
 
     span_snap = rebuild_pi_span(model, pi_a, pi_b)
-    ok = (abs(a.spiral_len - L_a_new) < 0.05
-          and abs(b.spiral_len - L_b_new) < 0.05)
+    # `a.spiral_len`/`b.spiral_len` are now the REQUEST (L_a_new/L_b_new)
+    # verbatim — check what the solver actually achieved via *_applied.
+    ok = (abs(a.spiral_len_applied - L_a_new) < 0.05
+          and abs(b.spiral_len_applied - L_b_new) < 0.05)
     if ok:
         # Verify the connector is actually gone
         za2 = _pi_zone_info(model, pi_a)
@@ -5450,6 +5694,187 @@ def auto_consolidate(model: "PIAlignment", max_straight_m: float = 30.0,
         for m in msgs:
             model.log.append(f"Auto-consolidate: {m}")
     return total_applied
+
+
+# ---------------------------------------------------------------------------
+# Batch "Extend Transition Spirals" — whole-alignment spiral lengthening
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BatchExtendResult:
+    """Per-alignment summary of a batch_extend_spirals() run."""
+    lengthened: int = 0
+    clamped:    int = 0
+    skipped:    int = 0
+    notes:      list = field(default_factory=list)   # [(pi_index, status, msg)]
+
+
+def _search_radius_for_min_deviation(model: "PIAlignment", k: int,
+                                     lo: float, hi_generous: float) -> float | None:
+    """Bounded 1-D search for the radius (at PI k's CURRENT spiral_len,
+    already set by the caller) minimizing the zone's post-rebuild mean
+    deviation from the OSM baseline.
+
+    Deliberately reuses `rebuild_pi_span` itself as the geometry evaluator
+    (rather than re-deriving zone construction independently) — every trial
+    reads `_mean_dev`, the exact per-element deviation `rebuild_pi_span`'s
+    own finalize step already annotates from `model.last_stats`, so this
+    can never disagree with what the committed geometry actually looks
+    like (including whatever `_build_zone_range` clamps a trial radius to).
+
+    First probes with an intentionally-huge request to discover the REAL
+    feasible ceiling (via that same clamp) and searches only up to there —
+    requesting anything past it clamps to the identical geometry every
+    time, which would leave Brent's method hunting a flat, uninformative
+    region of the (lo, hi_generous) range instead of the part that
+    actually varies. Returns None (not a clamped value below `lo`) when
+    even the smallest feasible radius here is below `lo` — `lo` is a hard
+    floor (e.g. a track-class minimum radius), never something to silently
+    violate because the tangent room ran out.
+    """
+    from scipy.optimize import minimize_scalar
+
+    pid = next((p for p in model.pis if p.index == k), None)
+    if pid is None or lo >= hi_generous:
+        return None
+
+    pid.radius = hi_generous
+    rebuild_pi_span(model, k, k)
+    # `pid.radius` is now the REQUEST (hi_generous) verbatim — the solver's
+    # actual ceiling for this zone is `radius_applied`.
+    ceiling = float(pid.radius_applied)
+    if ceiling < lo:
+        return None   # not even the floor radius fits this zone's tangent room
+    hi = max(lo, min(hi_generous, ceiling))
+    if hi <= lo:
+        return lo
+
+    def objective(r: float) -> float:
+        pid.radius = float(r)
+        rebuild_pi_span(model, k, k)
+        arc = next((e for e in model.elements
+                    if e.get("type") == "Arc" and e.get("_pi") == k), None)
+        return float(arc.get("_mean_dev", 1e9)) if arc is not None else 1e9
+
+    res = minimize_scalar(objective, bounds=(lo, hi), method="bounded",
+                          options={"xatol": 1.0, "maxiter": 30})
+    return float(res.x) if res is not None else None
+
+
+def batch_extend_spirals(model: "PIAlignment", target_length: float, *,
+                         mode: str = "minimize_deviation",
+                         min_radius: float | None = None,
+                         progress_cb=None) -> BatchExtendResult:
+    """
+    Batch "Extend Transition Spirals": lengthen every eligible curve's entry/
+    exit spiral toward `target_length` [m], wherever geometrically feasible
+    — never shrinks a spiral that's already at or beyond the target.
+
+    mode="minimize_deviation" (default): also re-fits the radius at the new
+    spiral length to hug the OSM baseline as tightly as possible (a bounded
+    1-D search — see `_search_radius_for_min_deviation`), subject to
+    `min_radius` (defaults to the model's own floor) as a lower bound.
+    mode="fixed_radius": radius is left exactly as it is; only the spiral
+    length changes.
+
+    Eligible PIs are ordinary (not omitted, not part of a spiral merge or a
+    reflex/chain construction) — those carry their own length-solving logic
+    (`merge_intermediate_line`, the singular-band auxiliary-PI path) that a
+    blind length override would fight against.
+
+    Each PI is applied via `rebuild_pi_span` — the exact same span-local
+    path every other edit in this module uses, so feasibility (tangent-room
+    budget, neighbour non-encroachment, `_PI_L_MIN`) is enforced by the one
+    place that already enforces it for everything else, not reimplemented
+    here. A PI whose edit makes no real progress (clamped back to at or
+    below its starting length) is rolled back to its exact pre-call state,
+    never left with a pointless mutation — mirrors every other function's
+    rollback convention in this module.
+    """
+    floor = float(min_radius) if min_radius is not None else float(model.min_radius)
+    eligible = [p for p in model.pis
+               if not p.omitted and not p.merged_with_next
+               and not p.merged_with_prev and not getattr(p, "chain_next", False)]
+    result = BatchExtendResult()
+    total = len(eligible)
+    for n_done, pid in enumerate(eligible, start=1):
+        k = pid.index
+        current_L = (pid.spiral_len if pid.spiral_len >= 0.0
+                    else (pid.spiral_len_auto if pid.spiral_len_auto > 0.0
+                          else float(model.spiral_default)))
+        if current_L >= target_length - 1e-6:
+            result.skipped += 1
+            result.notes.append(
+                (k, "skipped", f"already at/above {target_length:.0f} m"))
+            if progress_cb:
+                progress_cb(n_done, total)
+            continue
+
+        snap = _span_snapshot(model)
+
+        pid.spiral_len = target_length
+        requested_r = None
+        if mode == "minimize_deviation":
+            base_r = pid.radius if pid.radius > 0 else (
+                pid.radius_auto if pid.radius_auto > 0 else floor)
+            hi = max(floor * 50.0, base_r * 3.0, 50000.0)
+            requested_r = _search_radius_for_min_deviation(model, k, floor, hi)
+            if requested_r is None:
+                # No radius >= the floor fits this zone's tangent room at
+                # all — honoring the floor takes priority over extending
+                # the spiral here.
+                restore_span_snapshot(model, snap)
+                result.skipped += 1
+                result.notes.append(
+                    (k, "skipped", f"no radius ≥ {floor:.0f} m fits here"))
+                if progress_cb:
+                    progress_cb(n_done, total)
+                continue
+            pid.radius = requested_r
+
+        # The classification below compares REQUESTED vs ACTUALLY-APPLIED
+        # values only — never scrapes model.log for this: a zone's log
+        # notes can be pre-existing conditions unrelated to this call (e.g.
+        # an already-marginal radius that re-logs on every rebuild of that
+        # zone regardless of what changed), and in minimize_deviation mode
+        # the search above deliberately probes infeasible radii itself —
+        # neither should be mistaken for THIS edit having been clamped.
+        span_snap = rebuild_pi_span(model, k, k)
+        # `pid.spiral_len`/`pid.radius` are now the REQUEST (target_length/
+        # requested_r) verbatim — read what the solver actually built from
+        # *_applied.
+        applied_L = float(pid.spiral_len_applied)
+        applied_R = float(pid.radius_applied)
+
+        if span_snap is None or applied_L <= current_L + 1e-6:
+            # No real progress (fell back to a full rebuild, or the result
+            # clamped straight back to ~where it started) — never leave a
+            # pointless mutation from a batch pass.
+            restore_span_snapshot(model, snap)
+            result.skipped += 1
+            result.notes.append((k, "skipped", "no feasible spiral length here"))
+            if progress_cb:
+                progress_cb(n_done, total)
+            continue
+
+        length_clamped = applied_L < target_length - 0.5
+        radius_clamped = (requested_r is not None
+                          and abs(applied_R - requested_r) > max(1.0, 0.01 * requested_r))
+        if length_clamped or radius_clamped:
+            reasons = []
+            if length_clamped:
+                reasons.append(f"spiral length limited to {applied_L:.0f} m")
+            if radius_clamped:
+                reasons.append(f"radius limited to {applied_R:.0f} m")
+            result.clamped += 1
+            result.notes.append((k, "clamped", "; ".join(reasons) + " (tangent room)"))
+        else:
+            result.lengthened += 1
+            result.notes.append(
+                (k, "lengthened", f"{current_L:.0f} m → {applied_L:.0f} m"))
+        if progress_cb:
+            progress_cb(n_done, total)
+    return result
 
 
 # ---------------------------------------------------------------------------

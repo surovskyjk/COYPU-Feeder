@@ -23,7 +23,7 @@ import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QProgressBar,
+    QProgressBar, QDoubleSpinBox,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QColor, QFont
@@ -51,7 +51,13 @@ class ElementTableDock(QWidget):
     elements_selected        = Signal(list)        # selected element_ids (map highlight)
     log_message              = Signal(str, str)    # (text, level) → log panel
     show_alignment_requested = Signal()            # re-draw alignment on the map
+    sync_parameters_requested = Signal()           # force a full table↔map↔metrics resync
     split_pick_mode          = Signal(bool)        # "Pick split point" toggled
+    # Radius/spiral-length live preview (Part A): a cheap, map-only tick
+    # while the spinbox is being dragged/typed into — App refreshes just the
+    # map from (elements, splice), skipping the table/metrics/log/staleness
+    # catch-up that `rebuilt` triggers (mirrors the PI-drag preview signals).
+    preview_changed           = Signal(list, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -63,8 +69,24 @@ class ElementTableDock(QWidget):
         self._pending: dict  = {}       # pi_index -> {field: value}
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
-        self._debounce.setInterval(300)
+        # 800 ms (was 300): keyboard-tracking is off on the value spinboxes
+        # (Part 2A) so mid-typing digits never reach here at all — this
+        # interval only matters for the gap between the LAST real edit and
+        # the full table/metrics/log catch-up, and 800 ms comfortably
+        # outlasts a spin-button/wheel-step burst.
+        self._debounce.setInterval(800)
         self._debounce.timeout.connect(self._apply_pending)
+        # Live preview (Part A): mirrors the PI-drag start/tick/end pattern.
+        # A "gesture" is one continuous stretch of ticks on the SAME
+        # (pi_index, field) — history is pushed once, at its first tick, not
+        # on every tick and not (again) when the debounce above commits.
+        self._live_preview_enabled = True   # synced from App._prefs
+        self._preview_gesture: tuple[int, str] | None = None
+        self._preview_pending: tuple[int, str, float] | None = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(0)
+        self._preview_timer.timeout.connect(self._apply_preview_tick)
         # Set by App: on_before_edit(label) is called just BEFORE every
         # model mutation below, so the toolbar's Back/Forward undo/redo
         # (Part B) has a snapshot of the pre-edit state; on_edit_failed()
@@ -95,18 +117,22 @@ class ElementTableDock(QWidget):
         header = QHBoxLayout()
         self._title = QLabel("Alignment Elements")
         sk.bold_font(self._title, 1)
+        # Req 7: the hint text used to be its own wide QLabel in this row —
+        # at 1080p it, plus the six buttons beside it, routinely overflowed
+        # the dock's width with nowhere for the user to reclaim the space.
+        # The row is now horizontally scrollable (below) regardless, but
+        # dropping the hint's own width demand still leaves far more of it
+        # usable before a scroll is ever needed.
+        self._title.setToolTip(
+            "Edit Radius (arc rows) or Spiral L (spiral rows) — the map "
+            "updates automatically.\nOmit PI removes a curve; neighbours "
+            "absorb its deflection."
+        )
         header.addWidget(self._title)
 
         self._metrics_lbl = QLabel("")
         header.addWidget(self._metrics_lbl)
         header.addStretch()
-
-        self._hint_lbl = QLabel(
-            "Edit Radius (arc rows) or Spiral L (spiral rows) — the map "
-            "updates automatically.  Omit PI removes a curve; neighbours "
-            "absorb its deflection."
-        )
-        header.addWidget(self._hint_lbl)
 
         self._show_btn = QPushButton("Show alignment")
         self._show_btn.setIcon(icons.makeIcon("showAlignment"))
@@ -117,6 +143,17 @@ class ElementTableDock(QWidget):
         )
         self._show_btn.clicked.connect(self.show_alignment_requested.emit)
         header.addWidget(self._show_btn)
+
+        self._sync_btn = QPushButton("⟳ Sync")
+        self._sync_btn.setStyleSheet("font-size: 10px; padding: 3px 10px;")
+        self._sync_btn.setToolTip(
+            "Force a full resync between the table, the map, and the\n"
+            "metrics readouts — re-highlights the selected element and\n"
+            "refreshes every number, in case an edit left them momentarily\n"
+            "out of step."
+        )
+        self._sync_btn.clicked.connect(self.sync_parameters_requested.emit)
+        header.addWidget(self._sync_btn)
 
         self._range_btn = QPushButton("Merge PI range → single curve")
         self._range_btn.setIcon(icons.makeIcon("merge"))
@@ -171,7 +208,15 @@ class ElementTableDock(QWidget):
             "Stays armed for multiple picks — click again to stop.")
         self._pick_split_btn.toggled.connect(self.split_pick_mode.emit)
         header.addWidget(self._pick_split_btn)
-        v.addLayout(header)
+
+        # Req 7: title + metrics + five buttons in one non-wrapping row
+        # routinely overflowed the dock's width at 1080p — same fix as the
+        # main toolbar (Part C): a real horizontal scrollbar with `<`/`>`
+        # buttons that only appear once there's something to scroll to.
+        from gui.scroll_row import mount_horizontal_scroll
+        header_widget = QWidget()
+        header_widget.setLayout(header)
+        v.addWidget(mount_horizontal_scroll(header_widget, self))
 
         self._table = QTableWidget(0, len(COLS))
         self._table.setHorizontalHeaderLabels(COLS)
@@ -180,15 +225,28 @@ class ElementTableDock(QWidget):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Req 7 (1080p clipping): ResizeToContents also ignores setCellWidget
+        # widgets entirely when sizing a column (the radius/spiral spinboxes
+        # never get a say), and it can never shrink below its own computed
+        # minimum — on a narrow window that starved the map/step panel of
+        # space with nowhere for the user to reclaim it. Interactive with
+        # sane defaults + a real horizontal scrollbar lets the table itself
+        # absorb the squeeze instead.
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for col, width in (
+            (COL_ID, 55), (COL_TYPE, 95), (COL_STA, 80), (COL_LEN, 70),
+            (COL_R, 85), (COL_A, 55), (COL_DEFL, 60), (COL_SL, 85),
+        ):
+            self._table.setColumnWidth(col, width)
         hdr.setSectionResizeMode(COL_ACT, QHeaderView.ResizeMode.Stretch)
+        self._table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         # Taller, easier-to-hit rows; slightly larger font
         self._table.verticalHeader().setDefaultSectionSize(34)
         self._table.setStyleSheet(
             "QTableWidget { font-size: 11px; }"
             "QTableWidget::item { padding: 4px 6px; }"
         )
-        self._table.cellChanged.connect(self._on_cell_changed)
         self._table.itemSelectionChanged.connect(self._on_selection)
         v.addWidget(self._table)
 
@@ -204,19 +262,35 @@ class ElementTableDock(QWidget):
         self._elements       = list(elements or [])
         self._check_interval = check_interval
         self._pending.clear()
+        self._preview_gesture = None
+        self._preview_pending = None
         editable = pi_model is not None
-        self._hint_lbl.setVisible(editable)
+        self._title.setToolTip(
+            "Edit Radius (arc rows) or Spiral L (spiral rows) — the map "
+            "updates automatically.\nOmit PI removes a curve; neighbours "
+            "absorb its deflection." if editable else
+            "Read-only — this level has no editable PI model.")
         self._populate()
         self._refresh_metrics()
 
     def clear(self):
         self._model    = None
         self._elements = []
+        self._pending.clear()
+        self._preview_gesture = None
+        self._preview_pending = None
         self._table.setRowCount(0)
         self._metrics_lbl.setText("")
 
     def current_elements(self) -> list:
         return self._elements
+
+    def set_live_preview(self, on: bool):
+        """Radius/spiral-length edits get a cheap live map preview while
+        dragging/typing when on; off reproduces the exact pre-Part-A
+        behavior (only the debounced full commit). Mirrors
+        MapWidget.set_live_drag_preview — same `live_drag_preview` pref."""
+        self._live_preview_enabled = bool(on)
 
     # ------------------------------------------------------------------
     # Theming
@@ -229,8 +303,6 @@ class ElementTableDock(QWidget):
         sk.bold_font(self._title, 1)
         self._metrics_lbl.setStyleSheet(
             f"color:{t['disabledText']}; font-size:10px;")
-        self._hint_lbl.setStyleSheet(
-            f"color:{t['disabledText']}; font-size:9px;")
         # Cached QIcons still hold pixmaps painted in the old colour, so the
         # header buttons need their icons re-fetched from the refreshed factory.
         self._show_btn.setIcon(icons.makeIcon("showAlignment"))
@@ -244,14 +316,10 @@ class ElementTableDock(QWidget):
     # Population
     # ------------------------------------------------------------------
 
-    def _mk_item(self, text: str, editable: bool = False,
-                 color: QColor | None = None, align_right: bool = True):
+    def _mk_item(self, text: str, color: QColor | None = None,
+                 align_right: bool = True):
         it = QTableWidgetItem(text)
-        flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        if editable:
-            flags |= Qt.ItemFlag.ItemIsEditable
-            it.setBackground(QColor(self._tokens["alternateBase"]))
-        it.setFlags(flags)
+        it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         if color:
             it.setForeground(color)
         if align_right:
@@ -288,13 +356,13 @@ class ElementTableDock(QWidget):
         try:
             for i, el in enumerate(self._elements):
                 et     = el.get("type", "?")
+                pi     = el.get("_pi")
                 sta    = float(el.get("sta_start", 0.0))
                 length = float(el.get("length", 0.0))
                 self._table.item(i, COL_STA).setText(f"{sta/1000.0:.3f}")
                 self._table.item(i, COL_LEN).setText(f"{length:.2f}")
                 if et == "Arc":
-                    self._table.item(i, COL_R).setText(
-                        f"{float(el.get('radius', 0.0)):.1f}")
+                    self._refresh_value_cell(i, COL_R, pi, float(el.get("radius", 0.0)))
                     defl = el.get("_deflection")
                     self._table.item(i, COL_DEFL).setText(
                         f"{math.degrees(defl):+.2f}" if defl is not None else "—")
@@ -304,7 +372,7 @@ class ElementTableDock(QWidget):
                         f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞")
                     self._table.item(i, COL_A).setText(
                         f"{float(el.get('clothoid_A', 0.0)):.1f}")
-                    self._table.item(i, COL_SL).setText(f"{length:.1f}")
+                    self._refresh_value_cell(i, COL_SL, pi, length)
         except Exception:
             return False
         finally:
@@ -374,9 +442,15 @@ class ElementTableDock(QWidget):
         self._table.setItem(row, COL_STA,  self._mk_item(f"{sta/1000.0:.3f}"))
         self._table.setItem(row, COL_LEN,  self._mk_item(f"{length:.2f}"))
 
+        pi = el.get("_pi")
         if et == "Arc":
             r = float(el.get("radius", 0.0))
-            self._table.setItem(row, COL_R, self._mk_item(f"{r:.1f}", editable=editable))
+            if editable and pi is not None:
+                self._table.setCellWidget(
+                    row, COL_R, self._mk_value_spin(
+                        pi, "radius", r, minimum=1.0, maximum=100000.0))
+            else:
+                self._table.setItem(row, COL_R, self._mk_item(f"{r:.1f}"))
             defl = el.get("_deflection")
             self._table.setItem(row, COL_DEFL,
                 self._mk_item(f"{math.degrees(defl):+.2f}" if defl is not None else "—"))
@@ -389,8 +463,12 @@ class ElementTableDock(QWidget):
             self._table.setItem(row, COL_A,
                 self._mk_item(f"{float(el.get('clothoid_A', 0.0)):.1f}"))
             self._table.setItem(row, COL_DEFL, self._mk_item("—"))
-            self._table.setItem(row, COL_SL,
-                self._mk_item(f"{length:.1f}", editable=editable))
+            if editable and pi is not None:
+                self._table.setCellWidget(
+                    row, COL_SL, self._mk_value_spin(
+                        pi, "spiral_len", length, minimum=0.0, maximum=1000.0))
+            else:
+                self._table.setItem(row, COL_SL, self._mk_item(f"{length:.1f}"))
         else:  # Line
             for c in (COL_R, COL_A, COL_DEFL, COL_SL):
                 self._table.setItem(row, c, self._mk_item("—"))
@@ -421,8 +499,9 @@ class ElementTableDock(QWidget):
         length = float(el.get("length", 0.0))
         self._table.item(row, COL_STA).setText(f"{sta/1000.0:.3f}")
         self._table.item(row, COL_LEN).setText(f"{length:.2f}")
+        pi = el.get("_pi")
         if et == "Arc":
-            self._table.item(row, COL_R).setText(f"{float(el.get('radius', 0.0)):.1f}")
+            self._refresh_value_cell(row, COL_R, pi, float(el.get("radius", 0.0)))
             defl = el.get("_deflection")
             self._table.item(row, COL_DEFL).setText(
                 f"{math.degrees(defl):+.2f}" if defl is not None else "—")
@@ -432,9 +511,9 @@ class ElementTableDock(QWidget):
                 f"{r_fin:.1f}" if math.isfinite(r_fin) else "∞")
             self._table.item(row, COL_A).setText(
                 f"{float(el.get('clothoid_A', 0.0)):.1f}")
-            self._table.item(row, COL_SL).setText(f"{length:.1f}")
+            self._refresh_value_cell(row, COL_SL, pi, length)
         it.setData(Qt.ItemDataRole.UserRole,
-                   {"pi": el.get("_pi"), "etype": et, "elem_index": i,
+                   {"pi": pi, "etype": et, "elem_index": i,
                     "sig": spec["sig"]})
         wrap = self._table.cellWidget(row, COL_ACT)
         if wrap is not None and hasattr(wrap, "_meta"):
@@ -505,6 +584,13 @@ class ElementTableDock(QWidget):
         # Fast paths first — keep interactive edits snappy on long alignments:
         # identical structure → cell updates only; localized change → diff.
         if self._table.rowCount() and self._update_in_place():
+            # Part 2B: the map side just redrew the edited span with fresh,
+            # unselected layers (patch_alignment_segmented/
+            # update_alignment_segmented reset _last_highlight_ids), so the
+            # selected row's halo would silently vanish on every radius/
+            # spiral commit unless the selection is re-pushed — same reason
+            # _update_diff below re-emits deliberately.
+            self._on_selection()
             return
         if self._table.rowCount() and self._update_diff():
             self._on_selection()   # rows were removed — re-emit the (possibly
@@ -575,7 +661,18 @@ class ElementTableDock(QWidget):
         if et == "Arc" and pi is not None:
             pid = next((p for p in model.pis if p.index == pi), None)
             merged = bool(pid is not None and pid.merged_with_next)
-            return ("arc", merged)
+            has_entry = (elem_index > 0
+                        and elements[elem_index - 1].get("type") == "Spiral"
+                        and elements[elem_index - 1].get("_pi") == pi)
+            has_exit = (elem_index < len(elements) - 1
+                       and elements[elem_index + 1].get("type") == "Spiral"
+                       and elements[elem_index + 1].get("_pi") == pi)
+            has_spirals = has_entry or has_exit
+            # Level 2 (model.use_spirals False) never offers "+ Spirals" —
+            # add_spirals() would just refuse.
+            can_add_spirals = (model is not None and model.use_spirals
+                              and not has_spirals)
+            return ("arc", merged, has_spirals, can_add_spirals)
         if et == "Line":
             can_merge = False
             if (0 < elem_index < len(elements) - 1
@@ -641,15 +738,41 @@ class ElementTableDock(QWidget):
                 "polygon loses the vertex and its neighbours connect directly.")
             buttons.append(delete)
 
+            has_spirals, can_add_spirals = sig[2], sig[3]
+            spiral_btn = None
+            if has_spirals:
+                spiral_btn = QPushButton("− Spirals")
+                spiral_btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+                spiral_btn.setToolTip(
+                    "Remove this curve's transition spirals (L-S-C-S-L →\n"
+                    "L-C-L) — the arc extends to meet the tangents directly.")
+                buttons.append(spiral_btn)
+            elif can_add_spirals:
+                spiral_btn = QPushButton("+ Spirals")
+                spiral_btn.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+                spiral_btn.setToolTip(
+                    "Add symmetric transition spirals to this curve\n"
+                    "(L-C-L → L-S-C-S-L), using the project's default length.")
+                buttons.append(spiral_btn)
+
+            undo = None
             if sig[1]:
-                buttons.append(self._mk_merge_button("Undo merge", "undo"))
+                undo = self._mk_merge_button("Undo merge", "undo")
+                buttons.append(undo)
+
             wrap = self._wrap_buttons(buttons)
             wrap._meta = meta
             omit.clicked.connect(lambda _=False, w=wrap: self._omit_pi(w._meta["pi"]))
             reset.clicked.connect(lambda _=False, w=wrap: self._reset_pi(w._meta["pi"]))
             delete.clicked.connect(lambda _=False, w=wrap: self._delete_pi(w._meta["pi"]))
-            if sig[1]:
-                undo = wrap.layout().itemAt(3).widget()
+            if spiral_btn is not None:
+                if has_spirals:
+                    spiral_btn.clicked.connect(
+                        lambda _=False, w=wrap: self._remove_spirals(w._meta["pi"]))
+                else:
+                    spiral_btn.clicked.connect(
+                        lambda _=False, w=wrap: self._add_spirals(w._meta["pi"]))
+            if undo is not None:
                 undo.clicked.connect(
                     lambda _=False, w=wrap: self._undo_merge(w._meta["pi"]))
             self._table.setCellWidget(row, COL_ACT, wrap)
@@ -699,34 +822,122 @@ class ElementTableDock(QWidget):
     # Editing
     # ------------------------------------------------------------------
 
-    def _on_cell_changed(self, row: int, col: int):
+    def _mk_value_spin(self, pi_index: int, field: str, value: float,
+                       minimum: float, maximum: float,
+                       step: float = 5.0, decimals: int = 1) -> QDoubleSpinBox:
+        """Embedded radius/spiral-length editor (replaces the old free-text
+        cell) — `valueChanged` fires on every tick (arrow click, wheel step,
+        or — since keyboard tracking is off — Enter/focus-out, never on a
+        mid-typing digit), driving the live preview below; the debounced
+        `_pending`/`_apply_pending` commit path is unchanged.
+
+        `setKeyboardTracking(False)` is the actual fix for "typing 2 on the
+        way to 200 destroys the spiral": Qt emits `valueChanged` for every
+        typed digit by default (9, 99, 999 style), each one a real (if
+        transient) geometry rebuild; with it off, typed digits only commit
+        once — on Return or focus-out (`editingFinished`, wired below) —
+        while arrow-click/wheel stepping (which calls `stepBy()`, not the
+        keyboard-typing path) still emits immediately, so that live-preview
+        feedback is untouched."""
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setDecimals(decimals)
+        spin.setSingleStep(step)
+        spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        spin.setStyleSheet("font-size: 11px;")
+        # ResizeToContents (this table's header mode) never consults a
+        # setCellWidget widget's size hint — without an explicit floor the
+        # column can size down to the header text alone and squeeze the
+        # step arrows (Req 8) out of the cell entirely.
+        spin.setMinimumWidth(70)
+        spin.setKeyboardTracking(False)
+        spin.setValue(value)   # before connecting — no spurious first tick
+        spin.setProperty("pi_index", pi_index)
+        spin.setProperty("field", field)
+        spin.valueChanged.connect(self._on_value_spin_changed)
+        spin.editingFinished.connect(self._on_value_spin_editing_finished)
+        return spin
+
+    def _refresh_value_cell(self, row: int, col: int, pi_index,
+                            value: float, decimals: int = 1):
+        """Route a radius/spiral-length refresh during a structural-reuse
+        table update (_refresh_row/_update_in_place, both called only
+        inside a `_populating=True` block, so this never reads as a user
+        tick) to whichever widget kind the cell currently holds — a
+        QDoubleSpinBox (editable model) or a plain read-only item."""
+        w = self._table.cellWidget(row, col)
+        if isinstance(w, QDoubleSpinBox):
+            w.setProperty("pi_index", pi_index)
+            w.setValue(value)
+        else:
+            it = self._table.item(row, col)
+            if it is not None:
+                it.setText(f"{value:.{decimals}f}")
+
+    def _on_value_spin_changed(self, value: float):
         if self._populating or self._model is None:
             return
-        meta_item = self._table.item(row, COL_ID)
-        if meta_item is None:
+        spin = self.sender()
+        pi_index = spin.property("pi_index") if spin is not None else None
+        field = spin.property("field") if spin is not None else None
+        if pi_index is None or field is None:
             return
-        meta = meta_item.data(Qt.ItemDataRole.UserRole) or {}
-        pi = meta.get("pi")
-        if pi is None:
-            return
-        try:
-            value = float(self._table.item(row, col).text().replace(",", "."))
-        except (ValueError, AttributeError):
-            self._populate()      # revert malformed input
-            return
+        self._on_radius_spiral_tick(int(pi_index), str(field), float(value))
 
-        if col == COL_R and meta.get("etype") == "Arc":
-            self._pending.setdefault(pi, {})["radius"] = max(1.0, value)
-        elif col == COL_SL and meta.get("etype") == "Spiral":
-            self._pending.setdefault(pi, {})["spiral_len"] = max(0.0, value)
-        else:
+    def _on_value_spin_editing_finished(self):
+        """Enter / focus-out on a radius or spiral-length cell — flush the
+        pending commit immediately instead of waiting out the debounce
+        timer (Part 2A: the debounce only exists to coalesce a burst of
+        spin-button/wheel ticks; once the user is clearly done, there's no
+        reason to make them wait)."""
+        if self._populating or self._model is None or not self._pending:
             return
+        self._debounce.stop()
+        self._apply_pending()
+
+    def _on_radius_spiral_tick(self, pi_index: int, field: str, value: float):
+        # Always arm the debounced full commit (table, metrics, log,
+        # staleness) — exactly the pre-Part-A behavior, live preview or not.
+        self._pending.setdefault(pi_index, {})[field] = value
         self._debounce.start()
+        if not self._live_preview_enabled:
+            return
+        # Gesture-start: push ONE history entry for the whole preview
+        # gesture (mirrors App._on_pi_drag_start) — later ticks on the SAME
+        # (pi, field) don't push again, and _apply_pending below skips its
+        # own push once this has already happened.
+        if self._preview_gesture != (pi_index, field):
+            self._push_history("radius/spiral change")
+            self._preview_gesture = (pi_index, field)
+        self._preview_pending = (pi_index, field, value)
+        if not self._preview_timer.isActive():
+            self._preview_timer.start()
+
+    def _apply_preview_tick(self):
+        """Fires the latest coalesced live-preview tick: move the model and
+        emit `preview_changed` for a map-only refresh — App's handler
+        deliberately skips the element table, metrics chip and staleness,
+        which the debounced `_apply_pending` catches up on once the user
+        stops (mirrors App._apply_pending_drag)."""
+        if self._preview_pending is None or self._model is None:
+            return
+        pi_index, field, value = self._preview_pending
+        self._preview_pending = None
+        pid = next((p for p in self._model.pis if p.index == pi_index), None)
+        if pid is None:
+            return
+        from geometry.candidates import rebuild_pi_span
+        setattr(pid, field, value)
+        rebuild_pi_span(self._model, pi_index, pi_index)
+        self._elements = list(self._model.elements)
+        self.preview_changed.emit(self._elements, self._model.last_splice)
 
     def _apply_pending(self):
         if self._model is None or not self._pending:
             return
-        self._push_history("radius/spiral change")
+        if self._preview_gesture is None:
+            self._push_history("radius/spiral change")
+        self._preview_gesture = None
         by_index = {p.index: p for p in self._model.pis}
         labels = {"radius": "radius", "spiral_len": "spiral length"}
         for pi_idx, changes in self._pending.items():
@@ -759,6 +970,32 @@ class ElementTableDock(QWidget):
         pid.radius = -1.0
         pid.spiral_len = -1.0
         pid.merged_with_next = False
+        self._rebuild(span=(pi_index, pi_index))
+
+    def _add_spirals(self, pi_index: int):
+        from geometry.candidates import add_spirals
+        if self._model is None:
+            return
+        self._push_history(f"add spirals PI {pi_index}")
+        ok, msg = add_spirals(self._model, pi_index)
+        if not ok:
+            self._discard_history()
+            self.log_message.emit(f"Add spirals PI {pi_index}: {msg}", "warn")
+            return
+        self.log_message.emit(f"Add spirals PI {pi_index}: {msg}", "ok")
+        self._rebuild(span=(pi_index, pi_index))
+
+    def _remove_spirals(self, pi_index: int):
+        from geometry.candidates import remove_spirals
+        if self._model is None:
+            return
+        self._push_history(f"remove spirals PI {pi_index}")
+        ok, msg = remove_spirals(self._model, pi_index)
+        if not ok:
+            self._discard_history()
+            self.log_message.emit(f"Remove spirals PI {pi_index}: {msg}", "warn")
+            return
+        self.log_message.emit(f"Remove spirals PI {pi_index}: {msg}", "ok")
         self._rebuild(span=(pi_index, pi_index))
 
     def _set_pi(self, pi_index: int, omitted: bool):
