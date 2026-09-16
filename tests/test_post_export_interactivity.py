@@ -30,7 +30,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import gui.app as app_mod  # noqa: E402
-from gui.app import App, S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT, S_CANDIDATES  # noqa: E402
+from gui.app import (  # noqa: E402
+    App, S_DESIGN, S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT,
+    S_CANDIDATES,
+)
 
 
 class _FakeApp:
@@ -87,7 +90,7 @@ class TestEnsureInteractiveAlignmentShown:
         assert not fake.render_calls
 
     def test_covers_every_alignment_relevant_step(self):
-        for idx in (S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT):
+        for idx in (S_DESIGN, S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT):
             fake = _FakeApp(elements=[{"type": "Line"}], js_aln_count=0)
             App._ensure_interactive_alignment_shown(fake, idx)
             assert fake.render_calls, f"step {idx} should trigger a re-render"

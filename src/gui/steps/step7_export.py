@@ -51,6 +51,7 @@ class Step7Export(ThemedPanel, QWidget):
         self._work_epsg: int = 32633   # internal auto-UTM
         self._xy_list: list  = []
         self._stations: list = []
+        self._vertical_list: list = []
         self._worker: FinalExportWorker | None = None
         self._build()
 
@@ -163,10 +164,9 @@ class Step7Export(ThemedPanel, QWidget):
         self._preview_btn = QPushButton("👁 Preview LandXML")
         self._preview_btn.setMinimumHeight(32)
         self._preview_btn.setToolTip(
-            "Show the LandXML that will be exported (horizontal geometry and\n"
-            "Cant block in the chosen output CRS). The vertical profile is\n"
-            "computed from DEM data during the actual export and is therefore\n"
-            "not part of the preview."
+            "Show the LandXML that will be exported: horizontal geometry and\n"
+            "Cant block in the chosen output CRS, plus the vertical <Profile>\n"
+            "once it has been confirmed in the Vertical Profile step."
         )
         self._preview_btn.clicked.connect(self._show_preview)
         layout.addWidget(self._preview_btn)
@@ -183,7 +183,8 @@ class Step7Export(ThemedPanel, QWidget):
     # ------------------------------------------------------------------
 
     def prepare(self, elements_list: list, tracks, settings: dict,
-                work_epsg: int, xy_list: list, stations: list | None = None):
+                work_epsg: int, xy_list: list, stations: list | None = None,
+                vertical_list: list | None = None):
         """
         Called by App after the Stations step.
 
@@ -196,6 +197,13 @@ class Step7Export(ThemedPanel, QWidget):
         xy_list       : projected coordinates per track in work_epsg (for display)
         stations      : list[stationing.Station] — written as a CSV next to
                         the LandXML file (Station,Dwell Time,Name)
+        vertical_list : list of vertical-element lists (one per track) as
+                        confirmed in the Vertical Profile step. When given,
+                        the export uses them verbatim instead of querying
+                        the DEM again — they were already sampled along the
+                        fitted centreline, which is the axis <CoordGeom>
+                        uses. None ⇒ the worker samples the OSM polyline as
+                        it always did.
         """
         self._elements_list = elements_list
         self._tracks        = tracks
@@ -203,6 +211,7 @@ class Step7Export(ThemedPanel, QWidget):
         self._work_epsg     = work_epsg
         self._xy_list       = xy_list
         self._stations      = stations or []
+        self._vertical_list = vertical_list or []
         self._progress.setValue(0)
         self._stage_lbl.setText("Ready.")
         self._station_lbl.setText("")
@@ -268,9 +277,11 @@ class Step7Export(ThemedPanel, QWidget):
                 )
                 name = (self._tracks[i].name
                         if i < len(self._tracks) else f"Alignment {i + 1}")
+                vertical = (self._vertical_list[i]
+                            if i < len(self._vertical_list) else [])
                 alignments.append({
                     "name": name, "elements": els_out,
-                    "vertical": [], "sta_start": 0.0,
+                    "vertical": list(vertical), "sta_start": 0.0,
                 })
             root = build_landxml(
                 alignments, output_epsg=output_epsg,
@@ -290,10 +301,14 @@ class Step7Export(ThemedPanel, QWidget):
         dlg.setWindowTitle(f"LandXML preview — EPSG:{output_epsg}")
         dlg.resize(860, 640)
         lay = QVBoxLayout(dlg)
+        has_vertical = any(self._vertical_list)
         note = QLabel(
             "Preview: horizontal geometry + Cant block in the output CRS. "
-            "The vertical <Profile> is computed from DEM data during the "
-            "actual export and is not shown here."
+            + ("The confirmed vertical <Profile> is included."
+               if has_vertical else
+               "No vertical <Profile> yet — confirm one in the Vertical "
+               "Profile step, or it is sampled from the DEM during the "
+               "export itself.")
         )
         self.themed(note, sk.muted_label)
         note.setWordWrap(True)
@@ -337,6 +352,7 @@ class Step7Export(ThemedPanel, QWidget):
             force_positive=force_positive,
             xy_list=self._xy_list,
             stations=self._stations,
+            vertical_list=self._vertical_list,
             parent=self,
         )
         self._worker.stage_changed.connect(self._on_stage)

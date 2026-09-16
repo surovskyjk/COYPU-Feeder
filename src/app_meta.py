@@ -7,7 +7,7 @@ LandXML builder and the packaging spec.
 from __future__ import annotations
 
 APP_NAME    = "COYPU Feeder"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_TAGLINE = "OSM railways → LandXML alignments"
 
 REPO_URL    = "https://github.com/surovskyjk/COYPU-Feeder"
@@ -33,8 +33,11 @@ ALGORITHM_DESC = (
     "construction; the alignment starts and ends exactly at the OSM "
     "endpoints. Radii, spiral lengths and PIs can be edited interactively, "
     "and short intermediate straights can be absorbed into symmetric "
-    "prolonged spirals. Elevation is sampled from a DEM and fitted as a "
-    "vertical profile with parabolic curves. Output is LandXML 1.2 with a "
+    "prolonged spirals. Elevation is sampled from a DEM along the "
+    "fitted centreline and smoothed into a vertical profile of "
+    "constant-grade tangents under a configurable maximum gradient, "
+    "with parabolic vertical curves at each PVI and optional manual "
+    "straight connections across tunnels and viaducts. Output is LandXML 1.2 with a "
     "Cant block plus an optional stations CSV."
 )
 

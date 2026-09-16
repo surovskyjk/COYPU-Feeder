@@ -26,7 +26,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from gui.app import App, S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT, S_CANDIDATES  # noqa: E402
+from gui.app import (  # noqa: E402
+    App, S_DESIGN, S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT,
+    S_CANDIDATES,
+)
 
 
 class _FakeTrack:
@@ -64,7 +67,7 @@ class TestClearOsmRelictTracks:
         fake.map_widget.show_osm_reference.assert_not_called()
 
     def test_covers_every_alignment_relevant_step(self):
-        for idx in (S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT):
+        for idx in (S_DESIGN, S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT):
             fake = _fake_app([_FakeTrack([(50.0, 14.0), (50.1, 14.1)])])
             App._clear_osm_relict_tracks(fake, idx)
             fake.map_widget.clear_tracks.assert_called_once()

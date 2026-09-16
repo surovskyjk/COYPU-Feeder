@@ -31,13 +31,16 @@ from .steps.step4_candidates import Step4Candidates
 from .steps.step5_design        import Step5Design
 from .steps.step6_stations      import Step6Stations
 from .steps.step6_crosssection  import Step6CrossSection
+from .steps.step8_vertical      import Step8Vertical
 from .steps.step7_export        import Step7Export
+from .profile_canvas import ProfileCanvas
 
-# Stack indices — the UI numbers them 1-8. Steps 5 (Refine) and 6
-# (Consolidate) were merged into one "Refine & Design" workspace.
+# Stack indices — the UI numbers them 1-9. Steps 5 (Refine) and 6
+# (Consolidate) were merged into one "Refine & Design" workspace;
+# Vertical Profile was later inserted between Cross-Section and Export.
 S_FIND, S_SELECT, S_CONFIG, S_CANDIDATES, S_DESIGN, \
-    S_STATIONS, S_CROSSSEC, S_EXPORT = range(8)
-N_STEPS = 8
+    S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT = range(9)
+N_STEPS = 9
 
 # Maximum map-view span (km) allowed for "search in view"
 _MAX_VIEW_KM = 20.0
@@ -112,6 +115,9 @@ class App(QMainWindow):
         self._pending_drag: tuple[int, float, float] | None = None
         self._drag_preview_timer: QTimer | None = None
         self._stations: list        = []
+        # The vertical counterpart of _pi_model: App is the single owner,
+        # Step8Vertical mutates it in place and never replaces it.
+        self._profile               = None   # VerticalProfile | None
         self._xy_list: list         = []
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
@@ -502,7 +508,8 @@ class App(QMainWindow):
             S_DESIGN:      self._on_refine_back,
             S_STATIONS:    lambda: self._goto_step(S_DESIGN),
             S_CROSSSEC:    lambda: self._goto_step(S_STATIONS),
-            S_EXPORT:      lambda: self._goto_step(S_CROSSSEC),
+            S_VERTICAL:    lambda: self._goto_step(S_CROSSSEC),
+            S_EXPORT:      lambda: self._goto_step(S_VERTICAL),
         }
 
     def _mount_toolbar_scroll(self, tb: QToolBar):
@@ -1028,6 +1035,7 @@ class App(QMainWindow):
             "selected_indices": sel_idx,
             "pi_model":     self._pi_model,
             "stations":     self._stations,
+            "profile":      self._profile,
         }
 
     def _on_new_project(self):
@@ -1109,7 +1117,10 @@ class App(QMainWindow):
         self._pi_model        = st["pi_model"]
         self._elements        = st["elements"]
         self._stations        = st["stations"]
+        self._profile         = st.get("profile")
         self._project_path    = path
+        if st.get("version_warning"):
+            self.log_panel.log(f"⚠ {st['version_warning']}", "warn")
         self._refine_baseline = self._make_baseline(self._pi_model)
 
         # Repopulate the steps that own UI state
@@ -1198,10 +1209,17 @@ class App(QMainWindow):
         self.element_table.setMinimumWidth(460)
         self.log_panel = LogPanel()
         self.log_panel.setMinimumWidth(220)
+        # The profile canvas shares the bottom row with the element
+        # table — only one of the two is ever visible (see _goto_step),
+        # so a longitudinal profile gets the full width it needs.
+        self.profile_canvas = ProfileCanvas()
+        self.profile_canvas.setVisible(False)
+        self.profile_canvas.setMinimumWidth(460)
 
         self._bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._bottom_splitter.addWidget(self.log_panel)
         self._bottom_splitter.addWidget(self.element_table)
+        self._bottom_splitter.addWidget(self.profile_canvas)
         self._bottom_splitter.setStretchFactor(0, 1)
         self._bottom_splitter.setStretchFactor(1, 3)
         self._bottom_splitter.setSizes([280, 800])
@@ -1230,7 +1248,8 @@ class App(QMainWindow):
         self.step5_design       = Step5Design()          # step 5 in the UI
         self.step6_stations     = Step6Stations()        # step 6 in the UI
         self.step6_crosssec     = Step6CrossSection()    # step 7 in the UI
-        self.step7_export       = Step7Export()          # step 8 in the UI
+        self.step8_vertical     = Step8Vertical()        # step 8 in the UI
+        self.step7_export       = Step7Export()          # step 9 in the UI
 
         self.stack.addWidget(self.step1)              # S_FIND
         self.stack.addWidget(self.step2)              # S_SELECT
@@ -1239,6 +1258,7 @@ class App(QMainWindow):
         self.stack.addWidget(self.step5_design)       # S_DESIGN
         self.stack.addWidget(self.step6_stations)     # S_STATIONS
         self.stack.addWidget(self.step6_crosssec)     # S_CROSSSEC
+        self.stack.addWidget(self.step8_vertical)     # S_VERTICAL
         self.stack.addWidget(self.step7_export)       # S_EXPORT
 
         h.addWidget(self.stack)
@@ -1332,7 +1352,14 @@ class App(QMainWindow):
         self.step6_crosssec.cross_section_ready.connect(self._on_cross_section_ready)
 
         # Step 7 (export) → back
-        self.step7_export.back_requested.connect(lambda: self._goto_step(S_CROSSSEC))
+        self.step7_export.back_requested.connect(lambda: self._goto_step(S_VERTICAL))
+
+        # Step 8 (Vertical Profile) → confirm / back / edits / pick mode
+        self.step8_vertical.profile_confirmed.connect(self._on_profile_confirmed)
+        self.step8_vertical.back_requested.connect(
+            lambda: self._goto_step(S_CROSSSEC))
+        self.step8_vertical.profile_changed.connect(self._on_profile_changed)
+        self.step8_vertical.log_message.connect(self.log_panel.log)
 
         # Step 7 (export) → alignment display / fit / export / restart
         self.step7_export.osm_track_ready.connect(self._on_osm_track_ready)
@@ -1375,6 +1402,7 @@ class App(QMainWindow):
                 " font-size:13px; padding:0 10px;")
 
         for w in (getattr(self, "sidebar", None), self.element_table,
+                  getattr(self, "profile_canvas", None),
                   self.log_panel, self.map_widget):
             fn = getattr(w, "applyTheme", None)
             if fn is not None:
@@ -1439,15 +1467,22 @@ class App(QMainWindow):
             "The CSV (Station,Dwell Time,Name) is written next to the LandXML.",
         ]),
         S_CROSSSEC: ("Step 7 — Cross-Section", [
-            "Optional deviation profile of the fitted alignment vs OSM.",
+            "Optional terrain cross-slope check at perpendicular offsets.",
         ]),
-        S_EXPORT: ("Step 8 — Export", [
+        S_VERTICAL: ("Step 8 — Vertical Profile", [
+            "'Sample terrain' queries the DEM along the fitted centreline.",
+            "Pick a smoothing algorithm; the profile redraws as you tune it.",
+            "Max gradient is a hard limit — steeper terrain becomes cut/fill.",
+            "Add tunnel/bridge ranges to connect two points in a straight line.",
+            "Drag to pan the profile, wheel to zoom, double-click to reset.",
+        ]),
+        S_EXPORT: ("Step 9 — Export", [
             "Pick the output CRS and file; 👁 Preview shows the LandXML first.",
         ]),
     }
 
     # Steps that consume the alignment and must be refreshed after an edit
-    _DOWNSTREAM = (S_STATIONS, S_CROSSSEC, S_EXPORT)
+    _DOWNSTREAM = (S_STATIONS, S_CROSSSEC, S_VERTICAL, S_EXPORT)
 
     # ------------------------------------------------------------------
     # Prerequisites — steps suggest an order, they do not gate it
@@ -1502,6 +1537,10 @@ class App(QMainWindow):
         # Refresh a downstream step from the current alignment if it went stale
         if idx in self._DOWNSTREAM and idx in self._stale:
             self._refresh_downstream(idx)
+        # A sidebar jump can reach the vertical step without passing
+        # through the forward path; it cannot show anything unbound.
+        elif idx == S_VERTICAL and self._profile is None and self._elements:
+            self._refresh_downstream(idx)
         # Cross-section overlays are only meaningful from their own step on;
         # navigating back must not leave thousands of stale sample runs
         # taxing every pan/zoom repaint.
@@ -1514,7 +1553,10 @@ class App(QMainWindow):
         # The table/stats matter more than which step is being viewed once
         # there's a real alignment to inspect — the wizard sidebar remains
         # free, advisory-only navigation (see CLAUDE.md).
-        self.element_table.setVisible(self._pi_model is not None)
+        # The element table and the profile canvas share the bottom row.
+        self.element_table.setVisible(
+            self._pi_model is not None and idx != S_VERTICAL)
+        self.profile_canvas.setVisible(idx == S_VERTICAL)
         if changed_step:
             self._deactivate_all_tools()   # also disarms map dragging/pick modes
             self._ensure_interactive_alignment_shown(idx)
@@ -1528,7 +1570,8 @@ class App(QMainWindow):
     # Steps whose map view is expected to show the interactive per-element
     # alignment (hover/click/highlight bindings) rather than tracks/
     # candidates/nothing.
-    _ALIGNMENT_STEPS = (S_DESIGN, S_STATIONS, S_CROSSSEC, S_EXPORT)
+    _ALIGNMENT_STEPS = (S_DESIGN, S_STATIONS, S_CROSSSEC, S_VERTICAL,
+                        S_EXPORT)
 
     def _ensure_interactive_alignment_shown(self, idx: int):
         """Req 4, defense-in-depth: if navigation lands on a step that
@@ -1587,12 +1630,10 @@ class App(QMainWindow):
                                             self._selected_tracks, self._work_epsg)
             elif idx == S_CROSSSEC:
                 self.step6_crosssec.prepare(self._elements, self._work_epsg)
+            elif idx == S_VERTICAL:
+                self._prepare_vertical()
             elif idx == S_EXPORT:
-                self.step7_export.prepare(
-                    [self._elements], self._selected_tracks, self._settings,
-                    self._work_epsg, self._xy_list,
-                    stations=self._stations,
-                )
+                self._prepare_export()
             self._stale.discard(idx)
             self.log_panel.log(
                 f"Step {idx + 1} refreshed from the edited alignment "
@@ -2377,29 +2418,70 @@ class App(QMainWindow):
         self._stale.discard(S_CROSSSEC)
         self.statusBar().showMessage(
             f"{len(stations)} station(s) recorded. Run cross-section "
-            "analysis or skip to export."
+            "analysis or skip to the vertical profile."
         )
         self._goto_step(S_CROSSSEC)
 
     # ------------------------------------------------------------------
-    # Cross-section analysis done → go to Export
+    # Cross-section analysis done → go to the Vertical Profile
     # ------------------------------------------------------------------
 
     def _on_analysis_done(self, results: list):
         # results may be [] if the step was skipped
+        self._prepare_vertical()
+        self._stale.discard(S_VERTICAL)
+        n = len(results)
+        msg = (
+            f"Cross-section: {n} stations analysed. Now build the "
+            "vertical profile."
+            if n else
+            "Skipped cross-section analysis. Now build the vertical profile."
+        )
+        self.statusBar().showMessage(msg)
+        self._goto_step(S_VERTICAL)
+
+    # ------------------------------------------------------------------
+    # Vertical profile
+    # ------------------------------------------------------------------
+
+    def _prepare_vertical(self):
+        """Bind the App-owned profile (creating a default one for a new or
+        pre-2.0 project) to the step and the shared canvas."""
+        from geometry.profile import make_default_profile
+        if self._profile is None:
+            self._profile = make_default_profile(self._elements, self._settings)
+        self.step8_vertical.prepare(
+            self._elements, self._work_epsg, self._settings,
+            self._profile, self.profile_canvas)
+
+    def _prepare_export(self):
+        """Hand the export the confirmed vertical elements when there are
+        any — otherwise it falls back to sampling the DEM itself."""
+        pvis = getattr(self._profile, "pvis", None)
         self.step7_export.prepare(
             [self._elements], self._selected_tracks, self._settings,
             self._work_epsg, self._xy_list,
             stations=self._stations,
+            vertical_list=[list(pvis)] if pvis else None,
         )
+
+    def _on_profile_changed(self):
+        """A smoothing parameter or a manual connection changed. The step
+        mutates the shared profile in place, so only the export has to
+        re-read it — the vertical step itself is already current."""
+        self._stale.add(S_EXPORT)
+        self._set_dirty(True)
+
+    def _on_profile_confirmed(self, profile):
+        self._profile = profile
+        self._prepare_export()
         self._stale.discard(S_EXPORT)
-        n = len(results)
-        msg = (
-            f"Cross-section: {n} stations analysed. Choose a file and export."
-            if n else
-            "Skipped cross-section analysis. Choose a file and export."
-        )
-        self.statusBar().showMessage(msg)
+        self._set_dirty(True)
+        st = getattr(profile, "stats", None) or {}
+        self.statusBar().showMessage(
+            f"Vertical profile confirmed: {st.get('n_pvi', 0)} PVIs, "
+            f"max gradient {st.get('max_grade_pm', 0.0):.2f} ‰. "
+            "Choose a file and export.")
         self._goto_step(S_EXPORT)
 
     def _on_cross_section_ready(self, left_pts: list, right_pts: list):
@@ -2430,6 +2512,7 @@ class App(QMainWindow):
         self._level              = ""
         self._level1_metrics     = None
         self._stations           = []
+        self._profile            = None
         self._xy_list            = []
         self._chainages_list     = []
         self._done_steps         = set()
@@ -2439,6 +2522,8 @@ class App(QMainWindow):
         self.map_widget.clear_all()   # clears tracks + osmRef + alignment + candidates + cross-section + PI/stations
         self.element_table.clear()
         self.step6_stations.reset()
+        self.step8_vertical.reset()
+        self.profile_canvas.clear()
         self.step5_design.reset()
         self.sidebar.reset()
         self._update_metrics_chip()
