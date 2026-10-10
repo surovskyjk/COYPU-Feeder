@@ -68,6 +68,7 @@ hidden_imports = [
     "gui.edit_history",
     "gui.metrics_chip",
     "gui.progress_util",
+    "gui.scroll_row",
     "gui.map_widget",
     "gui.profile_canvas",
     "gui.step_sidebar",

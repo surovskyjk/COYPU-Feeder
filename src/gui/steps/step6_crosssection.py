@@ -6,7 +6,7 @@ offsets to assess terrain cross-slope: green = flat (low embankment cost),
 red = steep (high cost / potential tunnel/cut).  Results are visualised on
 the Leaflet map and can be exported as a CSV file.
 
-The step is optional — clicking "Skip" proceeds directly to export.
+The step is optional — clicking "Skip" proceeds directly to the Vertical Profile step.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class Step6CrossSection(ThemedPanel, QWidget):
     Signals
     -------
     analysis_done(list)
-        Emitted when user clicks "Continue to Export".
+        Emitted when user clicks "Continue".
         Carries the list of result dicts (empty list if the step was skipped).
     back_requested()
         User clicked ← Back (return to Step 5 Refine).
@@ -169,7 +169,7 @@ class Step6CrossSection(ThemedPanel, QWidget):
         self._csv_btn.clicked.connect(self._export_csv)
         bot.addWidget(self._csv_btn)
 
-        self._continue_btn = QPushButton("Continue to Export →")
+        self._continue_btn = QPushButton("Continue →")
         self._continue_btn.setFixedHeight(32)
         self._continue_btn.setEnabled(False)
         self.themed(self._continue_btn, sk.confirm_button)

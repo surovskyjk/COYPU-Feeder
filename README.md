@@ -8,7 +8,7 @@ The fitted alignment follows the canonical railway geometry sequence:
 Line → Transition Spiral (Clothoid) → Circular Arc → Transition Spiral → Line → …
 ```
 
-Elevation is sampled from [ČÚZK DMR 5G](https://cuzk.gov.cz/) (Czech national lidar terrain model, ~0.2 m accuracy) by default, with [OpenTopoData](https://www.opentopodata.org/) (EU-DEM/SRTM/ASTER, ~25–30 m) as a selectable alternative and automatic per-point fallback — fitted as a vertical alignment with parabolic vertical curves.
+Elevation is sampled from [ČÚZK DMR 5G](https://cuzk.gov.cz/) (Czech national lidar terrain model, ~0.2 m accuracy) by default, with [OpenTopoData](https://www.opentopodata.org/) (EU-DEM/SRTM/ASTER, ~25–30 m) as a selectable alternative and automatic per-point fallback — sampled along the fitted centreline, then smoothed in a dedicated **Vertical Profile** step into constant-grade tangents under a hard maximum gradient, with parabolic vertical curves.
 
 ---
 
@@ -16,7 +16,7 @@ Elevation is sampled from [ČÚZK DMR 5G](https://cuzk.gov.cz/) (Czech national 
 
 Pre-built Windows x64 binaries are published as [GitHub Releases](https://github.com/surovskyjk/COYPU-Feeder/releases/latest).
 
-1. Download `COYPU-Feeder-v1.1.0-windows-x64.zip`
+1. Download `COYPU-Feeder-v1.3.0-windows-x64.zip`
 2. Extract to any folder
 3. Run `Coypu-Feeder.exe`
 
@@ -42,13 +42,13 @@ No Python installation required.
 - **Restore default** — one click (↺ in the toolbar) discards every edit made in Refine & Consolidate and returns to the freshly-fitted alignment, clearing the undo history
 - **Original-alignment appearance** — the toolbar's "Original…" popover controls the OSM reference overlay's visibility, opacity and colour, applied instantly and remembered across sessions. It defaults to a muted grey dashed line at low opacity so the constructed alignment's colour-coded elements (blue Line / red Arc / green Spiral) stay the visual focus; a bottom-left map legend explains the colours (View ▸ Show map legend)
 - **Free navigation** — the steps *suggest* an order but never lock you in: edit the alignment at any point, and the later steps refresh themselves
-- **Project files (`.coypuf`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations), so reopening needs no network and no re-fitting
+- **Project files (`.coypuf`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations + sampled vertical profile), so reopening needs no network and no re-fitting. Files from earlier versions open unchanged; a file from a *newer* build still opens, with a warning that data this version doesn't know about is dropped on save
 - **PI display** — Points of Intersection as markers (lockable/draggable in Edit mode), virtual tangent extensions dashed light-grey
 - **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
 - **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
-- **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline
-- **Elevation sampling** — DEM-based vertical profile at a configurable chainage interval, fitted with parabolic vertical curves
-- **LandXML 1.2 export** — COYPU-compatible structure with horizontal + vertical geometry, Cant block (0 mm placeholders) and CRS metadata
+- **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline (optional analysis)
+- **Vertical profile** — terrain sampled from the DEM along the *fitted* centreline (so `<Profile>` and `<CoordGeom>` share one station axis), then smoothed into constant-grade tangents under a **hard maximum gradient** with either a gradient-constrained simplification or a moving-window filter. Live preview on an interactive profile chart (terrain, design line, PVIs; wheel zoom, drag pan, hover read-out), with a cut/fill read-out wherever the terrain is steeper than the limit. Tunnels and viaducts can be bridged with **direct connections** (straight-line ranges whose ends become fixed PVIs). Persisted in the project file.
+- **LandXML 1.2 export** — COYPU-compatible structure with horizontal + vertical geometry (the confirmed vertical profile is written verbatim, and shown in the LandXML preview), Cant block (0 mm placeholders) and CRS metadata
 - **Dark / light mode** — automatic, or forced from Settings ▸ Preferences (with adjustable font size)
 - **Engineering defaults** — Settings ▸ Preferences also holds app-wide defaults (min curve radius, spiral length, deviation tolerance, and a few normally-hardcoded fitting thresholds) that pre-fill Step 3 for a *new* project; each project can still override them there — changing these only affects projects started afterward
 
@@ -72,8 +72,8 @@ No Python installation required.
 │ [5] Refine&Consolidate ├──────────────┬────────────────────┤         │
 │ [6] Stations           │   Log        │  Element table:    │         │
 │ [7] Cross-section      │  (timestamped│  ID · type · sta · │         │
-│ [8] Export             │   activity + │  length · radius · │         │
-│                        │   step tips) │  A · defl · SL · ⋯ │         │
+│ [8] Vertical Profile   │   activity + │  length · radius · │         │
+│ [9] Export             │   step tips) │  A · defl · SL · ⋯ │         │
 │   200 px sidebar       │              │                    │         │
 └────────────────────────┴──────────────┴────────────────────┴─────────┘
 ```
@@ -90,7 +90,7 @@ A **deviation-metrics chip** in the status bar (Δmean / RMSE / Δmax / C1 / ele
 
 ## Working with projects
 
-The eight steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine & Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically). The **element table** follows the alignment rather than the step: once a project has a real PI model (from fitting or from opening a `.coypuf` file) it stays visible under the map through Stations, Cross-section and Export too, not just in Refine & Consolidate — the sidebar is there for orientation, but a lot of real work is re-opening a saved project and editing directly.
+The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine & Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically; a sampled vertical profile that no longer matches the edited horizontal geometry is flagged so you can re-sample). The **element table** follows the alignment rather than the step: once a project has a real PI model (from fitting or from opening a `.coypuf` file) it stays visible under the map through Stations, Cross-section and Export too, not just in Refine & Consolidate (the Vertical Profile step swaps it for the profile chart) — the sidebar is there for orientation, but a lot of real work is re-opening a saved project and editing directly.
 
 Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypuf` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
 
@@ -148,8 +148,9 @@ Configure geometry parameters before running the fitting algorithms:
 | **Alignment Geometry** | Max deviation (PI tolerance) | 1.0 m | Douglas-Peucker tolerance for extracting the tangent polygon (Points of Intersection) |
 | | Minimum curve radius | 150 m | Minimum horizontal curve radius for all circular arcs |
 | | Spiral length (Level 3) | 20 m | Clothoid length; auto-shortened where tangents are too short |
-| **Export Settings** | Elevation sample interval | 20 m | Chainage step for DEM elevation queries |
-| | Vertical curve length | 100 m | Length of parabolic vertical curves at grade changes |
+| **Export Settings** | Elevation sample interval | 20 m | Default chainage step for DEM elevation queries (seeds Step 8, where it can be changed per project) |
+| | Vertical curve length | 100 m | Default length of parabolic vertical curves at grade changes (seeds Step 8) |
+| | Elevation source | ČÚZK DMR 5G | ČÚZK DMR 5G (CZ) or OpenTopoData (anywhere); also selectable in Step 8 |
 
 ---
 
@@ -208,7 +209,7 @@ Build the station/stop list whose chainages are measured along the fitted alignm
 - **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
 - **＋ Add row** — manual entry; edit the km value directly in the table.
 
-Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 8 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
+Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 9 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
 
 ```csv
 Station,Dwell Time,Name
@@ -220,13 +221,35 @@ Station,Dwell Time,Name
 
 ### Step 7 — Cross-Section
 
-The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export.
+The perpendicular deviation between the fitted alignment and the OSM polyline is plotted as a profile. Maximum and mean deviation values are displayed. This step is informational — it helps you verify the fit quality before committing to export. It is optional (**Skip →**) and has no influence on the exported vertical profile.
 
-Click **Next → Export** to proceed.
+Click **Continue →** to proceed to the vertical profile.
 
 ---
 
-### Step 8 — Export
+### Step 8 — Vertical Profile
+
+Terrain elevation is sampled **once**, along the *fitted* centreline (not the raw OSM polyline), so the LandXML `<Profile>` and `<CoordGeom>` sit on exactly the same station axis. The terrain is then smoothed into a vertical alignment of constant-grade tangents — a profile chart replaces the element table under the map and updates live as you adjust the controls.
+
+| Group | Control | Default | Meaning |
+|---|---|---|---|
+| **Terrain sampling** | Elevation source | ČÚZK DMR 5G | ČÚZK lidar model (CZ, ~0.2 m) with per-point OpenTopoData fallback, or OpenTopoData (EU-DEM/SRTM, ~25–30 m) |
+| | Sample interval | 20 m | Distance between DEM samples; smaller is more faithful but means proportionally more queries |
+| **Smoothing** | Algorithm | Gradient-constrained | *Gradient-constrained*: simplify the terrain straight to PVIs. *Moving window*: filter DEM micro-spikes first (Savitzky-Golay, or a plain moving average at polynomial order 0), then simplify. Both then enforce the gradient limit |
+| | Max gradient | 15 ‰ | **Hard** limit on \|dz/ds\| (up to 40 ‰). Where the terrain is steeper, the design line deviates into cut/fill instead of exceeding it |
+| | Δz tolerance | 0.50 m | The design line stays within this vertical distance of the terrain before the gradient clamp; larger ⇒ fewer PVIs |
+| | Window / Polynomial order | 150 m / 2 | Moving-window algorithm only |
+| | Vertical curves | on, 100 m | Parabolic curve at every interior PVI, automatically shortened where neighbouring tangents are too short |
+
+**Direct connections (tunnels / bridges)** — **＋ Add range** (or **📍 Pick on profile**, then drag across the chart) replaces the terrain inside a station range with a straight line between its boundary elevations. The range ends become fixed PVIs, so no smoothing can remove them and the gradient clamp still reaches them.
+
+The chart shows the terrain, the design profile and any connections; **wheel** zooms, **drag** pans and hovering reads out chainage and elevation. The *Profile* read-out reports the achieved max gradient, min/max elevation, max cut/fill and PVI/sample counts. If you later edit the horizontal alignment, the step warns that the sampled profile no longer matches it so you can re-sample.
+
+Click **Apply / Confirm Profile →** to hand the profile to the export. Skipping this step is still possible — the export then falls back to sampling along the OSM polyline.
+
+---
+
+### Step 9 — Export
 
 1. Choose an output CRS from the preset list or enter a custom EPSG code
 2. Click **Browse…** and choose an output `.xml` file path
@@ -245,7 +268,7 @@ Click **Next → Export** to proceed.
 | ETRS89 / UTM zone 33N | 25833 |
 | Auto UTM (from track centroid) | — |
 
-The progress bar tracks the export stages (Projecting → Fitting → Querying elevation → Building XML → Writing). On completion, the exported alignment is drawn on the map as a **bright red line** with a white glow halo.
+Use **👁 Preview LandXML** to inspect the file first — it now includes the vertical `<Profile>` once it has been confirmed in Step 8. The progress bar tracks the export stages (Projecting → Fitting → Building XML → Writing); the DEM is not queried again here, since the confirmed profile is written verbatim. On completion, the exported alignment is drawn on the map as a **bright red line** with a white glow halo.
 
 ---
 
@@ -257,7 +280,7 @@ spirals with tangent PI, and a Cant block):
 
 ```xml
 <LandXML version="1.2" ...>
-  <Application name="COYPU Feeder" version="1.1.0" .../>
+  <Application name="COYPU Feeder" version="1.3.0" .../>
   <Project name="Railway Alignment" desc="Generated by COYPU Feeder from OpenStreetMap data …"/>
   <Units><Metric areaUnit="squareMeter" linearUnit="meter" .../></Units>
   <CoordinateSystem epsgCode="5514" .../>
@@ -374,6 +397,7 @@ COYPU-Feeder/
 │   ├── log_panel.py         # Timestamped activity log (bottom-left)
 │   ├── branding.py          # App icon + splash artwork (painted)
 │   ├── dialogs.py           # About / Settings dialogs
+    │   ├── profile_canvas.py     # Vertical-profile chart (terrain / design / PVIs; zoom, pan, range pick)
     │   ├── step_sidebar.py       # Numbered step sidebar
     │   ├── theme.py              # Dark/light Fusion palette + stylesheet
     │   ├── worker.py             # QThread workers (Search, Fetch, Candidates, Stations, Consolidate, Export)
@@ -387,7 +411,9 @@ COYPU-Feeder/
     │       │                     # table) + curve-run consolidation (step 5)
     │       ├── step6_stations.py # Stations & stops → chainage CSV (step 6)
     │       ├── step6_crosssection.py  # Deviation profile (step 7)
-    │       └── step7_export.py   # CRS selection + LandXML/CSV export (step 8)
+    │       ├── step8_vertical.py # Vertical profile smoothing + direct connections (step 8)
+    │       ├── step7_export.py   # CRS selection + LandXML/CSV export (step 9)
+    │       └── _widgets.py       # Shared labelled-spinbox / combo / stat-row helpers
     ├── osm/
     │   ├── query.py              # Overpass API queries (incl. station detection)
     │   └── parser.py             # OSM way → Track objects
@@ -396,7 +422,8 @@ COYPU-Feeder/
     │   ├── candidates.py         # Level 1/2/3 PI-model + editing + consolidation
     │   ├── stationing.py         # Station chainage projection + CSV writer
     │   ├── curvature.py          # Curvature computation and segmentation
-    │   ├── elevation.py          # DEM sampling and vertical geometry
+    │   ├── elevation.py          # DEM sampling (ČÚZK DMR 5G / OpenTopoData)
+    │   ├── profile.py            # Vertical profile model: smoothing, gradient clamp, PVI synthesis
     │   └── projection.py         # CRS transformations (pyproj)
     ├── app_meta.py              # Name / version / license / data sources
     ├── project_io.py            # .coypuf project save / load
