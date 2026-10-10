@@ -6,23 +6,24 @@ offsets to assess terrain cross-slope: green = flat (low embankment cost),
 red = steep (high cost / potential tunnel/cut).  Results are visualised on
 the Leaflet map and can be exported as a CSV file.
 
-The step is optional — clicking "Skip" proceeds directly to export.
+The step is optional — clicking "Skip" proceeds directly to the Vertical Profile step.
 """
 
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QDoubleSpinBox, QGroupBox, QProgressBar, QFileDialog, QSizePolicy,
-    QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QGroupBox, QProgressBar, QFileDialog,
 )
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont
 
 from gui import style_kit as sk
 from gui.style_kit import ThemedPanel
 from gui import icons
 from gui.theme import current_tokens
+from gui.steps._widgets import (
+    _hline, _labeled_combo, _labeled_spin, _stat_row,
+)
 
 
 class Step6CrossSection(ThemedPanel, QWidget):
@@ -32,7 +33,7 @@ class Step6CrossSection(ThemedPanel, QWidget):
     Signals
     -------
     analysis_done(list)
-        Emitted when user clicks "Continue to Export".
+        Emitted when user clicks "Continue".
         Carries the list of result dicts (empty list if the step was skipped).
     back_requested()
         User clicked ← Back (return to Step 5 Refine).
@@ -168,7 +169,7 @@ class Step6CrossSection(ThemedPanel, QWidget):
         self._csv_btn.clicked.connect(self._export_csv)
         bot.addWidget(self._csv_btn)
 
-        self._continue_btn = QPushButton("Continue to Export →")
+        self._continue_btn = QPushButton("Continue →")
         self._continue_btn.setFixedHeight(32)
         self._continue_btn.setEnabled(False)
         self.themed(self._continue_btn, sk.confirm_button)
@@ -326,92 +327,3 @@ class Step6CrossSection(ThemedPanel, QWidget):
 
     def _continue(self):
         self.analysis_done.emit(self._results)
-
-
-# ---------------------------------------------------------------------------
-# Small layout helpers
-# ---------------------------------------------------------------------------
-
-def _hline() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.HLine)
-    f.setFrameShadow(QFrame.Shadow.Sunken)
-    sk.set_role(f, "separator")
-    return f
-
-
-def _labeled_spin(
-    layout: QVBoxLayout,
-    label: str,
-    min_v: float,
-    max_v: float,
-    default: float,
-    suffix: str,
-    tooltip: str = "",
-) -> QDoubleSpinBox:
-    row = QHBoxLayout()
-    row.setSpacing(6)
-
-    lbl = QLabel(label)
-    lbl.setFixedWidth(130)
-    lbl.setStyleSheet("font-size: 11px;")
-    row.addWidget(lbl)
-
-    spin = QDoubleSpinBox()
-    spin.setRange(min_v, max_v)
-    spin.setValue(default)
-    spin.setSuffix(suffix)
-    spin.setDecimals(1)
-    spin.setFixedHeight(26)
-    if tooltip:
-        spin.setToolTip(tooltip)
-    row.addWidget(spin)
-    row.addStretch()
-
-    layout.addLayout(row)
-    return spin
-
-
-def _labeled_combo(
-    layout: QVBoxLayout,
-    label: str,
-    items: list[str],
-    tooltip: str = "",
-) -> QComboBox:
-    row = QHBoxLayout()
-    row.setSpacing(6)
-
-    lbl = QLabel(label)
-    lbl.setFixedWidth(130)
-    lbl.setStyleSheet("font-size: 11px;")
-    row.addWidget(lbl)
-
-    combo = QComboBox()
-    combo.addItems(items)
-    combo.setFixedHeight(26)
-    if tooltip:
-        combo.setToolTip(tooltip)
-    row.addWidget(combo)
-    row.addStretch()
-
-    layout.addLayout(row)
-    return combo
-
-
-def _stat_row(layout: QVBoxLayout, label: str) -> QLabel:
-    """Add a two-column (label : value) row; return the value label."""
-    row = QHBoxLayout()
-    row.setSpacing(6)
-
-    lbl = QLabel(label)
-    sk.set_role(lbl, "muted", " font-size:10px;")
-    lbl.setFixedWidth(155)
-    row.addWidget(lbl)
-
-    val = QLabel("—")
-    sk.set_role(val, "value", " font-size:10px;")
-    row.addWidget(val)
-    row.addStretch()
-
-    layout.addLayout(row)
-    return val

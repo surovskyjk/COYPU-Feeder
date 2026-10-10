@@ -31,7 +31,17 @@ Desktop PySide6 app converting OSM railway polylines into C1-continuous LandXML 
 
 `gui/app.py` (`App`) is the **single owner** of the working `_pi_model`/`_elements`. Steps never keep their own copy: `Step5Design` (Refine & Consolidate — manual editing AND curve-run consolidation live in one step/one widget) binds the shared element-table dock to the same model object (so undo/restore must mutate the model in place, not replace it). Navigation is free, not gated: `_step_reasons()` computes prerequisites, edits mark downstream steps (Stations/Cross-section/Export) stale via `_mark_stale()`, and stale steps re-prepare from current geometry on entry. Step indices use the symbolic constants `S_FIND..S_EXPORT` — never bare integers.
 
-Note the step *file names* do not match the 8-step UI numbering (`step6_stations.py`, `step6_crosssection.py`, `step7_export.py` are UI steps 6–8; `step5_design.py` is UI step 5, hosting the old Refine+Consolidate widgets merged into one); the stack order in `app.py` is authoritative. `.coypuf` files persist the current step index (`project_io.py`); files older than format version 1.3 carry it under the pre-merge 9-step numbering and are remapped on load (`_migrate_step`).
+Note the step *file names* do not match the 9-step UI numbering (`step6_stations.py`, `step6_crosssection.py`, `step8_vertical.py`, `step7_export.py` are UI steps 6–9; `step5_design.py` is UI step 5, hosting the old Refine+Consolidate widgets merged into one); the stack order in `app.py` is authoritative. `.coypuf` files persist the current step index (`project_io.py`); files older than format 1.3 carry it under the pre-merge 9-step numbering, and files older than 2.0 under the 8-step numbering that predates the Vertical Profile step — `_migrate_step` chains both remappings, and its clamp constant `_MAX_STEP` must stay equal to `N_STEPS - 1` (asserted in `tests/test_step_migration.py`).
+
+### The vertical profile mirrors the PI model
+
+`src/geometry/profile.py` is the vertical counterpart of `candidates.py`, and follows the same contract:
+
+- `VerticalProfile` holds the DEM samples (`s`, `z_raw`) plus the smoothing configuration and the manual `DirectConnection` ranges. `rebuild_profile(profile)` regenerates `z_override` / `z_design` / `pvis` / `stats` — **these are never persisted**, exactly like `elements` (`rebuild_from_pi_model`).
+- `App` is the single owner of `_profile`; `Step8Vertical` mutates it **in place** and never replaces it (the canvas holds the same object).
+- Terrain is sampled along the **fitted centreline** via `sample_points_along_elements` (one batched `projected_to_wgs84` call), not the raw OSM polyline. This is what puts `<Profile>` and `<CoordGeom>` on the same station axis; the export worker only re-samples the OSM polyline when no confirmed profile was handed to it.
+- Both smoothing methods share one PVI back end: `douglas_peucker(z_tol)` → `clamp_grades(max_grade)`. The window filter only adds a pre-filter stage — `<ProfAlign>` cannot take thousands of PVIs, so simplification always runs. `clamp_grades` averages a forward- and a backward-anchored sweep (the feasible set is convex, so the average is feasible *and* balanced), which makes it idempotent and end-symmetric.
+- `z_raw` carries `NaN` for DEM misses all the way into `.coypuf` (round-trips as the literal `nan` through `_pnt_list`/`_parse_pnt_list`); `rebuild_profile` bridges the gaps. Never bake a substitute 0 m into the stored samples.
 
 ### Geometry conventions
 
@@ -55,4 +65,4 @@ When touching geometry code, prove behavior preservation: fingerprint every elem
 
 - Overpass API with OSM API fallback (`src/osm/query.py`). Overpass **rejects the default python-requests User-Agent with 406** — all HTTP goes through the custom `HTTP_HEADERS`. Overpass mirrors are frequently down; keep the fallback path working.
 - Czech railway list: bundled snapshot `src/data/cz_railways.json` (relation 2332889); a user-updated copy in `<AppData>/COYPU-Feeder/` takes precedence (`src/data/cz_lines.py`).
-- Elevation from the Open-Elevation DEM service.
+- Elevation from ČÚZK DMR 5G (per-point `identify`, 8-way concurrency) with OpenTopoData as fallback for points outside its coverage (`src/geometry/elevation.py`).
