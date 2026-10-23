@@ -32,35 +32,8 @@ from gui import icons
 CZ_RAILWAYS_RELATION = 2332889
 
 
-def _friendly_error(raw: str) -> str:
-    """Convert a raw exception string to a human-readable message."""
-    low = raw.lower()
-    if "429" in raw or "too many requests" in low:
-        return (
-            "Overpass API rate limit reached (HTTP 429).\n"
-            "Please wait a few minutes and try again."
-        )
-    if "timed out" in low or "timeout" in low or "read timed out" in low:
-        return (
-            "All Overpass servers timed out.\n"
-            "Check your internet connection, or try again later — "
-            "the public mirrors may be temporarily busy."
-        )
-    if "504" in raw or "gateway" in low:
-        return (
-            "Overpass gateway error (HTTP 504).\n"
-            "The server is overloaded. Try again in a minute."
-        )
-    if "connection" in low or "network" in low or "name or service not known" in low:
-        return (
-            "Could not connect to the Overpass API.\n"
-            "Please check your internet connection."
-        )
-    if "404" in raw or "not found" in low:
-        return "The requested OSM relation was not found. Please check the relation ID."
-    # Generic fallback: show raw but not a Python traceback dump
-    first_line = raw.split("\n")[0]
-    return first_line if first_line else raw
+# Worker `failed` messages are already user-facing (osm.query.friendly_error):
+# a one-line summary, then per-server detail lines where there are any.
 
 
 class Step1Find(ThemedPanel, QWidget):
@@ -325,7 +298,7 @@ class Step1Find(ThemedPanel, QWidget):
 
     def _on_search_failed(self, error: str):
         self._fetch_status_lbl.setVisible(False)
-        QMessageBox.critical(self, "Search error", _friendly_error(error))
+        QMessageBox.critical(self, "Search error", error)
 
     def _on_result_double_clicked(self, item: QListWidgetItem):
         r = item.data(Qt.ItemDataRole.UserRole)
@@ -420,7 +393,7 @@ class Step1Find(ThemedPanel, QWidget):
         self._cz_load_btn.setText("🔄  Update list")
         n = len(self._cz_all_results)
         self._cz_status.setText(
-            f"Update failed: {_friendly_error(error)} — "
+            f"Update failed: {(error.splitlines() or [''])[0]} — "
             f"keeping the current snapshot ({n} lines)."
         )
 
@@ -494,7 +467,7 @@ class Step1Find(ThemedPanel, QWidget):
         self._fetch_status_lbl.setVisible(False)
         QMessageBox.critical(
             self, "Fetch error",
-            f"Could not load relation {relation_id}.\n\n{_friendly_error(error)}"
+            f"Could not load relation {relation_id}.\n\n{error}"
         )
 
     def _on_data_ready(self, data, info: dict):

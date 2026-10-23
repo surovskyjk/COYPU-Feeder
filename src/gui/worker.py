@@ -89,7 +89,8 @@ class SearchWorker(QThread):
                 results = []
             self.results_ready.emit(results)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            from osm.query import friendly_error
+            self.failed.emit(friendly_error(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -107,16 +108,26 @@ class FetchWorker(QThread):
         self._rid = relation_id
 
     def run(self):
+        from osm.query import (
+            fetch_relation_ways, fetch_relation_metadata,
+            relation_info_from_data, friendly_error,
+        )
         try:
-            from osm.query import fetch_relation_ways, fetch_relation_metadata
             cb   = lambda msg: self.status_update.emit(msg)
             data = fetch_relation_ways(self._rid, progress_cb=cb)
-            info = fetch_relation_metadata(self._rid, progress_cb=None) or {
-                "id": self._rid, "name": str(self._rid)
-            }
-            self.data_ready.emit(data, info)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(friendly_error(exc))
+            return
+        # The relation's tags normally ride along with its ways; a separate
+        # metadata request is only a backstop, and its failure must not
+        # throw away the geometry that already arrived.
+        info = relation_info_from_data(data, self._rid)
+        if info is None:
+            try:
+                info = fetch_relation_metadata(self._rid, progress_cb=None)
+            except Exception:
+                info = None
+        self.data_ready.emit(data, info or {"id": self._rid, "name": str(self._rid)})
 
 
 # ---------------------------------------------------------------------------
@@ -278,23 +289,38 @@ class StationDetectWorker(QThread):
     Fetch passenger stations/halts/stop-positions near the alignment via
     Overpass, snap them to the fitted element chain, dedupe by name.
 
-    Emits stations_ready(list[Station]) — chainage/dist already computed.
+    When every Overpass server fails, *fallback_stops* (the stop-like nodes
+    that came with the fetched relation, see osm.query.stops_from_elements)
+    stand in — only stops lying on the track itself, so the result carries
+    a warning note.
+
+    Emits stations_ready(list[Station], note) — chainage/dist already
+    computed; note is "" for a full Overpass result.
     """
-    stations_ready = Signal(list)
+    stations_ready = Signal(list, str)
     status_update  = Signal(str)
     failed         = Signal(str)
 
+    FALLBACK_NOTE = (
+        "Overpass unavailable — used the stops mapped on the track itself; "
+        "stations mapped beside the track may be missing. "
+        "Try Auto-detect again later.")
+
     def __init__(self, elements: list, tracks: list, work_epsg: int,
-                 max_dist_m: float = 100.0, parent=None):
+                 max_dist_m: float = 100.0, fallback_stops: list | None = None,
+                 parent=None):
         super().__init__(parent)
         self._elements   = elements
         self._tracks     = tracks
         self._work_epsg  = work_epsg
         self._max_dist_m = max_dist_m
+        self._fallback   = list(fallback_stops or [])
 
     def run(self):
+        from osm.query import (
+            fetch_stations_in_bbox, OverpassUnavailable, friendly_error,
+        )
         try:
-            from osm.query import fetch_stations_in_bbox
             from geometry.stationing import Station, snap_stations, dedupe_by_name
 
             # Bounding box of the selected tracks (WGS84) + small margin
@@ -306,11 +332,18 @@ class StationDetectWorker(QThread):
                 self.failed.emit("No track nodes available for the search box.")
                 return
             m = 0.01   # ≈ 1 km margin
+            s, w, n, e = min(lats) - m, min(lons) - m, max(lats) + m, max(lons) + m
             cb = lambda msg: self.status_update.emit(msg)
-            raw = fetch_stations_in_bbox(
-                min(lats) - m, min(lons) - m, max(lats) + m, max(lons) + m,
-                progress_cb=cb,
-            )
+            note = ""
+            try:
+                raw = fetch_stations_in_bbox(s, w, n, e, progress_cb=cb)
+            except OverpassUnavailable as exc:
+                if exc.category == "bad_query" or not self._fallback:
+                    raise
+                print(f"[StationDetectWorker] {exc}")
+                raw = [r for r in self._fallback
+                       if s <= r["lat"] <= n and w <= r["lon"] <= e]
+                note = self.FALLBACK_NOTE
             self.status_update.emit(f"{len(raw)} candidate nodes — snapping to alignment…")
 
             stations = [
@@ -321,10 +354,15 @@ class StationDetectWorker(QThread):
             near = [s for s in stations if s.dist_m <= self._max_dist_m]
             unique = dedupe_by_name(near)
             self.status_update.emit(f"{len(unique)} stations on this alignment.")
-            self.stations_ready.emit(unique)
+            self.stations_ready.emit(unique, note)
         except Exception as exc:
             import traceback
-            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+            import requests
+            if isinstance(exc, (OverpassUnavailable,
+                                requests.exceptions.RequestException)):
+                self.failed.emit(friendly_error(exc))
+            else:
+                self.failed.emit(f"{exc}\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------

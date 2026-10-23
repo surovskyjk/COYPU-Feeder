@@ -63,6 +63,11 @@ When touching geometry code, prove behavior preservation: fingerprint every elem
 
 ### Data sources
 
-- Overpass API with OSM API fallback (`src/osm/query.py`). Overpass **rejects the default python-requests User-Agent with 406** — all HTTP goes through the custom `HTTP_HEADERS`. Overpass mirrors are frequently down; keep the fallback path working.
+- Overpass API with OSM API fallback (`src/osm/query.py`). Overpass **rejects the default python-requests User-Agent with 406** — all HTTP goes through the shared `_http()` session carrying `HTTP_HEADERS`. Overpass mirrors are frequently down or queue requests for 20–30 s under weekday load; keep the fallback path working:
+  - Every query declares its server `[timeout:T]` and passes the same `timeout=T` to `_run_query`. The client read timeout is `T + QUEUE_SLACK`. Never let the client give up before the server, because an abandoned query keeps holding one of our IP's slots.
+  - `OVERPASS_ENDPOINTS` lists distinct services only (`kumi.systems` is an alias of `private.coffee`). The order is move-to-front per session.
+  - All failures surface as `OverpassUnavailable` (per-host attempts and a category). Workers emit `friendly_error(exc)`, so GUI code never parses exception strings.
+  - Relation geometry carries its own tags in one round trip (`relation_info_from_data`). The OSM API fallback runs after one Overpass pass.
+- The CARTO basemap key lives only in the OS credential vault (`src/basemap_key.py`, a near-verbatim port of COYPU's, camelCase kept for diffing). It must never enter `SettingsDialog.values()`, `_prefs`/QSettings or `.coypuf`. It is appended to CARTO tile URLs only (`map_widget.tile_url`).
 - Czech railway list: bundled snapshot `src/data/cz_railways.json` (relation 2332889); a user-updated copy in `<AppData>/COYPU-Feeder/` takes precedence (`src/data/cz_lines.py`).
 - Elevation from ČÚZK DMR 5G (per-point `identify`, 8-way concurrency) with OpenTopoData as fallback for points outside its coverage (`src/geometry/elevation.py`).

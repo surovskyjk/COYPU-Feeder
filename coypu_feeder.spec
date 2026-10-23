@@ -52,7 +52,9 @@ hidden_imports = [
     "PySide6.QtNetwork",
     "PySide6.QtPrintSupport",
     # project modules (dynamic path insertion in main.py)
+    # (keyring's backends + dist-info come from PyInstaller's own hook-keyring)
     "app_meta",
+    "basemap_key",
     "project_io",
     "data.cz_lines",
     "gui.app",

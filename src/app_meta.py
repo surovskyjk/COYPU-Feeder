@@ -59,6 +59,9 @@ DATA_SOURCES = [
      "cadastre extract. "
      "<a href='https://cuzk.gov.cz/Predpisy/Podminky-poskytovani-prostor-dat-a-sitovych-sluzeb/"
      "Podminky-poskytovani-sitovych-sluzeb-CUZK.aspx'>Terms of use</a>"),
+    ("CARTO basemaps (map layers)",
+     "© CARTO, © OpenStreetMap contributors — https://carto.com/attributions. "
+     "Needs your own API key (Settings ▸ Preferences ▸ Map basemap)."),
     ("Leaflet (map rendering)",
      "© Leaflet contributors, BSD-2 — https://leafletjs.com"),
 ]

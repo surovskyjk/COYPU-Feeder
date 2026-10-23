@@ -11,11 +11,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget,
     QWidget, QTextBrowser, QComboBox, QSpinBox, QFormLayout, QDialogButtonBox,
-    QGroupBox, QCheckBox, QDoubleSpinBox, QScrollArea,
+    QGroupBox, QCheckBox, QDoubleSpinBox, QScrollArea, QLineEdit,
 )
 from PySide6.QtGui import QPixmap
 
 import app_meta as meta
+import basemap_key
 from .branding import make_splash_pixmap
 
 
@@ -126,7 +127,22 @@ class SettingsDialog(QDialog):
     """
     Edits UI preferences. Returns the chosen values via `values()`; the
     caller persists them (QSettings) and applies them live.
+
+    The CARTO API key is the one exception: it is read back separately via
+    `basemap_api_key()` and stored in the OS credential vault by the caller
+    (basemap_key) — it must never enter `values()`, which lands in
+    plaintext QSettings.
     """
+
+    # Where the key currently in effect came from (basemap_key.keySource()).
+    _KEY_SOURCE_NOTES = {
+        "feeder": "A key is saved in Windows Credential Manager.",
+        "coypu": "Using the key saved by COYPU. Enter one here to give "
+                 "the Feeder its own; clearing the field keeps COYPU's.",
+        "environment": "Using the key from the COYPU_FEEDER_MAP_API_KEY / "
+                       "COYPU_MAP_API_KEY environment variable.",
+        "": "No key set — the CARTO basemaps stay disabled.",
+    }
 
     # Engineering-default keys this dialog edits, with (label, suffix,
     # range, decimals, fallback, tooltip) — every one a genuine railway
@@ -163,13 +179,14 @@ class SettingsDialog(QDialog):
          (0.0, 200.0), 0, 10.0, "Shortest Spiral element kept as its own segment."),
     ]
 
-    def __init__(self, current: dict, parent=None):
+    def __init__(self, current: dict, parent=None, basemap_api_key: str = "",
+                 basemap_key_source: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(420, 520)
-        self._build(current)
+        self.resize(420, 620)
+        self._build(current, basemap_api_key, basemap_key_source)
 
-    def _build(self, cur: dict):
+    def _build(self, cur: dict, api_key: str = "", key_source: str = ""):
         outer = QVBoxLayout(self)
 
         scroll = QScrollArea()
@@ -196,6 +213,36 @@ class SettingsDialog(QDialog):
         form.addRow("Font size:", self._font)
 
         v.addWidget(appearance)
+
+        basemap = QGroupBox("Map basemap")
+        mform = QFormLayout(basemap)
+        self._api_key = QLineEdit(str(api_key or ""))
+        self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key.setPlaceholderText("leave empty to use OpenStreetMap")
+        self._api_key.setToolTip(
+            "Needed for the CARTO Voyager / Dark Matter basemaps.")
+        mform.addRow("CARTO API key:", self._api_key)
+        self._show_key = QCheckBox("Show key")
+        self._show_key.toggled.connect(lambda on: self._api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        mform.addRow("", self._show_key)
+
+        def _link(url: str) -> str:
+            return f"<a href='{url}'>{url.split('://', 1)[-1].rstrip('/')}</a>"
+
+        help_lbl = QLabel(
+            f"{self._KEY_SOURCE_NOTES.get(key_source, '')}<br>"
+            "The key is stored encrypted for your Windows account (Credential "
+            "Manager) — never in settings or project files. Clear the field "
+            "to remove the Feeder's own key.<br>"
+            f"Get a free key at {_link(basemap_key.CARTO_KEY_SIGNUP_URL)}, "
+            f"or ask the author at {_link(basemap_key.AUTHOR_CONTACT_URL)}.")
+        help_lbl.setWordWrap(True)
+        help_lbl.setTextFormat(Qt.TextFormat.RichText)
+        help_lbl.setOpenExternalLinks(True)
+        help_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        mform.addRow(help_lbl)
+        v.addWidget(basemap)
 
         behaviour = QGroupBox("Behaviour")
         bform = QFormLayout(behaviour)
@@ -245,3 +292,7 @@ class SettingsDialog(QDialog):
         for key, spin in self._engineering_spins.items():
             out[key] = spin.value()
         return out
+
+    def basemap_api_key(self) -> str:
+        """The CARTO key as typed — deliberately NOT part of `values()`."""
+        return self._api_key.text().strip()

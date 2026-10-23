@@ -115,6 +115,10 @@ class App(QMainWindow):
         self._pending_drag: tuple[int, float, float] | None = None
         self._drag_preview_timer: QTimer | None = None
         self._stations: list        = []
+        # Stop-like nodes (stop positions, halts, stations) that came WITH the
+        # fetched relation's track nodes — Step 6's fallback when every
+        # Overpass server is down. Not persisted: empty after a project load.
+        self._osm_stop_nodes: list  = []
         # The vertical counterpart of _pi_model: App is the single owner,
         # Step8Vertical mutates it in place and never replaces it.
         self._profile               = None   # VerticalProfile | None
@@ -944,16 +948,50 @@ class App(QMainWindow):
         self.log_panel.log(f"Theme set to '{mode}'.", "info")
 
     def _open_settings(self):
-        dlg = SettingsDialog(self._prefs, self)
+        import basemap_key
+        dlg = SettingsDialog(self._prefs, self,
+                             basemap_api_key=self.map_widget.carto_api_key,
+                             basemap_key_source=basemap_key.keySource())
         if dlg.exec():
             self._prefs.update(dlg.values())
             self._save_prefs()
             self._apply_prefs()
+            self._store_carto_api_key(dlg.basemap_api_key())
             # keep the menu toggles in sync
             self._act_show_log.setChecked(self._prefs["show_log"])
             for a in self._theme_group.actions():
                 a.setChecked(a.data() == self._prefs["theme_mode"])
             self.log_panel.log("Preferences updated.", "info")
+
+    def _store_carto_api_key(self, api_key: str):
+        """Vault the CARTO key (ported from COYPU's storeCartoApiKey).
+
+        An unchanged key is never re-written, so a key that came from COYPU's
+        entry or the environment is not copied into the Feeder's own entry.
+        An empty field removes the Feeder's entry. The map then follows
+        whatever `loadKey()` resolves (COYPU's key may still apply). Never
+        logs the key itself.
+        """
+        import basemap_key
+        if api_key == self.map_widget.carto_api_key:
+            return
+        stored = basemap_key.saveKey(api_key) if api_key else basemap_key.deleteKey()
+        if not stored:
+            self.log_panel.log(
+                "The CARTO key could not be saved securely (credential vault "
+                "unavailable) — it applies to this session only.", "warn")
+            effective = api_key
+        else:
+            effective = basemap_key.loadKey() if not api_key else api_key
+        self.map_widget.set_carto_api_key(effective)
+        if api_key:
+            self.log_panel.log("CARTO API key saved.", "info")
+        elif effective:
+            self.log_panel.log("CARTO API key removed — the key saved by "
+                               "COYPU (or the environment) still applies.", "info")
+        else:
+            self.log_panel.log("CARTO API key removed — CARTO basemaps disabled.",
+                               "info")
 
     def _open_about(self):
         AboutDialog(self).exec()
@@ -1627,7 +1665,8 @@ class App(QMainWindow):
             if idx == S_STATIONS:
                 # Station chainages are re-snapped to the new geometry
                 self.step6_stations.prepare(self._elements,
-                                            self._selected_tracks, self._work_epsg)
+                                            self._selected_tracks, self._work_epsg,
+                                            fallback_stops=self._osm_stop_nodes)
             elif idx == S_CROSSSEC:
                 self.step6_crosssec.prepare(self._elements, self._work_epsg)
             elif idx == S_VERTICAL:
@@ -1791,8 +1830,10 @@ class App(QMainWindow):
         self.statusBar().showMessage(status + " Click a result to load it.")
 
     def _on_view_search_failed(self, error: str):
-        self.step1.show_view_results([], status=f"Search failed: {error}")
-        self.statusBar().showMessage(f"Lines-in-View search failed: {error}")
+        summary = (error.splitlines() or [""])[0]   # detail lines → log
+        self.step1.show_view_results([], status=f"Search failed: {summary}")
+        self.statusBar().showMessage(f"Lines-in-View search failed: {summary}")
+        self.log_panel.log(f"Lines-in-View search failed: {error}", "warn")
 
     # ------------------------------------------------------------------
     # Railway loaded
@@ -1800,8 +1841,11 @@ class App(QMainWindow):
 
     def _on_railway_fetched(self, overpass_data, relation_info: dict):
         from osm.parser import parse_tracks
+        from osm.query import stops_from_elements
         try:
             self._tracks = parse_tracks(overpass_data)
+            self._osm_stop_nodes = stops_from_elements(
+                overpass_data.get("elements", []))
         except Exception as exc:
             QMessageBox.critical(self, "Parse error",
                                  f"Failed to parse track data:\n{exc}")
@@ -2512,6 +2556,7 @@ class App(QMainWindow):
         self._level              = ""
         self._level1_metrics     = None
         self._stations           = []
+        self._osm_stop_nodes     = []
         self._profile            = None
         self._xy_list            = []
         self._chainages_list     = []
