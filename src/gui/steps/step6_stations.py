@@ -44,6 +44,7 @@ class Step6Stations(ThemedPanel, QWidget):
         self._stations: list = []          # list[stationing.Station]
         self._elements: list = []
         self._tracks: list   = []
+        self._fallback_stops: list = []    # see prepare()
         self._work_epsg      = 32633
         self._worker         = None
         self._click_armed    = False
@@ -137,11 +138,15 @@ class Step6Stations(ThemedPanel, QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def prepare(self, elements: list, tracks: list, work_epsg: int):
-        """Called by App after Step 5 Accept."""
+    def prepare(self, elements: list, tracks: list, work_epsg: int,
+                fallback_stops: list | None = None):
+        """Called by App after Step 5 Accept. *fallback_stops* are the
+        stop-like nodes fetched with the relation (Auto-detect's stand-in
+        when Overpass is down)."""
         self._elements  = elements
         self._tracks    = tracks
         self._work_epsg = work_epsg
+        self._fallback_stops = list(fallback_stops or [])
         self._click_armed = False
         self._place_btn.setChecked(False)
         # Re-snap any stations placed in a previous pass (alignment may have
@@ -161,8 +166,10 @@ class Step6Stations(ThemedPanel, QWidget):
     def reset(self):
         """Clear all stations (start-over)."""
         self._stations.clear()
+        self._fallback_stops = []
         self._populate()
         self._status_lbl.setText("")
+        self._status_lbl.setToolTip("")
 
     def set_stations(self, stations: list):
         """Replace the station list (e.g. when a project is opened)."""
@@ -203,14 +210,16 @@ class Step6Stations(ThemedPanel, QWidget):
             return
         self._auto_btn.setEnabled(False)
         self._status_lbl.setText("Querying Overpass for stations…")
+        self._status_lbl.setToolTip("")
         self._worker = StationDetectWorker(
-            self._elements, self._tracks, self._work_epsg, parent=self)
+            self._elements, self._tracks, self._work_epsg,
+            fallback_stops=self._fallback_stops, parent=self)
         self._worker.status_update.connect(self._status_lbl.setText)
         self._worker.stations_ready.connect(self._on_auto_result)
         self._worker.failed.connect(self._on_auto_failed)
         self._worker.start()
 
-    def _on_auto_result(self, found: list):
+    def _on_auto_result(self, found: list, note: str = ""):
         self._auto_btn.setEnabled(True)
         existing = {s.name for s in self._stations}
         added = 0
@@ -220,13 +229,16 @@ class Step6Stations(ThemedPanel, QWidget):
                 existing.add(st.name)
                 added += 1
         self._sort_and_refresh()
-        self._status_lbl.setText(
-            f"Auto-detect: {added} new station(s) added "
-            f"({len(found) - added} already present).")
+        msg = (f"Auto-detect: {added} new station(s) added "
+               f"({len(found) - added} already present).")
+        self._status_lbl.setText(f"⚠ {note}\n{msg}" if note else msg)
 
     def _on_auto_failed(self, msg: str):
         self._auto_btn.setEnabled(True)
-        self._status_lbl.setText(f"⚠ Auto-detect failed: {msg.splitlines()[0]}")
+        lines = msg.splitlines()
+        self._status_lbl.setText(f"⚠ Auto-detect failed: {lines[0] if lines else msg}")
+        # Per-server detail (or a traceback) stays one hover away.
+        self._status_lbl.setToolTip(msg if len(lines) > 1 else "")
 
     # ------------------------------------------------------------------
     # Manual placement / rows

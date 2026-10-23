@@ -29,7 +29,7 @@ No Python installation required.
 - **Find any railway** by timetable reference number, name, or direct OSM relation ID
 - **Search in map view** — find all railway route-relations visible in the current map window (≤ 20 × 20 km)
 - **Czech Railways browser** — all ~240 lines of the *Railways in Czech Republic* OSM collection from a **bundled offline snapshot** (instant, no network), refreshable with 🔄 Update
-- **Interactive Leaflet map** with 7 selectable tile providers, an optional OpenRailwayMap overlay, and a dimmable ČÚZK land-register (katastrální mapa) overlay for orientation — © ČÚZK – on-line, not a legally binding cadastre extract
+- **Interactive Leaflet map** with 7 selectable tile providers, an optional OpenRailwayMap overlay, and a dimmable ČÚZK land-register (katastrální mapa) overlay for orientation — © ČÚZK – on-line, not a legally binding cadastre extract. The CARTO basemaps need your own free API key, stored securely (see [CARTO basemaps](#carto-basemaps-api-key))
 - **Track selection** — load a relation, select one or more tracks, highlight individual tracks on the map
 - **Track editing** — split a track at a map point, merge two or more tracks end-to-end (endpoints matched and reversed automatically), or remove a track from the selection — all before fitting
 - **3 alignment levels** — raw polyline / Lines + Arcs / Lines + Spirals + Arcs, compared side by side on the map before export
@@ -115,6 +115,8 @@ Zoom the map to an area ≤ 20 × 20 km, then click *Search Railway Lines in Cur
 All members of OSM relation 2332889 are listed **immediately from a bundled offline snapshot** — no network needed — and filtered instantly as you type, by line number, name, or terminal stations. The header shows the snapshot date and whether it is the bundled copy or your own; **🔄 Update list** re-fetches it from OpenStreetMap and stores the result in your user data folder, which is preferred from then on. A failed update keeps the existing snapshot.
 
 Double-click any result or select it and click *Fetch selected* to load the full relation geometry.
+
+**When the servers are busy.** The public Overpass servers get heavily loaded on weekdays. The status line names the server being asked. A server that answers is asked first for the rest of the session. A server that is rate-limited is waited on briefly when its status page says a slot frees up soon. Relation geometry falls back to the official OSM API after one round of Overpass servers. If everything fails, the message says why (busy, timed out, or offline) and lists each server's reason.
 
 ---
 
@@ -205,7 +207,7 @@ Click **Accept →** when the geometry is final — though you can return here a
 
 Build the station/stop list whose chainages are measured along the fitted alignment (identical to the LandXML stationing):
 
-- **⚡ Auto-detect** — queries OpenStreetMap for `railway=station`, `railway=halt` and train `stop_position` nodes within 100 m of the alignment (passenger facilities only; yards, service stations and freight-only sites are excluded). Each name appears once — the closest occurrence wins.
+- **⚡ Auto-detect** — queries OpenStreetMap for `railway=station`, `railway=halt` and train `stop_position` nodes within 100 m of the alignment (passenger facilities only; yards, service stations and freight-only sites are excluded). Each name appears once — the closest occurrence wins. If every Overpass server is down, it falls back to the stops that came with the railway in Step 1 (only those mapped on the track itself) and says so; run it again later for the full set. This fallback isn't available after reopening a saved project.
 - **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
 - **＋ Add row** — manual entry; edit the km value directly in the table.
 
@@ -347,16 +349,29 @@ pip install -r requirements.txt
 | `lxml` | LandXML file generation |
 | `shapely` | Geometry utilities |
 | `overpy` | Overpass API helper |
+| `keyring` | Stores the CARTO API key in Windows Credential Manager |
 
 ### Internet access
 
 | Service | Used for |
 |---|---|
-| Overpass API (`overpass-api.de`, `overpass.kumi.systems`) | Railway geometry and relation metadata |
-| CARTO / OpenStreetMap / OpenTopoMap / Esri / ČÚZK / OpenRailwayMap tile servers | Map background tiles |
+| Overpass API (`overpass-api.de` and its `lz4.` / `z.` backends, `overpass.private.coffee`, `maps.mail.ru`) | Railway geometry, relation metadata, station detection |
+| OSM API v0.6 (`api.openstreetmap.org`) | Fallback for relation geometry, metadata and the Czech line list |
+| CARTO (needs your API key) / OpenStreetMap / OpenTopoMap / Esri / ČÚZK / OpenRailwayMap tile servers | Map background tiles |
 | ČÚZK DMR 5G (`ags.cuzk.gov.cz`) | DEM elevation sampling (default) |
 | OpenTopoData API (`api.opentopodata.org`) | DEM elevation sampling (alternate / fallback) |
 | ČÚZK WMS (`services.cuzk.cz`) | Land register (katastrální mapa) overlay |
+
+### CARTO basemaps (API key)
+
+CARTO requires an API key on every tile request, and returns watermarked tiles without one. Until a key is set, the *CARTO Voyager* and *CARTO Dark Matter* entries are greyed out and the map uses OpenStreetMap in both light and dark themes.
+
+- **Get a key:** register a free one at [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey/) (free up to 5 M tile requests/month for non-commercial use), or ask the [author](https://github.com/surovskyjk).
+- **Enter it:** *Settings ▸ Preferences ▸ Map basemap*. The field is masked. The key is stored encrypted for your Windows account in Windows Credential Manager, never in the settings, the registry or a `.coypuf` project. Clear the field to remove it.
+- **Shared with COYPU:** if the Feeder has no key of its own, it uses the one saved by COYPU. Saving or removing a key in the Feeder never changes COYPU's.
+- **Scripted / development runs:** the `COYPU_FEEDER_MAP_API_KEY` environment variable (or COYPU's `COYPU_MAP_API_KEY`) is read when no stored key exists.
+- The key is only sent to `basemaps.cartocdn.com`, and is masked (`key=***`) in any map error message. Tiles are cached in memory only.
+- Keep the © OpenStreetMap contributors, © CARTO attribution visible (the map shows it). Never commit or bundle a key.
 
 ---
 
@@ -415,7 +430,7 @@ COYPU-Feeder/
     │       ├── step7_export.py   # CRS selection + LandXML/CSV export (step 9)
     │       └── _widgets.py       # Shared labelled-spinbox / combo / stat-row helpers
     ├── osm/
-    │   ├── query.py              # Overpass API queries (incl. station detection)
+    │   ├── query.py              # Overpass API queries (incl. station detection), mirror failover, OSM API fallback
     │   └── parser.py             # OSM way → Track objects
     ├── geometry/
     │   ├── alignment.py          # Element fitting + continuity enforcement
@@ -426,6 +441,7 @@ COYPU-Feeder/
     │   ├── profile.py            # Vertical profile model: smoothing, gradient clamp, PVI synthesis
     │   └── projection.py         # CRS transformations (pyproj)
     ├── app_meta.py              # Name / version / license / data sources
+    ├── basemap_key.py           # CARTO API key in the OS credential vault (port of COYPU's)
     ├── project_io.py            # .coypuf project save / load
     ├── data/
     │   ├── suggested_lines.py    # Curated Czech railway line database

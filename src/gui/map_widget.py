@@ -18,6 +18,7 @@ import os
 import socket
 import threading
 from collections import deque
+from urllib.parse import quote
 
 from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer, Qt
 from PySide6.QtWebChannel import QWebChannel
@@ -28,10 +29,15 @@ from PySide6.QtWidgets import (
     QComboBox, QCheckBox, QSizePolicy, QSlider,
 )
 
+import basemap_key
+
 # ---------------------------------------------------------------------------
 # Tile providers
 # ---------------------------------------------------------------------------
 
+# "carto": True marks the basemaps.cartocdn.com layers — CARTO requires the
+# user's API key (`?key=`) on every tile and watermarks keyless ones, so
+# those entries are greyed out until a key is set (Settings ▸ Preferences).
 TILE_PROVIDERS = [
     {
         "label":  "OpenStreetMap",
@@ -42,17 +48,19 @@ TILE_PROVIDERS = [
     },
     {
         "label":  "CARTO Dark Matter",
-        "url":    "https://{s}.basemaps.cartocdn.com/dark_matter/{z}/{x}/{y}.png",
+        "url":    "https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png",
         "subs":   "abcd",
         "attr":   "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> © <a href='https://carto.com/attributions'>CARTO</a>",
         "maxZoom": 20,
+        "carto":  True,
     },
     {
         "label":  "CARTO Voyager",
-        "url":    "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+        "url":    "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
         "subs":   "abcd",
         "attr":   "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> © <a href='https://carto.com/attributions'>CARTO</a>",
         "maxZoom": 20,
+        "carto":  True,
     },
     {
         "label":  "OpenTopoMap",
@@ -86,6 +94,19 @@ TILE_PROVIDERS = [
 
 # Default provider index
 _DEFAULT_PROVIDER = 0   # OpenStreetMap
+
+_CARTO_NEEDS_KEY_TIP = ("Needs a CARTO API key — add one in "
+                        "Settings ▸ Preferences ▸ Map basemap.")
+
+
+def tile_url(provider: dict, carto_key: str = "") -> str:
+    """Tile URL template for `provider`, with the CARTO key appended to
+    CARTO layers only — the key must never reach any other tile server."""
+    url = provider["url"]
+    if provider.get("carto") and carto_key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={quote(carto_key, safe='')}"
+    return url
 
 # Track colours (COYPU's categorical series palette)
 from gui.palette import TRACK_COLORS   # noqa: E402,F401
@@ -129,6 +150,8 @@ class DebugPage(QWebEnginePage):
         WARN  = QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel
         INFO  = QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel
         names = {ERROR: "ERROR", WARN: "WARN", INFO: "INFO"}
+        # A failed tile load can echo its URL — never let the CARTO key out.
+        message = basemap_key.redactKey(message)
         print(f"[MapJS {names.get(level,'LOG')}] {message}  (line {line_number})")
         if level == ERROR:
             self.js_error.emit(f"Map JS error: {message}")
@@ -211,6 +234,9 @@ class MapWidget(QWidget):
         self._last_highlight_ids: list | None = None
         self._js_aln_count: int | None = None
         self._legend_visible = True
+        # Held in memory only; it reaches the page solely inside CARTO tile
+        # URLs passed through runJavaScript (map.html on disk never sees it).
+        self._carto_key = basemap_key.loadKey()
         self._build()
         # Queued, so the page has its palette before the first draw call.
         self._push_page_theme()
@@ -238,6 +264,7 @@ class MapWidget(QWidget):
         self._provider_combo.activated.connect(self._on_provider_activated)
         self._user_provider_choice = False
         self._provider_combo.setFixedWidth(160)
+        self._apply_carto_availability()
 
         self._rail_chk = QCheckBox("🚂 Railway overlay")
         self._rail_chk.setChecked(True)
@@ -360,13 +387,15 @@ class MapWidget(QWidget):
     # Tile provider helpers
     # ------------------------------------------------------------------
 
-    def _apply_current_provider(self):
-        idx = self._provider_combo.currentIndex()
+    def _push_provider(self, idx: int):
         p = TILE_PROVIDERS[idx]
         self._run_js(
-            f"setTileProvider({json.dumps(p['url'])}, {json.dumps(p['subs'])}, "
-            f"{json.dumps(p['attr'])}, {p['maxZoom']})"
+            f"setTileProvider({json.dumps(tile_url(p, self._carto_key))}, "
+            f"{json.dumps(p['subs'])}, {json.dumps(p['attr'])}, {p['maxZoom']})"
         )
+
+    def _apply_current_provider(self):
+        self._push_provider(self._provider_combo.currentIndex())
         show_rail = self._rail_chk.isChecked()
         self._run_js(f"setRailOverlay({'true' if show_rail else 'false'})")
         show_cadastre = self._cadastre_chk.isChecked()
@@ -374,14 +403,43 @@ class MapWidget(QWidget):
         self._run_js(f"setCadastreOpacity({self._cadastre_opacity_slider.value() / 100})")
 
     def _on_provider_changed(self, idx: int):
-        p = TILE_PROVIDERS[idx]
-        self._run_js(
-            f"setTileProvider({json.dumps(p['url'])}, {json.dumps(p['subs'])}, "
-            f"{json.dumps(p['attr'])}, {p['maxZoom']})"
-        )
+        self._push_provider(idx)
 
     def _on_provider_activated(self, idx: int):
         self._user_provider_choice = True
+
+    def _apply_carto_availability(self):
+        """Grey out the CARTO entries while there is no key (keyless CARTO
+        tiles come back watermarked), and leave a CARTO basemap for
+        OpenStreetMap if the key just went away."""
+        has_key = bool(self._carto_key)
+        model = self._provider_combo.model()
+        for i, p in enumerate(TILE_PROVIDERS):
+            if not p.get("carto"):
+                continue
+            item = model.item(i)
+            item.setEnabled(has_key)
+            item.setToolTip("" if has_key else _CARTO_NEEDS_KEY_TIP)
+        if not has_key and TILE_PROVIDERS[self._provider_combo.currentIndex()].get("carto"):
+            self._provider_combo.setCurrentIndex(_DEFAULT_PROVIDER)
+
+    @property
+    def carto_api_key(self) -> str:
+        return self._carto_key
+
+    def set_carto_api_key(self, key: str):
+        """Apply a new CARTO key live: re-enable/grey the CARTO entries,
+        re-push the current basemap with the new URL, and let the theme
+        pick CARTO again unless the user chose a provider by hand."""
+        key = (key or "").strip()
+        if key == self._carto_key:
+            return
+        self._carto_key = key
+        self._apply_carto_availability()
+        # A changed key changes the URL string, so setTileProvider re-adds
+        # the layer instead of short-circuiting on "same provider".
+        self._push_provider(self._provider_combo.currentIndex())
+        self.set_theme(self._dark)
 
     def _on_rail_overlay_toggled(self, checked: bool):
         self._run_js(f"setRailOverlay({'true' if checked else 'false'})")
@@ -448,7 +506,11 @@ class MapWidget(QWidget):
         # of the basemap was also a visible flash on every theme change).
         if self._user_provider_choice:
             return
-        target = "CARTO Dark Matter" if dark else "CARTO Voyager"
+        # Without a key there is no keyless dark basemap — OSM for both.
+        if not self._carto_key:
+            target = "OpenStreetMap"
+        else:
+            target = "CARTO Dark Matter" if dark else "CARTO Voyager"
         for i, p in enumerate(TILE_PROVIDERS):
             if p["label"] == target:
                 if self._provider_combo.currentIndex() != i:
