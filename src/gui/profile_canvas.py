@@ -59,6 +59,8 @@ class ProfileCanvas(ThemedPanel, QWidget):
         armed — feeds the direct-connection table.
     hover_changed(float)
         Chainage under the cursor, or -1 when the cursor leaves the plot.
+        Only the canvas's own mouse emits it — set_cursor_station (the map
+        hovering the alignment) does not, so the two never echo.
     """
 
     range_picked   = Signal(float, float)
@@ -105,6 +107,13 @@ class ProfileCanvas(ThemedPanel, QWidget):
         self._view = None
         self._hover_x = None
         self._drag_from = self._drag_to = None
+        self.update()
+
+    def set_cursor_station(self, s: float) -> None:
+        """Show the crosshair and read-out at station *s* from outside (the
+        map's alignment hover); a negative *s* clears it. Never emits
+        hover_changed."""
+        self._hover_x = float(s) if s is not None and s >= 0 else None
         self.update()
 
     def set_pick_mode(self, on: bool) -> None:
@@ -336,7 +345,12 @@ class ProfileCanvas(ThemedPanel, QWidget):
             return
         p = self._profile
         s = np.asarray(p.s, dtype=float)
-        sv = float(np.clip(self._hover_x, s0, s1))
+        sv = float(self._hover_x)
+        # The canvas's own mouse is always inside the view; a station set
+        # from the map may lie in a part the zoom has scrolled away.
+        if not (s0 - 1e-6 <= sv <= s1 + 1e-6):
+            return
+        sv = float(np.clip(sv, s0, s1))
 
         pen = QPen(QColor(t["highlight"]), 1)
         pen.setStyle(Qt.PenStyle.DashLine)

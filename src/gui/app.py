@@ -58,6 +58,25 @@ def _replay_tail(log: list, already_replayed: int) -> tuple[list, int]:
     return log[already_replayed:], len(log)
 
 
+def _make_bottom_splitter(log_panel: QWidget, detail: QWidget) -> QSplitter:
+    """The bottom row under the map: log (left) + the shared detail slot.
+
+    Children must be made non-collapsible BEFORE the first setSizes():
+    a pane that setSizes() gives 0 px while collapsing is still allowed is
+    flagged collapsed, and that flag survives setChildrenCollapsible(False)
+    — which is how the profile canvas used to start hidden behind a
+    splitter handle at the right edge."""
+    splitter = QSplitter(Qt.Orientation.Horizontal)
+    splitter.addWidget(log_panel)
+    splitter.addWidget(detail)
+    # Never let a drag collapse either panel to zero (unrecoverable).
+    splitter.setChildrenCollapsible(False)
+    splitter.setStretchFactor(0, 1)
+    splitter.setStretchFactor(1, 3)
+    splitter.setSizes([280, 800])
+    return splitter
+
+
 class _ToolbarScrollArea(QScrollArea):
     """Horizontally-scrollable host for the main toolbar (Part C).
 
@@ -122,6 +141,11 @@ class App(QMainWindow):
         # The vertical counterpart of _pi_model: App is the single owner,
         # Step8Vertical mutates it in place and never replaces it.
         self._profile               = None   # VerticalProfile | None
+        # (s, lat, lon) along the current elements for the profile ↔ map
+        # hover link, built on first use; keyed on the elements list itself
+        # (every alignment change assigns a new list).
+        self._chainage_lookup       = None
+        self._chainage_lookup_for   = None
         self._xy_list: list         = []
         self._chainages_list: list  = []
         self._work_epsg: int        = 32633
@@ -1073,6 +1097,7 @@ class App(QMainWindow):
             "selected_indices": sel_idx,
             "pi_model":     self._pi_model,
             "stations":     self._stations,
+            "station_rules": self.step6_stations.rule_settings(),
             "profile":      self._profile,
         }
 
@@ -1195,9 +1220,10 @@ class App(QMainWindow):
                     self._elements, xy, chainages,
                     self._settings.get("check_interval", 5.0))
             self._update_metrics_chip()
-        if self._stations:
-            self.step6_stations.set_stations(self._stations)
-            self._on_stations_changed(self._stations)
+        # Always: the Sp rule settings are restored even without stations.
+        # set_stations announces the list (→ _on_stations_changed).
+        self.step6_stations.set_stations(self._stations,
+                                         rules=st.get("station_rules"))
         self._mark_stale()
         self._set_dirty(False)
         self._push_recent(path)
@@ -1240,29 +1266,24 @@ class App(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
-        # Map above; bottom half = log (left) + element table (right).
-        # The log is always visible; the table appears in Step 5 only.
+        # Map above; bottom half = log (left) + one shared detail slot
+        # (right). The slot is a stack: the element table, the stations
+        # table (Step 6) or the profile canvas (Step 8) — one page at a
+        # time (see _bottom_page), all sharing the same width, so a width
+        # the user dragged carries over from step to step.
         self.element_table = ElementTableDock()
-        self.element_table.setVisible(False)
-        self.element_table.setMinimumWidth(460)
         self.log_panel = LogPanel()
         self.log_panel.setMinimumWidth(220)
-        # The profile canvas shares the bottom row with the element
-        # table — only one of the two is ever visible (see _goto_step),
-        # so a longitudinal profile gets the full width it needs.
         self.profile_canvas = ProfileCanvas()
-        self.profile_canvas.setVisible(False)
-        self.profile_canvas.setMinimumWidth(460)
 
-        self._bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._bottom_splitter.addWidget(self.log_panel)
-        self._bottom_splitter.addWidget(self.element_table)
-        self._bottom_splitter.addWidget(self.profile_canvas)
-        self._bottom_splitter.setStretchFactor(0, 1)
-        self._bottom_splitter.setStretchFactor(1, 3)
-        self._bottom_splitter.setSizes([280, 800])
-        # Never let a drag collapse either panel to zero (unrecoverable).
-        self._bottom_splitter.setChildrenCollapsible(False)
+        self._detail_stack = QStackedWidget()
+        self._detail_stack.setMinimumWidth(460)
+        self._detail_stack.addWidget(self.element_table)
+        self._detail_stack.addWidget(self.profile_canvas)
+        self._detail_stack.setVisible(False)
+
+        self._bottom_splitter = _make_bottom_splitter(
+            self.log_panel, self._detail_stack)
 
         self.map_widget.setMinimumHeight(200)
         self._bottom_splitter.setMinimumHeight(90)
@@ -1298,6 +1319,10 @@ class App(QMainWindow):
         self.stack.addWidget(self.step6_crosssec)     # S_CROSSSEC
         self.stack.addWidget(self.step8_vertical)     # S_VERTICAL
         self.stack.addWidget(self.step7_export)       # S_EXPORT
+
+        # The stations table is built by Step 6 but lives in the wide
+        # bottom slot — the 340 px step panel cannot fit its columns.
+        self._detail_stack.addWidget(self.step6_stations.table_panel())
 
         h.addWidget(self.stack)
         self.statusBar().showMessage(
@@ -1380,6 +1405,10 @@ class App(QMainWindow):
 
         # Step 6 (stations) → map markers / click mode / navigation
         self.step6_stations.stations_changed.connect(self._on_stations_changed)
+        self.step6_stations.stations_edited.connect(lambda: self._set_dirty(True))
+        # Vertical profile ↔ map hover link (Step 8)
+        self.profile_canvas.hover_changed.connect(self._on_profile_hover)
+        self.map_widget.alignment_hovered.connect(self._on_map_alignment_hover)
         self.step6_stations.map_click_mode.connect(self._on_station_pick_mode)
         self.step6_stations.stations_done.connect(self._on_stations_done)
         self.step6_stations.back_requested.connect(lambda: self._goto_step(S_DESIGN))
@@ -1502,7 +1531,8 @@ class App(QMainWindow):
         ]),
         S_STATIONS: ("Step 6 — Stations", [
             "⚡ Auto-detect stations from OSM, 📍 place on map, or add rows.",
-            "The CSV (Station,Dwell Time,Name) is written next to the LandXML.",
+            "🏛 Municipality & population fills in where each stop lies (Sp rule).",
+            "COYPU's stops CSV is written next to the LandXML.",
         ]),
         S_CROSSSEC: ("Step 7 — Cross-Section", [
             "Optional terrain cross-slope check at perpendicular offsets.",
@@ -1591,12 +1621,13 @@ class App(QMainWindow):
         # The table/stats matter more than which step is being viewed once
         # there's a real alignment to inspect — the wizard sidebar remains
         # free, advisory-only navigation (see CLAUDE.md).
-        # The element table and the profile canvas share the bottom row.
-        self.element_table.setVisible(
-            self._pi_model is not None and idx != S_VERTICAL)
-        self.profile_canvas.setVisible(idx == S_VERTICAL)
+        page = self._bottom_page(idx)
+        self._detail_stack.setVisible(page is not None)
+        if page is not None:
+            self._detail_stack.setCurrentWidget(page)
         if changed_step:
             self._deactivate_all_tools()   # also disarms map dragging/pick modes
+            self._sync_profile_link(idx)
             self._ensure_interactive_alignment_shown(idx)
             self._clear_osm_relict_tracks(idx)
         tip = self._STEP_TIPS.get(idx)
@@ -1604,6 +1635,64 @@ class App(QMainWindow):
             self.log_panel.log_step(tip[0], tip[1])
             self._step_label.setText(tip[0])
         self._refresh_nav()
+
+    # ------------------------------------------------------------------
+    # Vertical profile ↔ map hover link
+    # ------------------------------------------------------------------
+
+    def _get_chainage_lookup(self):
+        """(s, lat, lon) along the current alignment, or None."""
+        if not self._elements:
+            return None
+        if self._chainage_lookup is None or self._chainage_lookup_for is not self._elements:
+            from geometry.profile import chainage_lookup
+            try:
+                self._chainage_lookup = chainage_lookup(self._elements, self._work_epsg)
+            except Exception as exc:
+                self._chainage_lookup = None
+                self.log_panel.log(f"⚠ Profile/map hover link unavailable: {exc}", "warn")
+                return None
+            self._chainage_lookup_for = self._elements
+        return self._chainage_lookup
+
+    def _sync_profile_link(self, idx: int):
+        """Arm the map → profile hover direction in the Vertical Profile
+        step only; leaving it removes the link and the dot."""
+        if idx == S_VERTICAL:
+            lookup = self._get_chainage_lookup()
+            if lookup is not None and len(lookup[0]) > 1:
+                self.map_widget.set_profile_link(*lookup)
+                return
+        self.map_widget.clear_profile_link()
+
+    def _on_profile_hover(self, s: float):
+        """Profile → map: the dot follows the station under the profile
+        cursor and disappears when the cursor leaves the profile."""
+        from geometry.profile import latlon_at_s
+        ll = None
+        if self._current_step == S_VERTICAL and s >= 0:
+            ll = latlon_at_s(self._get_chainage_lookup(), s)
+        if ll is None:
+            self.map_widget.clear_track_cursor()
+        else:
+            self.map_widget.set_track_cursor(*ll)
+
+    def _on_map_alignment_hover(self, s: float):
+        """Map → profile: the crosshair follows the station under the mouse
+        while it is near the alignment (-1 clears it)."""
+        if self._current_step == S_VERTICAL:
+            self.profile_canvas.set_cursor_station(s)
+
+    def _bottom_page(self, idx: int):
+        """The page the bottom detail slot shows on step *idx* (None hides
+        the slot, leaving the log the whole row): the profile in its own
+        step, the stations table in its own, otherwise the element table
+        once there is a PI model to inspect."""
+        if idx == S_VERTICAL:
+            return self.profile_canvas
+        if idx == S_STATIONS:
+            return self.step6_stations.table_panel()
+        return self.element_table if self._pi_model is not None else None
 
     # Steps whose map view is expected to show the interactive per-element
     # alignment (hover/click/highlight bindings) rather than tracks/
@@ -1651,6 +1740,7 @@ class App(QMainWindow):
     def _mark_stale(self):
         """The alignment changed — downstream steps must re-read it."""
         self._stale.update(self._DOWNSTREAM)
+        self._chainage_lookup = None
         self._set_dirty(True)
 
     def closeEvent(self, event):
@@ -2446,7 +2536,10 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_stations_changed(self, stations: list):
-        """Live station markers on the map."""
+        """Keep App's list current (save/export read it, not only "Next")
+        and refresh the live station markers on the map."""
+        self._stations = list(stations)
+        self.step7_export.set_stations(self._stations)
         payload = [
             {"name": s.name, "latlon": [s.latlon[0], s.latlon[1]],
              "km": s.chainage_m / 1000.0}
@@ -2558,6 +2651,7 @@ class App(QMainWindow):
         self._stations           = []
         self._osm_stop_nodes     = []
         self._profile            = None
+        self._chainage_lookup    = None
         self._xy_list            = []
         self._chainages_list     = []
         self._done_steps         = set()

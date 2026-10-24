@@ -69,6 +69,9 @@ MAP_COLORS = {
     "piOmitted":       "#9e9e9e",
     "stationBorder":   "#4a148c",   # station marker
     "stationFill":     "#ffd54f",
+    # Vertical-profile hover dot (COYPU's track-cursor ring and fill).
+    "profileCursor":     "#2f6fb5",
+    "profileCursorFill": "#ffffff",
 }
 
 # Factory default for the OSM reference overlay preference (see app.py).

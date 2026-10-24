@@ -195,8 +195,9 @@ class Step7Export(ThemedPanel, QWidget):
         settings      : dict from Step3Configure (no epsg/force_positive here)
         work_epsg     : internal auto-UTM EPSG used during candidate fitting
         xy_list       : projected coordinates per track in work_epsg (for display)
-        stations      : list[stationing.Station] — written as a CSV next to
-                        the LandXML file (Station,Dwell Time,Name)
+        stations      : list[stationing.Station] — written next to the
+                        LandXML file as COYPU's stops CSV (see
+                        geometry.stationing)
         vertical_list : list of vertical-element lists (one per track) as
                         confirmed in the Vertical Profile step. When given,
                         the export uses them verbatim instead of querying
@@ -218,6 +219,11 @@ class Step7Export(ThemedPanel, QWidget):
         self._start_btn.setEnabled(True)
         self._back_btn.setEnabled(True)
         self._post_frame.setVisible(False)
+
+    def set_stations(self, stations: list):
+        """Swap in the current station list without resetting the step
+        (stations do not change the geometry being exported)."""
+        self._stations = list(stations or [])
 
     # ------------------------------------------------------------------
     # Internal

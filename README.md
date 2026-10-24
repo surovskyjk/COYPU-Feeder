@@ -45,9 +45,9 @@ No Python installation required.
 - **Project files (`.coypuf`)** — save and resume work; self-contained (OSM tracks + editable PI model + stations + sampled vertical profile), so reopening needs no network and no re-fitting. Files from earlier versions open unchanged; a file from a *newer* build still opens, with a warning that data this version doesn't know about is dropped on save
 - **PI display** — Points of Intersection as markers (lockable/draggable in Edit mode), virtual tangent extensions dashed light-grey
 - **Hover inspection** — elements glow on hover; a 3-second hover shows ID, parameters and deviation statistics
-- **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment and exported as a `Station,Dwell Time,Name` CSV consistent with the LandXML stationing
+- **Stations & stops** — OSM auto-detection (passenger stations/halts only), map click-to-place or manual entry; chainage estimated along the alignment. A separate lookup fills in each stop's **municipality and population** (OSM boundaries + Wikidata), and the **Os / Sp / Ex stopping patterns** follow COYPU's rules with manual overrides. Exported as **COYPU's stops CSV**, consistent with the LandXML stationing and importable in COYPU as-is
 - **Cross-section computation** — perpendicular deviations between the chosen candidate and the OSM polyline (optional analysis)
-- **Vertical profile** — terrain sampled from the DEM along the *fitted* centreline (so `<Profile>` and `<CoordGeom>` share one station axis), then smoothed into constant-grade tangents under a **hard maximum gradient** with either a gradient-constrained simplification or a moving-window filter. Live preview on an interactive profile chart (terrain, design line, PVIs; wheel zoom, drag pan, hover read-out), with a cut/fill read-out wherever the terrain is steeper than the limit. Tunnels and viaducts can be bridged with **direct connections** (straight-line ranges whose ends become fixed PVIs). Persisted in the project file.
+- **Vertical profile** — terrain sampled from the DEM along the *fitted* centreline (so `<Profile>` and `<CoordGeom>` share one station axis), then smoothed into constant-grade tangents under a **hard maximum gradient** with either a gradient-constrained simplification or a moving-window filter. Live preview on an interactive profile chart under the map (terrain, design line, PVIs; wheel zoom, drag pan, hover read-out, linked to the map: hovering the profile shows the matching point on the track and vice versa), with a cut/fill read-out wherever the terrain is steeper than the limit. Tunnels and viaducts can be bridged with **direct connections** (straight-line ranges whose ends become fixed PVIs). Persisted in the project file.
 - **LandXML 1.2 export** — COYPU-compatible structure with horizontal + vertical geometry (the confirmed vertical profile is written verbatim, and shown in the LandXML preview), Cant block (0 mm placeholders) and CRS metadata
 - **Dark / light mode** — automatic, or forced from Settings ▸ Preferences (with adjustable font size)
 - **Engineering defaults** — Settings ▸ Preferences also holds app-wide defaults (min curve radius, spiral length, deviation tolerance, and a few normally-hardcoded fitting thresholds) that pre-fill Step 3 for a *new* project; each project can still override them there — changing these only affects projects started afterward
@@ -90,7 +90,7 @@ A **deviation-metrics chip** in the status bar (Δmean / RMSE / Δmax / C1 / ele
 
 ## Working with projects
 
-The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine & Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically; a sampled vertical profile that no longer matches the edited horizontal geometry is flagged so you can re-sample). The **element table** follows the alignment rather than the step: once a project has a real PI model (from fitting or from opening a `.coypuf` file) it stays visible under the map through Stations, Cross-section and Export too, not just in Refine & Consolidate (the Vertical Profile step swaps it for the profile chart) — the sidebar is there for orientation, but a lot of real work is re-opening a saved project and editing directly.
+The nine steps **suggest** an order — they do not lock you into one. Any step whose data exists is clickable in the sidebar at any time (the recommended next one is accented ▸; a locked step's tooltip says what it needs). Edit the alignment in *Refine & Consolidate* whenever you like — even after exporting — and the later steps refresh themselves from the current geometry when you open them (station chainages are re-snapped automatically; a sampled vertical profile that no longer matches the edited horizontal geometry is flagged so you can re-sample). The **element table** follows the alignment rather than the step: once a project has a real PI model (from fitting or from opening a `.coypuf` file) it stays visible under the map through Cross-section and Export too, not just in Refine & Consolidate (the Stations step swaps it for the station table and the Vertical Profile step for the profile chart; all three share one panel, so a width you drag is kept) — the sidebar is there for orientation, but a lot of real work is re-opening a saved project and editing directly.
 
 Save your work with **File ▸ Save project** (`Ctrl+S`) to a `.coypuf` file and pick it up later with **File ▸ Open project** (`Ctrl+O`) or the *Recent projects* list. The file is XML in the same house style as the LandXML output and is **self-contained** — the OSM track nodes, the editable PI model (every radius/spiral override, omitted PI and merge state), settings and stations. Reopening needs no network and re-runs no fitting: the element chain is regenerated from the model exactly as you left it. The title bar shows the project name and marks unsaved changes with `*`.
 
@@ -211,12 +211,22 @@ Build the station/stop list whose chainages are measured along the fitted alignm
 - **📍 Place on map** — click the map; the point is snapped to the alignment and you are asked for a name.
 - **＋ Add row** — manual entry; edit the km value directly in the table.
 
-Station [km], Dwell [s] (default 30) and Name are editable; names must be unique. The list is exported in Step 9 as a CSV next to the LandXML file (💾 Export CSV… saves it any time):
+- **🏛 Municipality & population** — a separate lookup, so a missing or unreachable source never gets in the way of detecting the stations themselves. It finds the municipality each stop lies in from the OpenStreetMap administrative boundaries (Overpass `is_in`; in Czechia the obec carrying the LAU code — so a stop in Prague belongs to *Praha*, not to the city district) and its number of inhabitants from Wikidata (*population*, P1082 — refreshed every year from the Czech Statistical Office), falling back to the OSM `population` tag, which is often years old. Rows whose municipality or population you typed in are left alone; clear both to have a row looked up again.
+
+The station table sits in the wide panel under the map. km, Dwell [s] (default 30), Name, Municipality and Population are editable (names must be unique; `12 500`, `12,500` and `12.500` all read as 12 500). The **Os / Sp / Ex** columns say which trains stop there, with the same rules COYPU uses:
+
+- **Os** (local) — every stop, unless you untick it;
+- **Sp** (semi-fast) — the first and last stop, and every stop whose municipality has at least the **Sp threshold** inhabitants (default 2 000; a stop without a known population never qualifies). Untick *Automatic* to set Sp by hand only;
+- **Ex** (express) — the first and last stop.
+
+Ticking Sp or Ex yourself is a manual override, marked ✎ in italics; it survives threshold changes until **Reset overrides**. The list is exported in Step 9 next to the LandXML file as COYPU's stops CSV (💾 Export CSV… saves it any time), which COYPU's *Stops ▸ Import CSV* reads unchanged — same flags, and only your own ticks arrive as manual overrides when both programs use the same threshold. For example (km values illustrative; an empty population means unknown):
 
 ```csv
-Station,Dwell Time,Name
-1.234,30,Praha hl.n.
-5.678,30,Řevnice
+stopName,stationingKm,dwellTimeS,municipalityName,population,stopInOs,stopInSp,stopInEx
+Kolín,0.000,30,Kolín,33444,1,1,1
+Some halt,4.250,30,Some village,640,1,0,0
+Other stop,7.900,30,,,1,0,0
+Kutná Hora hl.n.,12.100,30,Kutná Hora,21642,1,1,1
 ```
 
 ---
@@ -245,7 +255,7 @@ Terrain elevation is sampled **once**, along the *fitted* centreline (not the ra
 
 **Direct connections (tunnels / bridges)** — **＋ Add range** (or **📍 Pick on profile**, then drag across the chart) replaces the terrain inside a station range with a straight line between its boundary elevations. The range ends become fixed PVIs, so no smoothing can remove them and the gradient clamp still reaches them.
 
-The chart shows the terrain, the design profile and any connections; **wheel** zooms, **drag** pans and hovering reads out chainage and elevation. The *Profile* read-out reports the achieved max gradient, min/max elevation, max cut/fill and PVI/sample counts. If you later edit the horizontal alignment, the step warns that the sampled profile no longer matches it so you can re-sample.
+The chart shows the terrain, the design profile and any connections; **wheel** zooms, **drag** pans and hovering reads out chainage and elevation. Hovering is linked to the map: a blue dot marks the same chainage on the track, and moving the mouse along the alignment on the map moves the profile's crosshair in turn. The *Profile* read-out reports the achieved max gradient, min/max elevation, max cut/fill and PVI/sample counts. If you later edit the horizontal alignment, the step warns that the sampled profile no longer matches it so you can re-sample.
 
 Click **Apply / Confirm Profile →** to hand the profile to the export. Skipping this step is still possible — the export then falls back to sampling along the OSM polyline.
 
@@ -255,7 +265,7 @@ Click **Apply / Confirm Profile →** to hand the profile to the export. Skippin
 
 1. Choose an output CRS from the preset list or enter a custom EPSG code
 2. Click **Browse…** and choose an output `.xml` file path
-3. Click **▶ Start Export** — the LandXML and the stations CSV (`same-name.csv`) are written together
+3. Click **▶ Start Export** — the LandXML and the stations as COYPU's stops CSV (`same-name.csv`) are written together
 
 **Available CRS presets:**
 

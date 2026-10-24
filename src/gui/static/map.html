@@ -99,6 +99,9 @@ map.createPane('crossSectionPane').style.zIndex = '625';
    over the whole viewport before a marker/badge underneath ever sees them. */
 map.createPane('piPane').style.zIndex          = '655';
 map.createPane('stationPane').style.zIndex     = '660';
+/* The vertical-profile hover dot: above everything, never clickable. */
+map.createPane('cursorPane').style.zIndex      = '670';
+map.getPane('cursorPane').style.pointerEvents  = 'none';
 
 /* Canvas renderers for the alignment: a long line has hundreds of elements,
    and one SVG path per element makes pan/zoom crawl. Canvas draws them all
@@ -126,6 +129,7 @@ var _csRenderer   = L.canvas({ pane: 'crossSectionPane',  padding: 2.0 });
    both once a project has stations recorded). */
 var _piRenderer      = L.svg({ pane: 'piPane' });
 var _stationRenderer = L.svg({ pane: 'stationPane' });
+var _cursorRenderer  = L.svg({ pane: 'cursorPane' });
 
 var baseLayer       = null;
 var railOverlay     = null;
@@ -969,6 +973,114 @@ function setSplitClickMode(on) {
   map.getContainer().style.cursor = on ? 'crosshair' : '';
 }
 
+/* ── Vertical-profile hover link (Step 8) ──────────────────────────
+   One dot on the track. Python moves it to the station under the profile
+   cursor (setTrackCursor); the reverse direction reports the station under
+   the mouse back to Python while the mouse is near the alignment, so the
+   profile crosshair follows. The link is the (s, lat, lon) polyline from
+   geometry.profile.chainage_lookup, set only while Step 8 is open. */
+var _trackCursor        = null;
+var _profileLink        = null;    // {s: [], lat: [], lon: []}
+var _profileLinkActive  = false;   // the dot is following the mouse
+var _profileLinkPending = null;
+var _profileLinkTimer   = null;
+var PROFILE_LINK_THROTTLE_MS = 40;
+var PROFILE_LINK_SNAP_PX     = 18;
+
+function setTrackCursor(lat, lon) {
+  if (_trackCursor === null) {
+    _trackCursor = L.circleMarker([lat, lon], {
+      radius: 7, weight: 3, interactive: false,
+      color: MAP_COLORS.profileCursor || '#2f6fb5',
+      fillColor: MAP_COLORS.profileCursorFill || '#ffffff', fillOpacity: 1.0,
+      pane: 'cursorPane', renderer: _cursorRenderer
+    }).addTo(map);
+  } else {
+    _trackCursor.setLatLng([lat, lon]);
+  }
+}
+
+function clearTrackCursor() {
+  if (_trackCursor !== null) { try { map.removeLayer(_trackCursor); } catch(e){} }
+  _trackCursor = null;
+}
+
+function setProfileLink(link) {
+  _profileLink = (link && link.s && link.s.length > 1) ? link : null;
+  _profileLinkActive = false;
+}
+
+function clearProfileLink() {
+  _profileLink = null;
+  _profileLinkActive = false;
+  _profileLinkPending = null;
+  clearTrackCursor();
+}
+
+/* Station and position on the link polyline nearest to latlng, projected
+   per segment in a local frame where cos(lat) scales the longitude. */
+function _nearestOnProfileLink(latlng) {
+  var s = _profileLink.s, la = _profileLink.lat, lo = _profileLink.lon;
+  var k = Math.cos(latlng.lat * Math.PI / 180);
+  var px = latlng.lng * k, py = latlng.lat;
+  var bestI = -1, bestT = 0, bestD = Infinity;
+  for (var i = 0; i + 1 < s.length; i++) {
+    var ax = lo[i] * k, ay = la[i];
+    var dx = lo[i + 1] * k - ax, dy = la[i + 1] - ay;
+    var len2 = dx * dx + dy * dy;
+    var t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    var ex = px - (ax + t * dx), ey = py - (ay + t * dy);
+    var d = ex * ex + ey * ey;
+    if (d < bestD) { bestD = d; bestI = i; bestT = t; }
+  }
+  if (bestI < 0) return null;
+  return { s:   s[bestI]  + bestT * (s[bestI + 1]  - s[bestI]),
+           lat: la[bestI] + bestT * (la[bestI + 1] - la[bestI]),
+           lon: lo[bestI] + bestT * (lo[bestI + 1] - lo[bestI]) };
+}
+
+function _profileLinkLeave() {
+  if (!_profileLinkActive) return;
+  _profileLinkActive = false;
+  clearTrackCursor();
+  if (backend && backend.on_alignment_hover) backend.on_alignment_hover(-1.0);
+}
+
+function _profileLinkMove(ev) {
+  var hit = _nearestOnProfileLink(ev.latlng);
+  if (hit) {
+    var at = map.latLngToContainerPoint([hit.lat, hit.lon]);
+    if (at.distanceTo(ev.containerPoint) <= PROFILE_LINK_SNAP_PX) {
+      _profileLinkActive = true;
+      setTrackCursor(hit.lat, hit.lon);
+      if (backend && backend.on_alignment_hover) backend.on_alignment_hover(hit.s);
+      return;
+    }
+  }
+  _profileLinkLeave();
+}
+
+/* Trailing throttle: the newest mouse position is handled once per
+   PROFILE_LINK_THROTTLE_MS, so the last move (e.g. off the track) is
+   never dropped. */
+map.on('mousemove', function(ev) {
+  if (!_profileLink) return;
+  _profileLinkPending = ev;
+  if (_profileLinkTimer !== null) return;
+  _profileLinkTimer = setTimeout(function() {
+    _profileLinkTimer = null;
+    var e = _profileLinkPending;
+    _profileLinkPending = null;
+    if (e && _profileLink) _profileLinkMove(e);
+  }, PROFILE_LINK_THROTTLE_MS);
+});
+
+map.on('mouseout', function() {
+  _profileLinkPending = null;
+  _profileLinkLeave();
+});
+
 map.on('click', function(ev) {
   if (_stationClickMode && backend && backend.on_map_clicked) {
     backend.on_map_clicked(ev.latlng.lat, ev.latlng.lng);
@@ -1081,6 +1193,7 @@ function clearAll() {
   clearCrossSection();
   clearPIOverlay();
   clearStations();
+  clearProfileLink();
 }
 </script>
 </body>

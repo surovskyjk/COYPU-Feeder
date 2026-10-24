@@ -916,8 +916,8 @@ def stops_from_elements(elements: list[dict]) -> list[dict]:
     works on the tagged track nodes of a fetch_relation_ways() result (the
     fallback when Overpass is down).
 
-    Returns a list of dicts: {"name": str, "lat": float, "lon": float,
-    "kind": "station"|"halt"|"stop_position"}.
+    Returns a list of dicts: {"id": int | None, "name": str, "lat": float,
+    "lon": float, "kind": "station"|"halt"|"stop_position"}.
 
     Freight-only and non-passenger facilities (yards, service stations,
     junctions, crossovers, sites with passenger=no) are excluded.
@@ -944,6 +944,7 @@ def stops_from_elements(elements: list[dict]) -> list[dict]:
             continue
         kind = tags.get("railway") or "stop_position"
         results.append({
+            "id":   el.get("id"),
             "name": tags.get("name", ""),
             "lat":  float(el.get("lat", 0.0)),
             "lon":  float(el.get("lon", 0.0)),
@@ -975,3 +976,113 @@ out body;
 """
     data = _run_query(query, progress_cb=progress_cb, timeout=T_STATIONS)
     return stops_from_elements(data.get("elements", []))
+
+
+# ---------------------------------------------------------------------------
+# Municipality of a point (the administrative areas containing it)
+# ---------------------------------------------------------------------------
+
+T_MUNICIPALITY     = 60
+MUNICIPALITY_BATCH = 25     # is_in lookups per query
+
+# Czech municipality (obec) LAU code: district code + 6-digit kód obce,
+# e.g. Kolín "CZ0204533165", Praha "CZ0100554782".
+_CZ_MUNICIPALITY_REF = re.compile(r"^CZ\d{10}$")
+# Fallback admin levels, the most municipality-like first: 8 is the
+# municipality in most of Europe (CZ, DE, AT), 9 in Slovakia, 7 in Poland.
+_MUNICIPALITY_LEVELS = ("8", "9", "7")
+
+
+def _int_tag(text) -> Optional[int]:
+    digits = re.sub(r"[\s  ]", "", str(text or ""))
+    return int(digits) if digits.isdigit() else None
+
+
+def _year_of(text) -> Optional[int]:
+    m = re.match(r"\s*(\d{4})", str(text or ""))
+    return int(m.group(1)) if m else None
+
+
+def pick_municipality(areas: list[dict]) -> Optional[dict]:
+    """
+    The municipality among the administrative *areas* (Overpass tag dicts)
+    containing one point.
+
+    A Czech LAU-coded area wins outright — that is the obec whatever its
+    admin_level (Prague's is level 6, while level 9 there is a city district
+    such as "Praha 2"); otherwise the first of admin_level 8, 9, 7.
+
+    Returns {"name", "wikidata", "population", "population_year", "ref"}
+    (population from the OSM tag, None when untagged) or None.
+    """
+    named = [a for a in areas if (a.get("name") or "").strip()]
+    chosen = next((a for a in named
+                   if _CZ_MUNICIPALITY_REF.match(a.get("ref") or "")), None)
+    for level in _MUNICIPALITY_LEVELS:
+        if chosen is not None:
+            break
+        chosen = next((a for a in named if a.get("admin_level") == level), None)
+    if chosen is None:
+        return None
+    return {
+        "name":            chosen["name"].strip(),
+        "wikidata":        (chosen.get("wikidata") or "").strip(),
+        "population":      _int_tag(chosen.get("population")),
+        "population_year": _year_of(chosen.get("population:date")),
+        "ref":             chosen.get("ref") or "",
+    }
+
+
+def _municipality_query(points: list[tuple[float, float]]) -> str:
+    # A `make stn` marker before each lookup: Overpass prints statements in
+    # order, so the markers split the areas back into one group per point.
+    blocks = [
+        f'make stn idx="{i}"; out;\n'
+        f"is_in({lat:.7f},{lon:.7f})->.a;\n"
+        'area.a["boundary"="administrative"]["admin_level"~"^[6-9]$"];\n'
+        "out tags;"
+        for i, (lat, lon) in enumerate(points)
+    ]
+    return _ql_header(T_MUNICIPALITY, SMALL_MAXSIZE) + "\n" + "\n".join(blocks)
+
+
+def _areas_by_marker(elements: list[dict], n: int) -> list[list[dict]]:
+    """Split a marker-separated is_in result into the area tag dicts of
+    each of the *n* points."""
+    out: list[list[dict]] = [[] for _ in range(n)]
+    cur: Optional[int] = None
+    for el in elements:
+        if el.get("type") == "stn":
+            try:
+                cur = int((el.get("tags") or {}).get("idx"))
+            except (TypeError, ValueError):
+                cur = None
+        elif el.get("type") == "area" and cur is not None and 0 <= cur < n:
+            out[cur].append(el.get("tags") or {})
+    return out
+
+
+def fetch_municipalities(
+    points: list[tuple[float, float]],
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> list[Optional[dict]]:
+    """
+    The municipality (see pick_municipality) of every (lat, lon) in
+    *points*, None where no administrative area matched.
+
+    One Overpass is_in lookup per point, MUNICIPALITY_BATCH points per
+    query; boundaries rarely change, so results are cached for a day.
+    Raises OverpassUnavailable.
+    """
+    pts = list(points)
+    starts = range(0, len(pts), MUNICIPALITY_BATCH)
+    result: list[Optional[dict]] = []
+    for b, start in enumerate(starts, 1):
+        chunk = pts[start:start + MUNICIPALITY_BATCH]
+        if progress_cb:
+            progress_cb(f"Looking up municipalities ({b}/{len(starts)})…")
+        data = _run_query(_municipality_query(chunk), progress_cb=progress_cb,
+                          ttl=_CACHE_TTL_RELATION, timeout=T_MUNICIPALITY)
+        result += [pick_municipality(areas) for areas in
+                   _areas_by_marker(data.get("elements", []), len(chunk))]
+    return result

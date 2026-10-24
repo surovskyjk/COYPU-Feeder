@@ -171,6 +171,7 @@ class MapBridge(QObject):
     pi_restore_requested = Signal(int)           # pi index (edit-mode restore badge)
     pi_drag_start      = Signal(int)                # pi index — drag gesture began
     pi_drag_preview     = Signal(int, float, float)  # pi index, lat, lon — live, throttled
+    alignment_hovered  = Signal(float)              # station under the mouse, -1 = off
 
     @Slot(float, float, float, float)
     def on_bounds_ready(self, s, w, n, e):
@@ -208,6 +209,10 @@ class MapBridge(QObject):
     def on_pi_drag_preview(self, pi_index, lat, lon):
         self.pi_drag_preview.emit(pi_index, lat, lon)
 
+    @Slot(float)
+    def on_alignment_hover(self, station):
+        self.alignment_hovered.emit(station)
+
 
 # ---------------------------------------------------------------------------
 # MapWidget
@@ -223,6 +228,9 @@ class MapWidget(QWidget):
     pi_restore_requested = Signal(int)            # pi index (edit-mode restore badge)
     pi_drag_start       = Signal(int)                # pi index — drag gesture began
     pi_drag_preview     = Signal(int, float, float)  # pi index, lat, lon — live, throttled
+    # Vertical-profile link: the station under the mouse while it is near
+    # the alignment, -1 once it leaves (see set_profile_link).
+    alignment_hovered   = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,6 +242,9 @@ class MapWidget(QWidget):
         self._last_highlight_ids: list | None = None
         self._js_aln_count: int | None = None
         self._legend_visible = True
+        # Profile-hover dot: the newest requested position, flushed once per
+        # frame (None clears the dot).
+        self._cursor_pending: tuple[float, float] | None = None
         # Held in memory only; it reaches the page solely inside CARTO tile
         # URLs passed through runJavaScript (map.html on disk never sees it).
         self._carto_key = basemap_key.loadKey()
@@ -312,6 +323,7 @@ class MapWidget(QWidget):
         self._bridge.pi_restore_requested.connect(self.pi_restore_requested)
         self._bridge.pi_drag_start.connect(self.pi_drag_start)
         self._bridge.pi_drag_preview.connect(self.pi_drag_preview)
+        self._bridge.alignment_hovered.connect(self.alignment_hovered)
 
         # Serve gui/static/ (which contains map.html) over a local HTTP
         # server. Using http://127.0.0.1 as origin removes ALL cross-origin
@@ -330,6 +342,10 @@ class MapWidget(QWidget):
         self._ready_timer.setSingleShot(True)
         self._ready_timer.timeout.connect(self._on_ready_timeout)
         self._ready_timer.start(12_000)
+
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setSingleShot(True)
+        self._cursor_timer.timeout.connect(self._flush_track_cursor)
 
     # ------------------------------------------------------------------
     # Ready / queue
@@ -747,6 +763,54 @@ class MapWidget(QWidget):
 
     def clear_stations(self):
         self._run_js("clearStations()")
+
+    # ------------------------------------------------------------------
+    # Vertical-profile hover link (Step 8)
+    # ------------------------------------------------------------------
+
+    _CURSOR_COALESCE_MS = 16
+
+    def set_track_cursor(self, lat: float, lon: float):
+        """Show the profile-hover dot at (lat, lon).
+
+        Hover ticks arrive far faster than the page can use them, so calls
+        are coalesced to one per frame — and dropped rather than queued
+        before the map is ready, where they would only replay stale
+        positions."""
+        self._queue_track_cursor((float(lat), float(lon)))
+
+    def clear_track_cursor(self):
+        self._queue_track_cursor(None)
+
+    def _queue_track_cursor(self, pos):
+        if not self._map_ready:
+            return
+        self._cursor_pending = pos
+        if not self._cursor_timer.isActive():
+            self._cursor_timer.start(self._CURSOR_COALESCE_MS)
+
+    def _flush_track_cursor(self):
+        pos = self._cursor_pending
+        if pos is None:
+            self._run_js("clearTrackCursor()")
+        else:
+            self._run_js(f"setTrackCursor({pos[0]:.7f}, {pos[1]:.7f})")
+
+    def set_profile_link(self, s, lat, lon):
+        """Arm the map → profile direction: hovering near the alignment
+        reports the station under the mouse (``alignment_hovered``) and
+        moves the dot there. *s* / *lat* / *lon* are the arrays of
+        geometry.profile.chainage_lookup."""
+        self._run_js_call("setProfileLink", {
+            "s":   [round(float(v), 3) for v in s],
+            "lat": [round(float(v), 7) for v in lat],
+            "lon": [round(float(v), 7) for v in lon],
+        })
+
+    def clear_profile_link(self):
+        """Disarm the profile link and remove the dot."""
+        self._cursor_pending = None
+        self._run_js("clearProfileLink()")
 
     def set_station_click_mode(self, on: bool):
         """Arm/disarm the click-to-place-station mode (crosshair cursor)."""

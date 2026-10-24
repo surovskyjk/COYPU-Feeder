@@ -28,6 +28,8 @@ from geometry.profile import (  # noqa: E402
     METHOD_WINDOW, DirectConnection, VerticalProfile, rebuild_profile,
 )
 
+# The version attribute this build writes (the legacy fixtures rewrite it).
+CURRENT = f'version="{project_io.FILE_VERSION}"'
 VP_BLOCK = re.compile(r"\s*<VerticalProfile.*?</VerticalProfile>", re.S)
 
 
@@ -158,7 +160,7 @@ class TestLegacy:
     @pytest.mark.parametrize("version", ["1.0", "1.1", "1.2", "1.3"])
     def test_pre_2_0_file_loads_without_a_profile(self, tmp_path, version):
         raw = io.open(_save(tmp_path, _profile()), encoding="utf-8").read()
-        doc = VP_BLOCK.sub("", raw).replace('version="2.0"',
+        doc = VP_BLOCK.sub("", raw).replace(CURRENT,
                                             f'version="{version}"')
         st = project_io.load_project(_rewrite(tmp_path, doc))
         assert st["profile"] is None
@@ -166,7 +168,7 @@ class TestLegacy:
 
     def test_missing_version_attribute_defaults_to_1_0(self, tmp_path):
         raw = io.open(_save(tmp_path, _profile()), encoding="utf-8").read()
-        doc = VP_BLOCK.sub("", raw).replace(' version="2.0"', "")
+        doc = VP_BLOCK.sub("", raw).replace(' ' + CURRENT, "")
         assert project_io.load_project(_rewrite(tmp_path, doc))["profile"] is None
 
     def test_block_present_but_empty(self, tmp_path):
@@ -190,7 +192,7 @@ class TestLegacy:
 
     def test_a_newer_file_warns_but_still_opens(self, tmp_path):
         raw = io.open(_save(tmp_path, _profile()), encoding="utf-8").read()
-        doc = raw.replace('version="2.0"', 'version="3.5"')
+        doc = raw.replace(CURRENT, 'version="3.5"')
         st = project_io.load_project(_rewrite(tmp_path, doc))
         assert st["profile"] is not None
         assert "newer build" in (st["version_warning"] or "")
@@ -210,7 +212,7 @@ class TestLegacy:
             "selected_indices": [0], "settings": {"vc_length": 120.0},
         })
         doc = io.open(legacy_path, encoding="utf-8").read().replace(
-            'version="2.0"', 'version="1.3"')
+            CURRENT, 'version="1.3"')
         st = project_io.load_project(_rewrite(tmp_path, doc))
         assert st["profile"] is None
         assert st["step"] == 8                       # old Export → new Export
@@ -232,4 +234,4 @@ class TestLegacy:
         assert back["profile"] is not None
         assert len(back["profile"].connections) == 2
         raw = io.open(upgraded, encoding="utf-8").read()
-        assert 'version="2.0"' in raw
+        assert CURRENT in raw

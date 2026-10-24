@@ -173,6 +173,50 @@ def sample_points_along_elements(
 
 
 # ---------------------------------------------------------------------------
+# Chainage ↔ map position (the profile/map hover link)
+# ---------------------------------------------------------------------------
+
+LOOKUP_MAX_POINTS = 6000
+LOOKUP_INTERVAL_RANGE = (2.0, 25.0)   # m
+
+
+def chainage_lookup(
+    elements: list,
+    work_epsg: int,
+    max_points: int = LOOKUP_MAX_POINTS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    ``(s, lat, lon)`` along the fitted centreline, dense enough for linear
+    interpolation to stay on the track: at most *max_points* samples, never
+    sparser than 25 m (a 300 m curve then sags 0.26 m between samples).
+
+    Built on the terrain sampler, so its ``s`` is the profile's own station
+    axis. One batched projection (see sample_points_along_elements).
+    """
+    els = elements or []
+    if not els:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    total = float(els[-1].get("sta_start", 0.0)) + float(els[-1].get("length", 0.0))
+    interval = float(np.clip(total / max(int(max_points), 1), *LOOKUP_INTERVAL_RANGE))
+    s, latlon = sample_points_along_elements(els, work_epsg, interval)
+    if len(s) == 0:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    ll = np.asarray(latlon, dtype=float)
+    return s, ll[:, 0].copy(), ll[:, 1].copy()
+
+
+def latlon_at_s(lookup, s: float) -> tuple[float, float] | None:
+    """WGS84 position at station *s* from a chainage_lookup() result,
+    clamped to the alignment's ends; None for an empty lookup."""
+    if lookup is None:
+        return None
+    ss, lat, lon = lookup
+    if len(ss) == 0:
+        return None
+    return (float(np.interp(s, ss, lat)), float(np.interp(s, ss, lon)))
+
+
+# ---------------------------------------------------------------------------
 # Direct connections (tunnels / bridges)
 # ---------------------------------------------------------------------------
 

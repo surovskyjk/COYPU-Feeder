@@ -42,6 +42,13 @@ Note the step *file names* do not match the 9-step UI numbering (`step6_stations
 - Terrain is sampled along the **fitted centreline** via `sample_points_along_elements` (one batched `projected_to_wgs84` call), not the raw OSM polyline. This is what puts `<Profile>` and `<CoordGeom>` on the same station axis; the export worker only re-samples the OSM polyline when no confirmed profile was handed to it.
 - Both smoothing methods share one PVI back end: `douglas_peucker(z_tol)` → `clamp_grades(max_grade)`. The window filter only adds a pre-filter stage — `<ProfAlign>` cannot take thousands of PVIs, so simplification always runs. `clamp_grades` averages a forward- and a backward-anchored sweep (the feasible set is convex, so the average is feasible *and* balanced), which makes it idempotent and end-symmetric.
 - `z_raw` carries `NaN` for DEM misses all the way into `.coypuf` (round-trips as the literal `nan` through `_pnt_list`/`_parse_pnt_list`); `rebuild_profile` bridges the gaps. Never bake a substitute 0 m into the stored samples.
+- The profile ↔ map hover link uses `chainage_lookup` (the same sampler, so the same station axis), cached in `App` and keyed on the `_elements` list object; it is armed only in `S_VERTICAL` (`_sync_profile_link`). `ProfileCanvas.set_cursor_station` (map → profile) never emits `hover_changed`, so the two directions cannot echo.
+
+The bottom row under the map is one `QStackedWidget` slot (`_detail_stack`) showing the element table, the Step 6 station table or the profile canvas — `_bottom_page(idx)` decides. Build it through `_make_bottom_splitter`: `setChildrenCollapsible(False)` must precede the first `setSizes`, or a pane given 0 px is flagged collapsed for good (how the profile used to start hidden).
+
+### Stations mirror COYPU's stop records
+
+`Station` (`src/geometry/stationing.py`) carries COYPU's stop-record fields (municipality, population, Os/Sp/Ex flags with Sp/Ex manual overrides), and `apply_pattern_rules` is a port of COYPU's `stops_model` rules — COYPU lives at `D:\MT\thesis-railway`. `write_stations_csv` writes COYPU's stops CSV (`CSV_COLUMNS`) and must stay importable by COYPU's `parseStopsCsv` without turning rule-derived flags into manual overrides; `tests/test_station_rules.py` checks both against COYPU's own module when that checkout exists. Municipality/population come from a separate lookup (`fetch_municipalities` = Overpass `is_in`, then `osm.wikidata.fetch_populations`, OSM `population` tag as fallback) so auto-detect never depends on it; rows the user typed (`info_manual`) are never overwritten.
 
 ### Geometry conventions
 

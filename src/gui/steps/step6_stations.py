@@ -2,9 +2,10 @@
 Step 6 — Stations & Stops.
 
 Estimates the chainage (km) of railway stations/stops along the fitted
-alignment and builds the list exported as a CSV next to the LandXML file
-(`Station,Dwell Time,Name`; km with 3 decimals, dwell in seconds, names
-unique).
+alignment and builds the list exported next to the LandXML file as COYPU's
+stops CSV (``stopName,stationingKm,dwellTimeS,municipalityName,population,
+stopInOs,stopInSp,stopInEx`` — see geometry.stationing), which COYPU's
+Stops dialog imports as-is.
 
 Three ways to add stations:
   • ⚡ Auto-detect — Overpass query for railway=station/halt +
@@ -12,6 +13,18 @@ Three ways to add stations:
   • 📍 Place on map — click the map, the point is snapped to the
     alignment and named via a prompt;
   • ＋ Add row — manual entry directly in the table.
+
+🏛 Fetch municipality & population is a separate lookup (Overpass is_in +
+Wikidata), so a missing or unreachable source never stands in the way of
+detecting the stations themselves. The population drives COYPU's Sp rule.
+
+The Os / Sp / Ex stopping patterns follow COYPU's rules (Os everywhere, Sp at
+the endpoints and in municipalities at or above the population threshold, Ex
+at the endpoints only); ticking Sp or Ex by hand overrides the rule — the
+cell is then marked ✎ in italics, as COYPU's Stops dialog shows it.
+
+The station table is too wide for the 340 px step column: the step builds it
+(``table_panel()``) and App shows it in the bottom row under the map.
 """
 
 from __future__ import annotations
@@ -19,7 +32,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QInputDialog, QMessageBox,
+    QInputDialog, QMessageBox, QGroupBox, QSpinBox, QCheckBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QColor
@@ -27,14 +40,32 @@ from PySide6.QtGui import QFont, QColor
 from gui import style_kit as sk
 from gui.style_kit import ThemedPanel
 from gui.theme import current_tokens
+from geometry.stationing import (
+    DEFAULT_SP_THRESHOLD, apply_pattern_rules, parse_population,
+    pattern_counts, reset_overrides,
+)
 
 
-COLS = ["Station [km]", "Dwell [s]", "Name", "Source", ""]
-COL_KM, COL_DWELL, COL_NAME, COL_SRC, COL_DEL = range(5)
+COLS = ["km", "Dwell [s]", "Name", "Municipality", "Population",
+        "Os", "Sp", "Ex", "Source", ""]
+(COL_KM, COL_DWELL, COL_NAME, COL_MUNI, COL_POP,
+ COL_OS, COL_SP, COL_EX, COL_SRC, COL_DEL) = range(len(COLS))
+_PATTERN_COLS = (COL_OS, COL_SP, COL_EX)
+
+_POP_SOURCE_TEXT = {
+    "wikidata": "Wikidata",
+    "osm":      "OSM population tag",
+    "manual":   "entered by hand",
+}
+
+
+def _thousands(n: int) -> str:
+    return f"{int(n):,}".replace(",", " ")
 
 
 class Step6Stations(ThemedPanel, QWidget):
     stations_changed     = Signal(list)   # list[Station] → map markers + export
+    stations_edited      = Signal()       # a user edit (→ project dirty)
     stations_done        = Signal(list)   # user clicked Next
     back_requested       = Signal()
     map_click_mode       = Signal(bool)   # arm/disarm crosshair on the map
@@ -47,9 +78,14 @@ class Step6Stations(ThemedPanel, QWidget):
         self._fallback_stops: list = []    # see prepare()
         self._work_epsg      = 32633
         self._worker         = None
+        self._info_worker    = None
+        self._info_targets: list = []      # stations the running lookup is for
         self._click_armed    = False
         self._populating     = False
+        self._sp_threshold   = DEFAULT_SP_THRESHOLD
+        self._sp_auto        = True
         self._build()
+        self._build_table_panel()
 
     # ------------------------------------------------------------------
     # Layout
@@ -60,14 +96,15 @@ class Step6Stations(ThemedPanel, QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        title = QLabel("Stations && Stops")
+        title = QLabel("Stations & Stops")
         self.bolded(title, 4)
         outer.addWidget(title)
 
         info = QLabel(
             "Chainages are measured along the fitted alignment — identical "
-            "to the LandXML stationing. The list is exported as a CSV "
-            "(Station,Dwell Time,Name) next to the LandXML file."
+            "to the LandXML stationing. The station table is in the panel "
+            "under the map; it is exported next to the LandXML as COYPU's "
+            "stops CSV (COYPU ▸ Stops ▸ Import CSV)."
         )
         self.themed(info, sk.muted_label)
         info.setWordWrap(True)
@@ -94,32 +131,36 @@ class Step6Stations(ThemedPanel, QWidget):
         self._add_btn = QPushButton("＋ Add row")
         self._add_btn.clicked.connect(self._on_add_row)
         btn_row.addWidget(self._add_btn)
+        outer.addLayout(btn_row)
+
+        btn_row2 = QHBoxLayout()
+        self._info_btn = QPushButton("🏛 Municipality && population")
+        self._info_btn.setToolTip(
+            "Look up the municipality each station lies in (OpenStreetMap\n"
+            "administrative boundaries) and its number of inhabitants\n"
+            "(Wikidata, or the OSM population tag when Wikidata has none).\n"
+            "Rows you edited by hand are left alone — clear their\n"
+            "municipality and population to have them looked up again."
+        )
+        self._info_btn.clicked.connect(self._on_fetch_info)
+        btn_row2.addWidget(self._info_btn)
 
         self._csv_btn = QPushButton("💾 Export CSV…")
         self._csv_btn.setToolTip(
-            "Save the station list as a CSV file now\n"
-            "(it is also written automatically next to the LandXML in Step 8)."
+            "Save the station list as COYPU's stops CSV now\n"
+            "(it is also written automatically next to the LandXML in Step 9)."
         )
         self._csv_btn.clicked.connect(self._on_export_csv)
-        btn_row.addWidget(self._csv_btn)
-        outer.addLayout(btn_row)
+        btn_row2.addWidget(self._csv_btn)
+        outer.addLayout(btn_row2)
 
         self._status_lbl = QLabel("")
         self.themed(self._status_lbl, sk.muted_label)
         self._status_lbl.setWordWrap(True)
         outer.addWidget(self._status_lbl)
 
-        self._table = QTableWidget(0, len(COLS))
-        self._table.setHorizontalHeaderLabels(COLS)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        self._table.setStyleSheet("font-size: 10px;")
-        self._table.cellChanged.connect(self._on_cell_changed)
-        outer.addWidget(self._table, stretch=1)
+        outer.addWidget(self._build_patterns_box())
+        outer.addStretch(1)
 
         nav_row = QHBoxLayout()
         self._back_btn = QPushButton("← Back")
@@ -133,6 +174,105 @@ class Step6Stations(ThemedPanel, QWidget):
         self._next_btn.clicked.connect(self._on_next)
         nav_row.addWidget(self._next_btn)
         outer.addLayout(nav_row)
+
+    def _build_patterns_box(self) -> QGroupBox:
+        box = QGroupBox("Stopping patterns (COYPU)")
+        box.setStyleSheet("QGroupBox { font-weight:600; }")
+        g = QVBoxLayout(box)
+        g.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel("Sp threshold:")
+        lbl.setStyleSheet("font-size: 11px;")
+        row.addWidget(lbl)
+        self._threshold_spin = QSpinBox()
+        self._threshold_spin.setRange(0, 10_000_000)
+        self._threshold_spin.setSingleStep(100)
+        self._threshold_spin.setGroupSeparatorShown(True)
+        self._threshold_spin.setSuffix(" inh.")
+        self._threshold_spin.setKeyboardTracking(False)
+        self._threshold_spin.setValue(self._sp_threshold)
+        self._threshold_spin.setToolTip(
+            "Municipalities with at least this many inhabitants get a stop\n"
+            "in the Sp pattern (the line endpoints always do).")
+        self._threshold_spin.valueChanged.connect(self._on_threshold_changed)
+        row.addWidget(self._threshold_spin)
+        self._auto_check = QCheckBox("Automatic")
+        self._auto_check.setChecked(self._sp_auto)
+        self._auto_check.setToolTip(
+            "On: Sp follows the population rule (except manual overrides).\n"
+            "Off: Sp is set by hand only.")
+        self._auto_check.toggled.connect(self._on_auto_toggled)
+        row.addWidget(self._auto_check)
+        row.addStretch()
+        g.addLayout(row)
+
+        row2 = QHBoxLayout()
+        self._reset_btn = QPushButton("Reset overrides")
+        self._reset_btn.setToolTip(
+            "Clear every hand-set Sp and Ex tick and apply the rules again.")
+        self._reset_btn.clicked.connect(self._on_reset_overrides)
+        row2.addWidget(self._reset_btn)
+        self._counts_lbl = QLabel("")
+        self.themed(self._counts_lbl, sk.value_label)
+        row2.addWidget(self._counts_lbl)
+        row2.addStretch()
+        g.addLayout(row2)
+
+        hint = QLabel(
+            "Os stops everywhere. Sp stops at both ends and in municipalities "
+            "at or above the threshold. Ex stops at both ends only. Tick Sp "
+            "or Ex in the table to override the rule (marked ✎)."
+        )
+        hint.setWordWrap(True)
+        self.themed(hint, sk.muted_label)
+        g.addWidget(hint)
+        return box
+
+    def _build_table_panel(self):
+        """The station table and its caption, shown by App in the bottom
+        row (it is not part of this panel's own layout)."""
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(6, 4, 6, 4)
+        v.setSpacing(4)
+
+        head = QHBoxLayout()
+        cap = QLabel("Stations & stops")
+        self.bolded(cap, 1)
+        head.addWidget(cap)
+        self._table_counts_lbl = QLabel("")
+        self.themed(self._table_counts_lbl, sk.muted_label)
+        head.addWidget(self._table_counts_lbl)
+        head.addStretch()
+        v.addLayout(head)
+
+        self._table = QTableWidget(0, len(COLS))
+        self._table.setHorizontalHeaderLabels(COLS)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(COL_MUNI, QHeaderView.ResizeMode.Stretch)
+        for col, tip in ((COL_OS, "Os — local trains stop here"),
+                         (COL_SP, "Sp — semi-fast trains stop here"),
+                         (COL_EX, "Ex — express trains stop here")):
+            self._table.horizontalHeaderItem(col).setToolTip(tip)
+        self._table.setStyleSheet("font-size: 10px;")
+        self._table.cellChanged.connect(self._on_cell_changed)
+        v.addWidget(self._table, stretch=1)
+        self._table_panel = panel
+
+    def table_panel(self) -> QWidget:
+        return self._table_panel
+
+    def applyTheme(self, isDark=None, tokens: dict | None = None):
+        super().applyTheme(isDark, tokens)
+        # The Source column is tinted from the tokens when it is filled.
+        self._populate()
 
     # ------------------------------------------------------------------
     # Public API
@@ -154,8 +294,7 @@ class Step6Stations(ThemedPanel, QWidget):
         if self._stations:
             from geometry.stationing import snap_stations
             snap_stations(self._stations, elements, work_epsg)
-        self._populate()
-        self._emit_changed()
+        self._sort_and_refresh(edited=False)
         self._status_lbl.setText(
             f"{len(self._stations)} station(s). Auto-detect, click the map, "
             "or add rows manually.")
@@ -163,18 +302,29 @@ class Step6Stations(ThemedPanel, QWidget):
     def stations(self) -> list:
         return list(self._stations)
 
+    def rule_settings(self) -> dict:
+        """The Sp rule settings, persisted with the project."""
+        return {"sp_threshold": int(self._sp_threshold),
+                "sp_auto": bool(self._sp_auto)}
+
     def reset(self):
         """Clear all stations (start-over)."""
         self._stations.clear()
         self._fallback_stops = []
+        self._set_rule_settings(DEFAULT_SP_THRESHOLD, True)
         self._populate()
+        self._update_counts()
         self._status_lbl.setText("")
         self._status_lbl.setToolTip("")
 
-    def set_stations(self, stations: list):
+    def set_stations(self, stations: list, rules: dict | None = None):
         """Replace the station list (e.g. when a project is opened)."""
+        rules = rules or {}
+        self._set_rule_settings(
+            int(rules.get("sp_threshold", DEFAULT_SP_THRESHOLD)),
+            bool(rules.get("sp_auto", True)))
         self._stations = list(stations or [])
-        self._sort_and_refresh()
+        self._sort_and_refresh(edited=False)
         self._status_lbl.setText(f"{len(self._stations)} station(s) loaded.")
 
     def on_map_clicked(self, lat: float, lon: float):
@@ -221,16 +371,23 @@ class Step6Stations(ThemedPanel, QWidget):
 
     def _on_auto_result(self, found: list, note: str = ""):
         self._auto_btn.setEnabled(True)
-        existing = {s.name for s in self._stations}
+        existing = {s.name: s for s in self._stations}
         added = 0
         for st in found:
-            if st.name not in existing:
+            cur = existing.get(st.name)
+            if cur is None:
                 self._stations.append(st)
-                existing.add(st.name)
+                existing[st.name] = st
                 added += 1
+            elif cur.osm_id is None and st.osm_id is not None:
+                # A station typed in by hand gains its OSM identity.
+                cur.osm_id, cur.kind = st.osm_id, st.kind
         self._sort_and_refresh()
         msg = (f"Auto-detect: {added} new station(s) added "
                f"({len(found) - added} already present).")
+        if added:
+            msg += (" Use 🏛 Municipality & population to fill in where "
+                    "they lie — the population drives the Sp rule.")
         self._status_lbl.setText(f"⚠ {note}\n{msg}" if note else msg)
 
     def _on_auto_failed(self, msg: str):
@@ -239,6 +396,102 @@ class Step6Stations(ThemedPanel, QWidget):
         self._status_lbl.setText(f"⚠ Auto-detect failed: {lines[0] if lines else msg}")
         # Per-server detail (or a traceback) stays one hover away.
         self._status_lbl.setToolTip(msg if len(lines) > 1 else "")
+
+    # ------------------------------------------------------------------
+    # Municipality & population lookup
+    # ------------------------------------------------------------------
+
+    def _on_fetch_info(self):
+        from gui.worker import StationInfoWorker
+        targets = [s for s in self._stations
+                   if s.latlon and (s.latlon[0] or s.latlon[1])]
+        if not targets:
+            self._status_lbl.setText(
+                "No stations to look up — auto-detect or add stations first.")
+            return
+        self._info_btn.setEnabled(False)
+        self._info_targets = targets
+        self._status_lbl.setText("Looking up municipalities…")
+        self._status_lbl.setToolTip("")
+        self._info_worker = StationInfoWorker(
+            [s.latlon for s in targets], parent=self)
+        self._info_worker.status_update.connect(self._status_lbl.setText)
+        self._info_worker.info_ready.connect(self._on_info_result)
+        self._info_worker.failed.connect(self._on_info_failed)
+        self._info_worker.start()
+
+    def _on_info_result(self, results: list, note: str = ""):
+        self._info_btn.setEnabled(True)
+        # Stations deleted while the lookup ran are skipped; rows edited by
+        # hand keep what the user typed.
+        alive = {id(s) for s in self._stations}
+        updated = kept = missing = 0
+        for s, info in zip(self._info_targets, results):
+            if id(s) not in alive:
+                continue
+            if s.info_manual:
+                kept += 1
+                continue
+            if info is None:
+                missing += 1
+                continue
+            s.municipality      = info.get("municipality") or ""
+            s.population        = info.get("population")
+            s.population_year   = info.get("population_year")
+            s.population_source = info.get("population_source") or ""
+            updated += 1
+        self._info_targets = []
+        self._sort_and_refresh(edited=updated > 0)
+        msg = f"Municipality lookup: {updated} updated"
+        if kept:
+            msg += f" · {kept} kept (edited by hand)"
+        if missing:
+            msg += f" · {missing} not found"
+        self._status_lbl.setText(f"⚠ {note}\n{msg}" if note else msg)
+
+    def _on_info_failed(self, msg: str):
+        self._info_btn.setEnabled(True)
+        self._info_targets = []
+        lines = msg.splitlines()
+        self._status_lbl.setText(
+            f"⚠ Municipality lookup failed: {lines[0] if lines else msg}")
+        self._status_lbl.setToolTip(msg if len(lines) > 1 else "")
+
+    # ------------------------------------------------------------------
+    # Stopping-pattern rules
+    # ------------------------------------------------------------------
+
+    def _set_rule_settings(self, threshold: int, auto: bool):
+        self._sp_threshold = int(threshold)
+        self._sp_auto = bool(auto)
+        for w, setter, value in ((self._threshold_spin, "setValue", self._sp_threshold),
+                                 (self._auto_check, "setChecked", self._sp_auto)):
+            w.blockSignals(True)
+            getattr(w, setter)(value)
+            w.blockSignals(False)
+        self._threshold_spin.setEnabled(self._sp_auto)
+        self._reset_btn.setEnabled(self._sp_auto)
+
+    def _on_threshold_changed(self, value: int):
+        self._sp_threshold = int(value)
+        self._sort_and_refresh()
+
+    def _on_auto_toggled(self, on: bool):
+        self._sp_auto = bool(on)
+        self._threshold_spin.setEnabled(on)
+        self._reset_btn.setEnabled(on)
+        self._sort_and_refresh()
+
+    def _on_reset_overrides(self):
+        reset_overrides(self._stations, self._sp_threshold)
+        self._sort_and_refresh()
+
+    def _update_counts(self):
+        c = pattern_counts(self._stations)
+        text = f"Os {c['Os']} · Sp {c['Sp']} · Ex {c['Ex']}"
+        self._counts_lbl.setText(text)
+        self._table_counts_lbl.setText(
+            f"{len(self._stations)} station(s) · {text}" if self._stations else "")
 
     # ------------------------------------------------------------------
     # Manual placement / rows
@@ -285,7 +538,8 @@ class Step6Stations(ThemedPanel, QWidget):
             return
         try:
             n = write_stations_csv(self._stations, path)
-            self._status_lbl.setText(f"✓ {n} station(s) written to {path}")
+            self._status_lbl.setText(
+                f"✓ {n} station(s) written to {path} (COYPU stops CSV)")
         except Exception as exc:
             QMessageBox.warning(self, "Export failed", str(exc))
 
@@ -304,26 +558,53 @@ class Step6Stations(ThemedPanel, QWidget):
     def _populate(self):
         self._populating = True
         try:
+            muted = QColor(current_tokens()["disabledText"])
+            italic = QFont()
+            italic.setItalic(True)
             self._table.setRowCount(0)
             for i, s in enumerate(self._stations):
                 row = self._table.rowCount()
                 self._table.insertRow(row)
+                right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
                 km = QTableWidgetItem(f"{s.chainage_m / 1000.0:.3f}")
-                km.setTextAlignment(Qt.AlignmentFlag.AlignRight
-                                    | Qt.AlignmentFlag.AlignVCenter)
+                km.setTextAlignment(right)
                 self._table.setItem(row, COL_KM, km)
 
                 dw = QTableWidgetItem(str(int(s.dwell_s)))
-                dw.setTextAlignment(Qt.AlignmentFlag.AlignRight
-                                    | Qt.AlignmentFlag.AlignVCenter)
+                dw.setTextAlignment(right)
                 self._table.setItem(row, COL_DWELL, dw)
 
                 self._table.setItem(row, COL_NAME, QTableWidgetItem(s.name))
+                self._table.setItem(row, COL_MUNI, QTableWidgetItem(s.municipality))
 
-                src = QTableWidgetItem(s.source)
+                pop = QTableWidgetItem(
+                    "" if s.population is None else _thousands(s.population))
+                pop.setTextAlignment(right)
+                pop.setToolTip(self._population_tip(s))
+                self._table.setItem(row, COL_POP, pop)
+
+                for col, on, manual in ((COL_OS, s.stop_os, False),
+                                        (COL_SP, s.stop_sp, s.sp_manual),
+                                        (COL_EX, s.stop_ex, s.ex_manual)):
+                    it = QTableWidgetItem("")
+                    it.setFlags(Qt.ItemFlag.ItemIsUserCheckable
+                                | Qt.ItemFlag.ItemIsEnabled
+                                | Qt.ItemFlag.ItemIsSelectable)
+                    it.setCheckState(Qt.CheckState.Checked if on
+                                     else Qt.CheckState.Unchecked)
+                    if manual:
+                        it.setFont(italic)
+                        it.setText("✎")
+                        it.setToolTip("Set by hand — 'Reset overrides' "
+                                      "returns it to the rule.")
+                    self._table.setItem(row, col, it)
+
+                src_text = s.source + (f" · {s.kind}" if s.kind else "")
+                src = QTableWidgetItem(src_text)
                 src.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-                src.setForeground(QColor(current_tokens()["disabledText"]))
+                src.setForeground(muted)
+                src.setToolTip(self._source_tip(s))
                 self._table.setItem(row, COL_SRC, src)
 
                 btn = QPushButton("✕")
@@ -334,11 +615,41 @@ class Step6Stations(ThemedPanel, QWidget):
         finally:
             self._populating = False
 
+    @staticmethod
+    def _population_tip(s) -> str:
+        if s.population is None:
+            return ("Unknown — 🏛 Municipality & population looks it up; "
+                    "a stop without a population is not in Sp by the rule.")
+        bits = [b for b in (str(s.population_year) if s.population_year else "",
+                            _POP_SOURCE_TEXT.get(s.population_source, ""))
+                if b]
+        return _thousands(s.population) + (f" ({', '.join(bits)})" if bits else "")
+
+    @staticmethod
+    def _source_tip(s) -> str:
+        parts = ["Auto-detected" if s.source == "auto" else "Added by hand"]
+        if s.kind:
+            parts.append(f"OSM {s.kind}"
+                         + (f" (node {s.osm_id})" if s.osm_id is not None else ""))
+        parts.append(f"{s.dist_m:.0f} m from the alignment")
+        return " · ".join(parts)
+
     def _on_cell_changed(self, row: int, col: int):
         if self._populating or row >= len(self._stations):
             return
         s = self._stations[row]
-        text = (self._table.item(row, col).text() or "").strip()
+        item = self._table.item(row, col)
+        if col in _PATTERN_COLS:
+            on = item.checkState() == Qt.CheckState.Checked
+            if col == COL_OS:
+                s.stop_os = on
+            elif col == COL_SP:
+                s.stop_sp, s.sp_manual = on, True
+            else:
+                s.stop_ex, s.ex_manual = on, True
+            self._sort_and_refresh()
+            return
+        text = (item.text() or "").strip()
         if col == COL_KM:
             try:
                 s.chainage_m = max(0.0, float(text.replace(",", ".")) * 1000.0)
@@ -350,8 +661,6 @@ class Step6Stations(ThemedPanel, QWidget):
                     s.latlon = ll
             except ValueError:
                 pass
-            self._sort_and_refresh()
-            return
         elif col == COL_DWELL:
             try:
                 s.dwell_s = max(0, int(float(text.replace(",", "."))))
@@ -364,18 +673,34 @@ class Step6Stations(ThemedPanel, QWidget):
                                         f"'{text}' already exists.")
                 else:
                     s.name = text
-        self._populate()
-        self._emit_changed()
+        elif col == COL_MUNI:
+            s.municipality = text
+            s.info_manual = bool(s.municipality or s.population is not None)
+        elif col == COL_POP:
+            pop = parse_population(text)
+            if pop is not None or not text:
+                s.population = pop
+                s.population_year = None
+                s.population_source = "manual" if pop is not None else ""
+                s.info_manual = bool(s.municipality or s.population is not None)
+        self._sort_and_refresh()
 
     def _on_delete(self, idx: int):
         if 0 <= idx < len(self._stations):
             del self._stations[idx]
             self._sort_and_refresh()
 
-    def _sort_and_refresh(self):
+    def _sort_and_refresh(self, edited: bool = True):
+        """Sort by chainage, re-apply the stopping-pattern rules (the
+        endpoints or a population may have changed), redraw, and announce
+        the change; *edited* marks it as the user's (→ project dirty)."""
         self._stations.sort(key=lambda s: s.chainage_m)
+        apply_pattern_rules(self._stations, self._sp_threshold, self._sp_auto)
         self._populate()
+        self._update_counts()
         self._emit_changed()
+        if edited:
+            self.stations_edited.emit()
 
     # ------------------------------------------------------------------
     # Signals out

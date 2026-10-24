@@ -347,7 +347,8 @@ class StationDetectWorker(QThread):
             self.status_update.emit(f"{len(raw)} candidate nodes — snapping to alignment…")
 
             stations = [
-                Station(name=r["name"], latlon=(r["lat"], r["lon"]), source="auto")
+                Station(name=r["name"], latlon=(r["lat"], r["lon"]), source="auto",
+                        osm_id=r.get("id"), kind=r.get("kind", ""))
                 for r in raw
             ]
             snap_stations(stations, self._elements, self._work_epsg)
@@ -355,6 +356,71 @@ class StationDetectWorker(QThread):
             unique = dedupe_by_name(near)
             self.status_update.emit(f"{len(unique)} stations on this alignment.")
             self.stations_ready.emit(unique, note)
+        except Exception as exc:
+            import traceback
+            import requests
+            if isinstance(exc, (OverpassUnavailable,
+                                requests.exceptions.RequestException)):
+                self.failed.emit(friendly_error(exc))
+            else:
+                self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+
+
+# ---------------------------------------------------------------------------
+# Station municipality / population lookup worker
+# ---------------------------------------------------------------------------
+
+class StationInfoWorker(QThread):
+    """
+    Look up the municipality each station lies in (Overpass is_in) and the
+    municipality's population (Wikidata P1082, falling back to the OSM
+    population tag).
+
+    The input is a snapshot of (lat, lon) positions — the worker never
+    touches Station objects; Step 6 applies the results on the GUI thread.
+
+    Emits info_ready(list, note): one entry per position — None when no
+    municipality was found, else {"municipality", "population",
+    "population_year", "population_source"}; note is "" unless some
+    populations had to fall back to OSM.
+    """
+    info_ready    = Signal(list, str)
+    status_update = Signal(str)
+    failed        = Signal(str)
+
+    def __init__(self, points: list, parent=None):
+        super().__init__(parent)
+        self._points = [(float(lat), float(lon)) for lat, lon in points]
+
+    def run(self):
+        from osm.query import (
+            fetch_municipalities, OverpassUnavailable, friendly_error,
+        )
+        try:
+            from osm.wikidata import fetch_populations
+            cb = lambda msg: self.status_update.emit(msg)
+            found = fetch_municipalities(self._points, progress_cb=cb)
+            pops, failed = fetch_populations(
+                [m["wikidata"] for m in found if m], progress_cb=cb)
+            results = []
+            for m in found:
+                if m is None:
+                    results.append(None)
+                    continue
+                wd = pops.get(m["wikidata"])
+                if wd is not None:
+                    pop, year, src = wd[0], wd[1], "wikidata"
+                elif m["population"] is not None:
+                    pop, year, src = m["population"], m["population_year"], "osm"
+                else:
+                    pop, year, src = None, None, ""
+                results.append({"municipality": m["name"], "population": pop,
+                                "population_year": year,
+                                "population_source": src})
+            note = (f"Wikidata did not answer for {failed} municipalit"
+                    f"{'y' if failed == 1 else 'ies'} — OSM population tags "
+                    "used there (may be outdated).") if failed else ""
+            self.info_ready.emit(results, note)
         except Exception as exc:
             import traceback
             import requests
@@ -588,7 +654,7 @@ class FinalExportWorker(QThread):
         self.stage_changed.emit("Writing file…")
         write_landxml(root, self._filepath)
 
-        # ── Stations CSV (Station,Dwell Time,Name) next to the LandXML ──────
+        # ── Stations next to the LandXML, as COYPU's stops CSV ────────────
         if self._stations:
             import os
             from geometry.stationing import write_stations_csv, snap_stations

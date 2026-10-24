@@ -86,6 +86,7 @@ hidden_imports = [
     "gui.steps.step7_export",
     "gui.steps._widgets",
     "osm.query",
+    "osm.wikidata",
     "osm.parser",
     "geometry.alignment",
     "geometry.candidates",

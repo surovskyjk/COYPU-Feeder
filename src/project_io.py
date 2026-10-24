@@ -23,8 +23,9 @@ import numpy as np
 from lxml import etree
 
 import app_meta as meta
+from geometry.stationing import DEFAULT_SP_THRESHOLD
 
-FILE_VERSION = "2.0"   # 1.1 added PI/@chainNext (legacy, read-only now);
+FILE_VERSION = "2.1"   # 1.1 added PI/@chainNext (legacy, read-only now);
                         # 1.2 adds PI/@mergedTurn (single-PI reflex merges);
                         # 1.3 merged wizard steps 5 (Refine) and 6
                         # (Consolidate) into one 8-step workflow — Project/
@@ -33,7 +34,10 @@ FILE_VERSION = "2.0"   # 1.1 added PI/@chainNext (legacy, read-only now);
                         # 2.0 inserts wizard step 8 "Vertical Profile" before
                         # Export (9 steps) and adds the optional
                         # <VerticalProfile> block. @step from a 1.3-era file
-                        # remaps 7 (Export) → 8.
+                        # remaps 7 (Export) → 8;
+                        # 2.1 adds the station municipality / population,
+                        # the COYPU Os/Sp/Ex stopping patterns and the Sp
+                        # rule settings (<Stations spThreshold spAuto>).
 
 # Highest valid wizard step index. Must stay equal to gui.app.N_STEPS - 1;
 # project_io deliberately does not import the GUI (it is used headless), so
@@ -72,6 +76,14 @@ def _b(value: bool) -> str:
 
 def _pb(text: str | None) -> bool:
     return str(text).lower() == "true"
+
+
+def _opt_int(text: str | None) -> int | None:
+    """Optional integer attribute: absent or unreadable ⇒ None."""
+    try:
+        return int(text) if text not in (None, "") else None
+    except ValueError:
+        return None
 
 
 def _parse_version(v: str) -> tuple[int, int]:
@@ -115,7 +127,7 @@ def save_project(filepath: str, state: dict) -> None:
 
     `state` keys (all optional except work_epsg):
       project_name, work_epsg, level, step, settings, tracks,
-      selected_indices, pi_model, stations
+      selected_indices, pi_model, stations, station_rules, profile
     """
     root = etree.Element("CoypuProject")
     root.set("version", FILE_VERSION)
@@ -197,6 +209,9 @@ def save_project(filepath: str, state: dict) -> None:
     # ── Stations ─────────────────────────────────────────────────────────
     sts = state.get("stations") or []
     se = etree.SubElement(root, "Stations")
+    rules = state.get("station_rules") or {}
+    se.set("spThreshold", str(int(rules.get("sp_threshold", DEFAULT_SP_THRESHOLD))))
+    se.set("spAuto", _b(rules.get("sp_auto", True)))
     for s in sts:
         e = etree.SubElement(se, "Station")
         e.set("name", s.name or "")
@@ -205,6 +220,25 @@ def save_project(filepath: str, state: dict) -> None:
         e.set("chainage", NUM.format(float(s.chainage_m)))
         e.set("dwell", str(int(s.dwell_s)))
         e.set("source", s.source or "manual")
+        # 2.1 — optional values are omitted rather than written empty
+        if s.osm_id is not None:
+            e.set("osmId", str(int(s.osm_id)))
+        if s.kind:
+            e.set("kind", s.kind)
+        if s.municipality:
+            e.set("municipality", s.municipality)
+        if s.population is not None:
+            e.set("population", str(int(s.population)))
+        if s.population_year is not None:
+            e.set("populationYear", str(int(s.population_year)))
+        if s.population_source:
+            e.set("populationSource", s.population_source)
+        e.set("infoManual", _b(s.info_manual))
+        e.set("os", _b(s.stop_os))
+        e.set("sp", _b(s.stop_sp))
+        e.set("ex", _b(s.stop_ex))
+        e.set("spManual", _b(s.sp_manual))
+        e.set("exManual", _b(s.ex_manual))
 
     # ── Vertical profile (format 2.0; absent in older files) ─────────────
     # Only the DEM samples, the smoothing configuration and the manual
@@ -368,7 +402,8 @@ def load_project(filepath: str) -> dict:
     state["pi_model"] = model
     state["elements"] = list(model.elements) if model is not None else []
 
-    # Stations
+    # Stations. A pre-2.1 file has no pattern flags: every stop loads in Os
+    # with no overrides, and the step applies the Sp/Ex rules on load.
     stations: list = []
     for e in root.findall("Stations/Station"):
         stations.append(Station(
@@ -377,8 +412,26 @@ def load_project(filepath: str) -> dict:
             chainage_m=float(e.get("chainage", "0")),
             dwell_s=int(e.get("dwell", "30")),
             source=e.get("source", "manual"),
+            osm_id=_opt_int(e.get("osmId")),
+            kind=e.get("kind", ""),
+            municipality=e.get("municipality", ""),
+            population=_opt_int(e.get("population")),
+            population_year=_opt_int(e.get("populationYear")),
+            population_source=e.get("populationSource", ""),
+            info_manual=_pb(e.get("infoManual", "false")),
+            stop_os=_pb(e.get("os", "true")),
+            stop_sp=_pb(e.get("sp", "false")),
+            stop_ex=_pb(e.get("ex", "false")),
+            sp_manual=_pb(e.get("spManual", "false")),
+            ex_manual=_pb(e.get("exManual", "false")),
         ))
     state["stations"] = stations
+    se = root.find("Stations")
+    threshold = _opt_int(se.get("spThreshold")) if se is not None else None
+    state["station_rules"] = {
+        "sp_threshold": DEFAULT_SP_THRESHOLD if threshold is None else threshold,
+        "sp_auto": _pb(se.get("spAuto", "true") if se is not None else "true"),
+    }
 
     # Vertical profile — absent in every file older than format 2.0, in which
     # case the step builds a fresh default from the live geometry.
